@@ -63,10 +63,14 @@ class OnPolicyLogger(BaseTrainingLogger):
         reward_components: dict[str, float] | None = None,
         collect_time: float = 0.0,
         train_time: float = 0.0,
+        iteration_time: float | None = None,
+        collect_label: str = "Collect",
     ):
         self._iteration = iteration
         self._collect_time = collect_time
         self._train_time = train_time
+        self._iteration_time = iteration_time
+        self._collect_label = collect_label
 
         if metrics:
             self._latest_metrics.update(metrics)
@@ -99,6 +103,8 @@ class OnPolicyLogger(BaseTrainingLogger):
                 w.add_scalar("episode/length", self._mean_ep_length, iteration)
             w.add_scalar("perf/collect_time_ms", self._collect_time * 1000, iteration)
             w.add_scalar("perf/train_time_ms", self._train_time * 1000, iteration)
+            if self._iteration_time is not None:
+                w.add_scalar("perf/iteration_time_ms", self._iteration_time * 1000, iteration)
 
         if self._wandb_run:
             wandb = _load_wandb()
@@ -118,6 +124,8 @@ class OnPolicyLogger(BaseTrainingLogger):
                 log_dict["episode/length"] = self._mean_ep_length
             log_dict["perf/collect_time_ms"] = self._collect_time * 1000
             log_dict["perf/train_time_ms"] = self._train_time * 1000
+            if self._iteration_time is not None:
+                log_dict["perf/iteration_time_ms"] = self._iteration_time * 1000
             wandb.log(log_dict, step=iteration)
 
     def _build_display(self) -> Panel:
@@ -190,7 +198,7 @@ class OnPolicyLogger(BaseTrainingLogger):
         table.add_column("System", style="white", ratio=2, no_wrap=True)
         table.add_column("Value", style="yellow", justify="right", ratio=1, no_wrap=True)
 
-        iter_time = self._collect_time + self._train_time
+        iter_time = self._iteration_time or (self._collect_time + self._train_time)
         fps = int(self.num_envs * self.num_steps / max(iter_time, 1e-8)) if iter_time > 0 else 0
 
         learner_items = [
@@ -198,7 +206,7 @@ class OnPolicyLogger(BaseTrainingLogger):
             ("Iter Time", f"{iter_time * 1000:.1f}ms"),
         ]
         collector_items = [
-            ("Collect", f"{self._collect_time * 1000:.1f}ms"),
+            (self._collect_label, f"{self._collect_time * 1000:.1f}ms"),
         ]
         system_items = [
             ("Envs", f"{self.num_envs:,}"),
@@ -223,7 +231,7 @@ class OnPolicyLogger(BaseTrainingLogger):
         include_status: bool,
         extra_fields: list[tuple[str, str]] | None = None,
     ) -> Text:
-        iter_time = self._collect_time + self._train_time
+        iter_time = self._iteration_time or (self._collect_time + self._train_time)
         header_extra_fields: list[tuple[str, str]] = []
         if iter_time > 0:
             steps_per_second = self.num_envs * self.num_steps / iter_time

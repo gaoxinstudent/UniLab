@@ -173,6 +173,42 @@ def test_onpolicy_logger_uses_offpolicy_terminal_layout():
     logger.close()
 
 
+def test_onpolicy_logger_uses_explicit_iteration_time_for_async_display():
+    logger = OnPolicyLogger(
+        algo_name="Async RSL-RL PPO",
+        env_name="Go2JoystickFlat",
+        max_iterations=10,
+        num_envs=4,
+        num_steps=8,
+        log_backend="no_print",
+    )
+    logger.start()
+    logger.log_step(
+        iteration=1,
+        metrics={},
+        reward=3.0,
+        reward_components={"tracking_lin_vel": 1.25, "action_rate": -0.5},
+        collect_time=0.1,
+        train_time=0.1,
+        iteration_time=0.04,
+        collect_label="Wait Rollout",
+    )
+
+    console = Console(record=True, width=120)
+    console.print(logger._build_display())
+    output = console.export_text()
+
+    assert "Iter Time" in output
+    assert "40.0ms" in output
+    assert "200.0ms" not in output
+    assert "Steps/s 800" in output
+    assert "Wait Rollout" in output
+    assert "tracking lin vel" in output
+    assert "action rate" in output
+
+    logger.close()
+
+
 def test_build_wandb_settings_defaults_for_shared_workspace():
     settings = build_wandb_settings(
         {"wandb_project": "unilab"},

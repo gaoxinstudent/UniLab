@@ -99,7 +99,9 @@ class BaseTrainingLogger:
         self._latest_metrics: dict[str, float] = {}
         self._latest_reward_components: dict[str, float] = {}
         self._collect_time: float = 0.0
+        self._collect_label: str = "Collect"
         self._train_time: float = 0.0
+        self._iteration_time: float | None = None
         self._mean_ep_length: float = 0.0
         self._last_save: str = ""
         self._status: str = ""

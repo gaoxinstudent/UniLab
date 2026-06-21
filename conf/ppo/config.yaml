@@ -55,6 +55,12 @@ algo:
     disable_finite_checks: true
 
 training:
+  async: false
+  collector_device: null
+  async_queue_size: 1
+  async_policy_lag_max: 1
+  async_stale_rollout_policy: block
+  async_strict_onpolicy: true
   task_name: Go1JoystickFlat
   device: null
   logger: tensorboard

@@ -77,6 +77,61 @@ def test_macos_motrix_train_no_play_uses_current_python(
     assert command[0] == sys.executable
 
 
+def test_ppo_async_flag_generates_training_async_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_minimal_checkout(tmp_path)
+    _pretend_motrix_is_installed(monkeypatch)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+
+    command = cli.build_command(
+        mode="train",
+        algo="ppo",
+        task="go2_joystick_flat",
+        sim="motrix",
+        overrides=["training.no_play=true"],
+        async_training=True,
+        root=tmp_path,
+    )
+
+    assert "training.async=true" in command
+    assert command.index("training.async=true") < command.index("training.no_play=true")
+
+
+def test_async_flag_is_ppo_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_minimal_checkout(tmp_path, algo="appo")
+    _pretend_motrix_is_installed(monkeypatch)
+
+    with pytest.raises(SystemExit, match="--algo ppo"):
+        cli.build_command(
+            mode="train",
+            algo="appo",
+            task="go2_joystick_flat",
+            sim="motrix",
+            overrides=[],
+            async_training=True,
+            root=tmp_path,
+        )
+
+
+def test_async_flag_rejects_duplicate_hydra_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_minimal_checkout(tmp_path)
+    _pretend_motrix_is_installed(monkeypatch)
+
+    with pytest.raises(SystemExit, match="training.async"):
+        cli.build_command(
+            mode="train",
+            algo="ppo",
+            task="go2_joystick_flat",
+            sim="motrix",
+            overrides=["training.async=false"],
+            async_training=True,
+            root=tmp_path,
+        )
+
+
 def test_macos_motrix_finds_uv_venv_mxpython_when_not_on_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

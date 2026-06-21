@@ -2732,6 +2732,28 @@ def test_train_rsl_rl_record_play_uses_backend_plan(
     assert captured["output_video"] == run_dir / "play_video.mp4"
 
 
+def test_train_rsl_rl_async_log_dir_suffix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    mod = _train_rsl_rl(monkeypatch)
+    cfg = _ppo_cfg(["task=go2_joystick_flat/motrix", "training.async=true"])
+    monkeypatch.setattr(mod, "_get_log_root", lambda _cfg: str(tmp_path / "logs" / "rsl_rl_ppo"))
+
+    log_dir = mod._build_ppo_log_dir(cfg, timestamp="2026-06-21_18-00-00")
+
+    assert log_dir.endswith("/Go2JoystickFlat/2026-06-21_18-00-00_motrix_async")
+
+
+def test_train_rsl_rl_sync_log_dir_suffix_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    mod = _train_rsl_rl(monkeypatch)
+    cfg = _ppo_cfg(["task=go2_joystick_flat/motrix"])
+    monkeypatch.setattr(mod, "_get_log_root", lambda _cfg: str(tmp_path / "logs" / "rsl_rl_ppo"))
+
+    log_dir = mod._build_ppo_log_dir(cfg, timestamp="2026-06-21_18-00-00")
+
+    assert log_dir.endswith("/Go2JoystickFlat/2026-06-21_18-00-00_motrix")
+
+
 def test_train_appo_get_log_root_uses_algo_log_name(monkeypatch: pytest.MonkeyPatch):
     """Verify APPO _get_log_root uses algo.algo_log_name (issue #168)."""
     monkeypatch.delenv("UNILAB_TEST_LOG_ROOT", raising=False)

@@ -216,6 +216,7 @@ def build_command(
     task: str,
     sim: str,
     overrides: Sequence[str],
+    async_training: bool = False,
     profile: str | None = None,
     load_run: str | None = None,
     render_mode: str | None = None,
@@ -227,6 +228,10 @@ def build_command(
     _check_profile(profile)
     _check_reserved_overrides(overrides)
     _check_runtime_requirements(algo, sim)
+    if async_training and algo != "ppo":
+        raise SystemExit("--async is only supported for --algo ppo.")
+    if async_training and any(_override_key(o) == "training.async" for o in overrides):
+        raise SystemExit("Use either --async or training.async=..., not both.")
 
     route = build_route(algo, task, sim, profile)
     script = _script_path(route, selected_root)
@@ -240,6 +245,8 @@ def build_command(
         )
 
     generated = list(route.generated_overrides)
+    if async_training:
+        generated.append("training.async=true")
     if render_mode is not None:
         generated.append(f"training.play_render_mode={render_mode}")
     if mode == "eval":
@@ -261,6 +268,12 @@ def _train_eval_parser(*, mode: str) -> argparse.ArgumentParser:
     parser.add_argument("--sim", required=True, choices=SUPPORTED_SIMS)
     parser.add_argument("--profile", default=None)
     parser.add_argument("--render-mode", choices=SUPPORTED_RENDER_MODES, default=None)
+    parser.add_argument(
+        "--async",
+        dest="async_training",
+        action="store_true",
+        help="Enable experimental async RSL-RL PPO; equivalent to training.async=true.",
+    )
     if mode == "eval":
         parser.add_argument("--load-run", default=None)
     return parser
@@ -285,6 +298,7 @@ def _run_train_eval(mode: str, argv: Sequence[str] | None = None) -> int:
         sim=args.sim,
         profile=args.profile,
         overrides=overrides,
+        async_training=args.async_training,
         load_run=getattr(args, "load_run", None),
         render_mode=args.render_mode,
     )

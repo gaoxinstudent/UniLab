@@ -103,6 +103,12 @@ def _get_log_root(cfg: DictConfig) -> str:
     return str(get_log_root(ROOT_DIR, cfg))
 
 
+def _build_ppo_log_dir(cfg: DictConfig, *, timestamp: str) -> str:
+    log_root = _get_log_root(cfg)
+    run_suffix = f"{cfg.training.sim_backend}_async" if _async_enabled(cfg) else cfg.training.sim_backend
+    return str(Path(log_root) / cfg.training.task_name / f"{timestamp}_{run_suffix}")
+
+
 def _algo_config_dict(cfg: DictConfig) -> dict[str, Any]:
     train_cfg_raw = OmegaConf.to_container(cfg.algo, resolve=True)
     if not isinstance(train_cfg_raw, dict):
@@ -137,6 +143,24 @@ def apply_ppo_runtime_flags(
         return
     if not training_enabled:
         algorithm_cfg["enable_compile"] = False
+
+
+def _async_enabled(cfg: DictConfig) -> bool:
+    return bool(OmegaConf.select(cfg, "training.async", default=False))
+
+
+def _spawn_safe_nan_guard_cfg(cfg: DictConfig):
+    nan_guard_cfg = OmegaConf.select(cfg, "training.nan_guard", default=None)
+    if nan_guard_cfg is None or not bool(getattr(nan_guard_cfg, "enabled", False)):
+        return None
+    from unilab.utils.nan_guard import NanGuardCfg
+
+    return NanGuardCfg(
+        enabled=True,
+        buffer_size=int(getattr(nan_guard_cfg, "buffer_size", 100)),
+        max_envs_to_dump=int(getattr(nan_guard_cfg, "max_envs_to_dump", 5)),
+        output_dir=getattr(nan_guard_cfg, "output_dir", None),
+    )
 
 
 def _format_play_checkpoint_error(
@@ -316,10 +340,7 @@ def main(cfg: DictConfig) -> None:
 
     if not cfg.training.play_only:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        log_root = _get_log_root(cfg)
-        log_dir = str(
-            Path(log_root) / cfg.training.task_name / f"{timestamp}_{cfg.training.sim_backend}"
-        )
+        log_dir = _build_ppo_log_dir(cfg, timestamp=timestamp)
     else:
         log_dir = None
 
@@ -340,32 +361,8 @@ def main(cfg: DictConfig) -> None:
 
     try:
         if not cfg.training.play_only:
-            env = create_env(
-                cfg,
-                num_envs=cfg.algo.num_envs,
-                env_cfg_override=env_cfg_override,
-            )
             rl_cfg = _algo_config_dict(cfg)
             wrapper_cls = _resolve_ppo_wrapper_cls(rl_cfg)
-
-            nan_guard_cfg = getattr(cfg.training, "nan_guard", None)
-            if nan_guard_cfg is not None and getattr(nan_guard_cfg, "enabled", False):
-                from unilab.utils.nan_guard import NanGuard, NanGuardCfg
-
-                guard = NanGuard(
-                    NanGuardCfg(
-                        enabled=True,
-                        buffer_size=int(getattr(nan_guard_cfg, "buffer_size", 100)),
-                        max_envs_to_dump=int(getattr(nan_guard_cfg, "max_envs_to_dump", 5)),
-                        output_dir=getattr(nan_guard_cfg, "output_dir", None),
-                    ),
-                    num_envs=env.num_envs,
-                    supports_state_playback=env.play_capabilities.supports_physics_state_playback,
-                )
-                env.set_nan_guard(guard)
-
-            wrapped_env = wrapper_cls(env, device=device)
-
             train_cfg = normalize_ppo_train_cfg(rl_cfg)
             apply_ppo_runtime_flags(train_cfg, cfg, training_enabled=True)
             if "runner" not in train_cfg:
@@ -390,48 +387,100 @@ def main(cfg: DictConfig) -> None:
                 train_cfg["wandb_notes"] = wandb_settings["notes"]
                 train_cfg["wandb_mode"] = wandb_settings["mode"]
 
-            runner = cast(
-                Any,
-                OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device),
-            )
-            _patch_runner_action_std_logging(runner)
+            if _async_enabled(cfg):
+                from unilab.algos.torch.rsl_rl_async_ppo import AsyncRslRlPpoRunner
+                from unilab.algos.torch.rsl_rl_async_ppo.runner import validate_async_ppo_v1_config
 
-            if cfg.algo.load_run != "-1":
-                resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
-                if resume_path:
-                    print(f"Resuming from {resume_path}")
-                    runner.load(str(resume_path))
+                validate_async_ppo_v1_config(cfg, train_cfg)
+                resume_path = None
+                if cfg.algo.load_run != "-1":
+                    resolved_resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
+                    if resolved_resume_path:
+                        resume_path = str(resolved_resume_path)
+                        print(f"Resuming from {resume_path}")
+                assert log_dir is not None
+                async_runner = AsyncRslRlPpoRunner(
+                    cfg=cfg,
+                    train_cfg=train_cfg,
+                    env_cfg_override=env_cfg_override,
+                    wrapper_cls=wrapper_cls,
+                    log_dir=log_dir,
+                    device=device,
+                    collector_device=OmegaConf.select(cfg, "training.collector_device", default=None),
+                    logger_type=logger_type,
+                    resume_path=resume_path,
+                    nan_guard_cfg=_spawn_safe_nan_guard_cfg(cfg),
+                    wandb_settings=tracker.wandb_settings if tracker is not None else None,
+                )
+                async_runner.learn(
+                    max_iterations=max_iterations,
+                    save_interval=int(cfg.algo.save_interval),
+                    log_dir=log_dir,
+                )
+                if tracker is not None and async_runner.last_run_summary is not None:
+                    tracker.update_summary(async_runner.last_run_summary)
+            else:
+                env = create_env(
+                    cfg,
+                    num_envs=cfg.algo.num_envs,
+                    env_cfg_override=env_cfg_override,
+                )
 
-            train_start_wall = time.time()
-            runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
-            assert log_dir is not None
-            train_summary = {
-                "status": "completed",
-                "completed_iterations": int(runner.current_learning_iteration),
-                "total_env_steps": int(getattr(runner.logger, "tot_timesteps", 0)),
-                "final_mean_reward": (
-                    float(statistics.mean(runner.logger.rewbuffer))
-                    if len(getattr(runner.logger, "rewbuffer", [])) > 0
-                    else None
-                ),
-                "best_mean_reward": (
-                    float(max(runner.logger.rewbuffer))
-                    if len(getattr(runner.logger, "rewbuffer", [])) > 0
-                    else None
-                ),
-                "mean_episode_length": (
-                    float(statistics.mean(runner.logger.lenbuffer))
-                    if len(getattr(runner.logger, "lenbuffer", [])) > 0
-                    else None
-                ),
-                "last_checkpoint": str(
-                    Path(log_dir) / f"model_{int(runner.current_learning_iteration)}.pt"
-                ),
-                "training_wall_time_sec": time.time() - train_start_wall,
-            }
-            if tracker is not None:
-                tracker.update_summary(train_summary)
-            env.close()
+                nan_guard_cfg = getattr(cfg.training, "nan_guard", None)
+                if nan_guard_cfg is not None and getattr(nan_guard_cfg, "enabled", False):
+                    from unilab.utils.nan_guard import NanGuard
+
+                    guard = NanGuard(
+                        _spawn_safe_nan_guard_cfg(cfg),
+                        num_envs=env.num_envs,
+                        supports_state_playback=env.play_capabilities.supports_physics_state_playback,
+                    )
+                    env.set_nan_guard(guard)
+
+                wrapped_env = wrapper_cls(env, device=device)
+
+                runner = cast(
+                    Any,
+                    OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device),
+                )
+                _patch_runner_action_std_logging(runner)
+
+                if cfg.algo.load_run != "-1":
+                    resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
+                    if resume_path:
+                        print(f"Resuming from {resume_path}")
+                        runner.load(str(resume_path))
+
+                train_start_wall = time.time()
+                runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)
+                assert log_dir is not None
+                train_summary = {
+                    "status": "completed",
+                    "completed_iterations": int(runner.current_learning_iteration),
+                    "total_env_steps": int(getattr(runner.logger, "tot_timesteps", 0)),
+                    "final_mean_reward": (
+                        float(statistics.mean(runner.logger.rewbuffer))
+                        if len(getattr(runner.logger, "rewbuffer", [])) > 0
+                        else None
+                    ),
+                    "best_mean_reward": (
+                        float(max(runner.logger.rewbuffer))
+                        if len(getattr(runner.logger, "rewbuffer", [])) > 0
+                        else None
+                    ),
+                    "mean_episode_length": (
+                        float(statistics.mean(runner.logger.lenbuffer))
+                        if len(getattr(runner.logger, "lenbuffer", [])) > 0
+                        else None
+                    ),
+                    "last_checkpoint": str(
+                        Path(log_dir) / f"model_{int(runner.current_learning_iteration)}.pt"
+                    ),
+                    "training_wall_time_sec": time.time() - train_start_wall,
+                }
+                if tracker is not None:
+                    tracker.update_summary(train_summary)
+                env.close()
 
         if should_run_playback(
             play_only=cfg.training.play_only,
