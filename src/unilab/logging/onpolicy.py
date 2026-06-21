@@ -105,6 +105,9 @@ class OnPolicyLogger(BaseTrainingLogger):
             w.add_scalar("perf/train_time_ms", self._train_time * 1000, iteration)
             if self._iteration_time is not None:
                 w.add_scalar("perf/iteration_time_ms", self._iteration_time * 1000, iteration)
+            steps_per_sec = self._steps_per_second()
+            if steps_per_sec is not None:
+                w.add_scalar("perf/steps_per_sec", steps_per_sec, iteration)
 
         if self._wandb_run:
             wandb = _load_wandb()
@@ -126,6 +129,9 @@ class OnPolicyLogger(BaseTrainingLogger):
             log_dict["perf/train_time_ms"] = self._train_time * 1000
             if self._iteration_time is not None:
                 log_dict["perf/iteration_time_ms"] = self._iteration_time * 1000
+            steps_per_sec = self._steps_per_second()
+            if steps_per_sec is not None:
+                log_dict["perf/steps_per_sec"] = steps_per_sec
             wandb.log(log_dict, step=iteration)
 
     def _build_display(self) -> Panel:
@@ -182,6 +188,15 @@ class OnPolicyLogger(BaseTrainingLogger):
             include_ep_length=False,
         )
 
+    def _iteration_duration(self) -> float:
+        return self._iteration_time or (self._collect_time + self._train_time)
+
+    def _steps_per_second(self) -> float | None:
+        iter_time = self._iteration_duration()
+        if iter_time <= 0:
+            return None
+        return self.num_envs * self.num_steps / iter_time
+
     def _build_timing_table(self) -> Table:
         table = Table(
             box=box.SIMPLE_HEAVY,
@@ -198,8 +213,9 @@ class OnPolicyLogger(BaseTrainingLogger):
         table.add_column("System", style="white", ratio=2, no_wrap=True)
         table.add_column("Value", style="yellow", justify="right", ratio=1, no_wrap=True)
 
-        iter_time = self._iteration_time or (self._collect_time + self._train_time)
-        fps = int(self.num_envs * self.num_steps / max(iter_time, 1e-8)) if iter_time > 0 else 0
+        iter_time = self._iteration_duration()
+        steps_per_sec = self._steps_per_second()
+        fps = int(steps_per_sec) if steps_per_sec is not None else 0
 
         learner_items = [
             ("Train", f"{self._train_time * 1000:.1f}ms"),
@@ -231,10 +247,9 @@ class OnPolicyLogger(BaseTrainingLogger):
         include_status: bool,
         extra_fields: list[tuple[str, str]] | None = None,
     ) -> Text:
-        iter_time = self._iteration_time or (self._collect_time + self._train_time)
         header_extra_fields: list[tuple[str, str]] = []
-        if iter_time > 0:
-            steps_per_second = self.num_envs * self.num_steps / iter_time
+        steps_per_second = self._steps_per_second()
+        if steps_per_second is not None:
             header_extra_fields.append((f"Steps/s {steps_per_second:,.0f}", "bold green"))
         if extra_fields:
             header_extra_fields.extend(extra_fields)

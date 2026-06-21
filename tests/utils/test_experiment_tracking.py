@@ -209,6 +209,32 @@ def test_onpolicy_logger_uses_explicit_iteration_time_for_async_display():
     logger.close()
 
 
+def test_onpolicy_logger_logs_steps_per_second_with_existing_perf_namespace(monkeypatch):
+    del monkeypatch
+    writer = _FakeTensorBoardWriter()
+
+    logger = OnPolicyLogger(
+        algo_name="Async RSL-RL PPO",
+        env_name="Go2JoystickFlat",
+        num_envs=4,
+        num_steps=8,
+        log_backend="no_print",
+    )
+    logger._tb_writer = writer
+    logger.log_step(
+        iteration=3,
+        metrics={},
+        collect_time=0.1,
+        train_time=0.1,
+        iteration_time=0.04,
+    )
+
+    assert ("perf/steps_per_sec", pytest.approx(800.0), 3) in writer.scalars
+    assert ("perf/iteration_time_ms", pytest.approx(40.0), 3) in writer.scalars
+
+    logger.close()
+
+
 def test_build_wandb_settings_defaults_for_shared_workspace():
     settings = build_wandb_settings(
         {"wandb_project": "unilab"},

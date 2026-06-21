@@ -352,8 +352,6 @@ class AsyncRslRlPpoRunner(AsyncRunner):
                 metrics = {
                     **{str(key): float(value) for key, value in loss_dict.items()},
                     "async/staging_time": staging_time,
-                    "async/learner_wait_time": collect_time,
-                    "async/learn_time": learn_time,
                     "async/policy_lag_versions": float(policy_lag),
                     "async/rollout_age_ms": float(rollout_age_ms),
                     "async/weight_sync_time": weight_sync_time,
