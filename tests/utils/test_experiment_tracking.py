@@ -235,6 +235,58 @@ def test_onpolicy_logger_logs_steps_per_second_with_existing_perf_namespace(monk
     logger.close()
 
 
+def test_onpolicy_logger_rsl_rl_schema_matches_sync_tensorboard_tags(monkeypatch):
+    del monkeypatch
+    writer = _FakeTensorBoardWriter()
+
+    logger = OnPolicyLogger(
+        algo_name="Async RSL-RL PPO",
+        env_name="G1MotionTracking",
+        num_envs=4,
+        num_steps=8,
+        log_backend="no_print",
+        backend_schema="rsl_rl",
+    )
+    logger._tb_writer = writer
+    logger.update_ep_length(12.0)
+    logger.log_step(
+        iteration=3,
+        metrics={
+            "value": 1.0,
+            "surrogate": 2.0,
+            "entropy": 3.0,
+            "learning_rate": 4.0,
+            "async/staging_time": 0.005,
+        },
+        reward=5.0,
+        reward_components={"action_rate_l2": -0.25},
+        collect_time=0.1,
+        train_time=0.2,
+        iteration_time=0.04,
+    )
+
+    tags = {tag for tag, _, _ in writer.scalars}
+    assert {
+        "Loss/value",
+        "Loss/surrogate",
+        "Loss/entropy",
+        "Loss/learning_rate",
+        "Async/staging_time",
+        "Train/mean_reward",
+        "Train/mean_episode_length",
+        "Perf/collection_time",
+        "Perf/learning_time",
+        "Perf/total_fps",
+        "Perf/iteration_time",
+        "reward/action_rate_l2",
+    }.issubset(tags)
+    assert not any(tag.startswith("train/") for tag in tags)
+    assert not any(tag.startswith("perf/") for tag in tags)
+    assert not any(tag.startswith("episode/") for tag in tags)
+
+    logger.close()
+
+
 def test_build_wandb_settings_defaults_for_shared_workspace():
     settings = build_wandb_settings(
         {"wandb_project": "unilab"},

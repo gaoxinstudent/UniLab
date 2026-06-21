@@ -53,6 +53,8 @@ def _record_reward_components(
             component_name = key.removeprefix("Episode/rew_")
         elif key.startswith("rew_"):
             component_name = key.removeprefix("rew_")
+        elif key.startswith("reward/"):
+            component_name = key.removeprefix("reward/")
         else:
             continue
         if isinstance(value, torch.Tensor):
@@ -168,6 +170,7 @@ def rsl_rl_ppo_collector_fn(
             policy_version_start = min(actor_version, critic_version)
 
             write_buf = rollout_buffer.write_buffer
+            rollout_collect_start = time.perf_counter()
             for step in range(num_steps):
                 with torch.no_grad():
                     actions = alg.act(obs)
@@ -262,6 +265,7 @@ def rsl_rl_ppo_collector_fn(
             write_buf["policy_version_start"][0] = float(policy_version_start)
             write_buf["policy_version_end"][0] = float(policy_version_end)
             write_buf["rollout_created_time_ns"][0] = float(time.monotonic())
+            write_buf["rollout_collect_time"][0] = float(time.perf_counter() - rollout_collect_start)
             rollout_buffer.signal_write_done()
 
             metrics: dict[str, Any] = {"total_steps": total_steps}

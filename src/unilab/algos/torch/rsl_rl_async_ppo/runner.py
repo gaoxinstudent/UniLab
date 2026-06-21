@@ -168,6 +168,7 @@ class AsyncRslRlPpoRunner(AsyncRunner):
             wandb_job_type=settings.get("job_type", getattr(self.cfg.training, "wandb_job_type", None)),
             wandb_tags=settings.get("tags", getattr(self.cfg.training, "wandb_tags", [])),
             wandb_notes=settings.get("notes", getattr(self.cfg.training, "wandb_notes", None)),
+            backend_schema="rsl_rl",
         )
         return logger
 
@@ -349,9 +350,15 @@ class AsyncRslRlPpoRunner(AsyncRunner):
                 rollout_age_ms = (
                     time.monotonic() - float(rollout["rollout_created_time_ns"])
                 ) * 1000.0
+                rollout_collect_time = float(rollout["rollout_collect_time"])
+                hidden_collect_time = max(0.0, rollout_collect_time - collect_time)
                 metrics = {
                     **{str(key): float(value) for key, value in loss_dict.items()},
                     "async/staging_time": staging_time,
+                    "async/wait_rollout_time": collect_time,
+                    "async/rollout_collect_time": rollout_collect_time,
+                    "async/hidden_collect_time": hidden_collect_time,
+                    "async/learn_time": learn_time,
                     "async/policy_lag_versions": float(policy_lag),
                     "async/rollout_age_ms": float(rollout_age_ms),
                     "async/weight_sync_time": weight_sync_time,

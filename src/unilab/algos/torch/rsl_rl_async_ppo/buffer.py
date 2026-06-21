@@ -28,6 +28,7 @@ class RslRlPpoRolloutBuffer:
         "policy_version_start": lambda ne, ns, ad, dp: (1,),
         "policy_version_end": lambda ne, ns, ad, dp: (1,),
         "rollout_created_time_ns": lambda ne, ns, ad, dp: (1,),
+        "rollout_collect_time": lambda ne, ns, ad, dp: (1,),
         "truncated": lambda ne, ns, ad, dp: (ne, ns),
         "raw_rewards": lambda ne, ns, ad, dp: (ne, ns),
         "timeout_bootstrap_reward": lambda ne, ns, ad, dp: (ne, ns),

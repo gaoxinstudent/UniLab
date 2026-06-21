@@ -88,6 +88,7 @@ def test_async_worker_records_reward_components_from_env_log() -> None:
             "log": {
                 "Episode/rew_tracking_lin_vel": torch.tensor([1.0, 3.0]),
                 "rew_action_rate": -0.25,
+                "reward/base_height": -0.5,
                 "Episode/length": 12.0,
             }
         },
@@ -96,6 +97,7 @@ def test_async_worker_records_reward_components_from_env_log() -> None:
     assert dict(sink) == {
         "tracking_lin_vel": [2.0],
         "action_rate": [-0.25],
+        "base_height": [-0.5],
     }
 
 
@@ -134,6 +136,7 @@ def test_stage_and_storage_adapter_fill_rsl_rl_storage_contract() -> None:
         "policy_version_start": np.array([1.0], dtype=np.float32),
         "policy_version_end": np.array([1.0], dtype=np.float32),
         "rollout_created_time_ns": np.array([123.0], dtype=np.float32),
+        "rollout_collect_time": np.array([0.25], dtype=np.float32),
     }
     rollout = stage_ppo_rollout(
         raw,

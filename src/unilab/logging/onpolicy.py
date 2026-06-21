@@ -30,7 +30,10 @@ class OnPolicyLogger(BaseTrainingLogger):
         wandb_job_type: str | None = None,
         wandb_tags: list[str] | None = None,
         wandb_notes: str | None = None,
+        backend_schema: str = "unilab",
     ):
+        if backend_schema not in {"unilab", "rsl_rl"}:
+            raise ValueError("backend_schema must be 'unilab' or 'rsl_rl'")
         super().__init__(
             algo_name=algo_name,
             max_iterations=max_iterations,
@@ -48,6 +51,7 @@ class OnPolicyLogger(BaseTrainingLogger):
             tensorboard_subdir="tb",
         )
         self.num_steps = num_steps
+        self.backend_schema = backend_schema
 
     def start(self, *, status: str = ""):
         super().start(status=status)
@@ -91,23 +95,8 @@ class OnPolicyLogger(BaseTrainingLogger):
     ):
         if self._tb_writer:
             w = self._tb_writer
-            if metrics:
-                for k, v in metrics.items():
-                    w.add_scalar(f"train/{k}", v, iteration)
-            if reward is not None:
-                w.add_scalar("reward/mean", reward, iteration)
-            if reward_components:
-                for k, v in reward_components.items():
-                    w.add_scalar(f"reward/{k}", v, iteration)
-            if self._mean_ep_length > 0:
-                w.add_scalar("episode/length", self._mean_ep_length, iteration)
-            w.add_scalar("perf/collect_time_ms", self._collect_time * 1000, iteration)
-            w.add_scalar("perf/train_time_ms", self._train_time * 1000, iteration)
-            if self._iteration_time is not None:
-                w.add_scalar("perf/iteration_time_ms", self._iteration_time * 1000, iteration)
-            steps_per_sec = self._steps_per_second()
-            if steps_per_sec is not None:
-                w.add_scalar("perf/steps_per_sec", steps_per_sec, iteration)
+            for key, value in self._scalar_payload(metrics, reward, reward_components).items():
+                w.add_scalar(key, value, iteration)
 
         if self._wandb_run:
             wandb = _load_wandb()
@@ -115,24 +104,59 @@ class OnPolicyLogger(BaseTrainingLogger):
                 return
 
             log_dict: dict[str, Any] = {"iteration": iteration}
-            if metrics:
-                for k, v in metrics.items():
-                    log_dict[f"train/{k}"] = v
+            log_dict.update(self._scalar_payload(metrics, reward, reward_components))
+            wandb.log(log_dict, step=iteration)
+
+    def _metric_key(self, key: str) -> str:
+        if self.backend_schema == "rsl_rl":
+            if key.startswith("async/"):
+                suffix = key.removeprefix("async/")
+                return f"Async/{suffix}"
+            if key == "learning_rate":
+                return "Loss/learning_rate"
+            return f"Loss/{key}"
+        return f"train/{key}"
+
+    def _scalar_payload(
+        self,
+        metrics: dict[str, float] | None,
+        reward: float | None,
+        reward_components: dict[str, float] | None,
+    ) -> dict[str, float]:
+        payload: dict[str, float] = {}
+        if metrics:
+            for key, value in metrics.items():
+                payload[self._metric_key(key)] = value
+
+        if self.backend_schema == "rsl_rl":
             if reward is not None:
-                log_dict["reward/mean"] = reward
-            if reward_components:
-                for k, v in reward_components.items():
-                    log_dict[f"reward/{k}"] = v
+                payload["Train/mean_reward"] = reward
             if self._mean_ep_length > 0:
-                log_dict["episode/length"] = self._mean_ep_length
-            log_dict["perf/collect_time_ms"] = self._collect_time * 1000
-            log_dict["perf/train_time_ms"] = self._train_time * 1000
-            if self._iteration_time is not None:
-                log_dict["perf/iteration_time_ms"] = self._iteration_time * 1000
+                payload["Train/mean_episode_length"] = self._mean_ep_length
+            payload["Perf/collection_time"] = self._collect_time
+            payload["Perf/learning_time"] = self._train_time
             steps_per_sec = self._steps_per_second()
             if steps_per_sec is not None:
-                log_dict["perf/steps_per_sec"] = steps_per_sec
-            wandb.log(log_dict, step=iteration)
+                payload["Perf/total_fps"] = float(int(steps_per_sec))
+            if self._iteration_time is not None:
+                payload["Perf/iteration_time"] = self._iteration_time
+        else:
+            if reward is not None:
+                payload["reward/mean"] = reward
+            if self._mean_ep_length > 0:
+                payload["episode/length"] = self._mean_ep_length
+            payload["perf/collect_time_ms"] = self._collect_time * 1000
+            payload["perf/train_time_ms"] = self._train_time * 1000
+            if self._iteration_time is not None:
+                payload["perf/iteration_time_ms"] = self._iteration_time * 1000
+            steps_per_sec = self._steps_per_second()
+            if steps_per_sec is not None:
+                payload["perf/steps_per_sec"] = steps_per_sec
+
+        if reward_components:
+            for key, value in reward_components.items():
+                payload[key if key.startswith("reward/") else f"reward/{key}"] = value
+        return payload
 
     def _build_display(self) -> Panel:
         header = self._build_compact_header(include_status=True)
@@ -221,9 +245,15 @@ class OnPolicyLogger(BaseTrainingLogger):
             ("Train", f"{self._train_time * 1000:.1f}ms"),
             ("Iter Time", f"{iter_time * 1000:.1f}ms"),
         ]
+        hidden_collect = self._latest_metrics.get("async/hidden_collect_time")
+        if hidden_collect is not None:
+            learner_items.append(("Hidden Collect", f"{hidden_collect * 1000:.1f}ms"))
         collector_items = [
             (self._collect_label, f"{self._collect_time * 1000:.1f}ms"),
         ]
+        rollout_collect = self._latest_metrics.get("async/rollout_collect_time")
+        if rollout_collect is not None:
+            collector_items.append(("Rollout Collect", f"{rollout_collect * 1000:.1f}ms"))
         system_items = [
             ("Envs", f"{self.num_envs:,}"),
             ("Steps/s", f"{fps:,}"),

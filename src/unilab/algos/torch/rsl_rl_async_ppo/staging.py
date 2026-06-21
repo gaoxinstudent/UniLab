@@ -59,5 +59,6 @@ def stage_ppo_rollout(
         "policy_version_at_collect_start": int(raw_views["policy_version_start"][0]),
         "policy_version_at_collect_end": int(raw_views["policy_version_end"][0]),
         "rollout_created_time_ns": float(raw_views["rollout_created_time_ns"][0]),
+        "rollout_collect_time": float(raw_views["rollout_collect_time"][0]),
     }
     return rollout
