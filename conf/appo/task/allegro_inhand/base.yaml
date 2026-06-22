@@ -2,8 +2,6 @@
 # Shared cross-backend config for allegro_inhand (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
 training:
-  task_name: AllegroInhandRotation
-  sim_backend: mujoco
   play_steps: 200
   render_spacing: 0.5
   cam_distance: 0.75

@@ -2,8 +2,6 @@
 # Shared cross-backend config for go2_joystick_rough (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
 training:
-  task_name: Go2JoystickRough
-  sim_backend: mujoco
   play_steps: 500
   play_env_num: 16
   cam_tracking: true

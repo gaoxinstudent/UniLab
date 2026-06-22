@@ -4,4 +4,5 @@ defaults:
   - _self_
 
 training:
+  task_name: G1ClimbTracking
   sim_backend: motrix

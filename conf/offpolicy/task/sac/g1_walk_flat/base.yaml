@@ -1,9 +1,6 @@
 # @package _global_
 # Shared cross-backend config for g1_walk_flat (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
-training:
-  task_name: G1WalkFlat
-  sim_backend: mujoco
 algo:
   num_envs: 2048
   learning_starts: 10

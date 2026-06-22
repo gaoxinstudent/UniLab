@@ -1,9 +1,6 @@
 # @package _global_
 # Shared cross-backend config for go2_arm_manip_loco (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
-training:
-  task_name: Go2ArmManipLoco
-  sim_backend: mujoco
 algo:
   num_envs: 4096
   max_iterations: 151

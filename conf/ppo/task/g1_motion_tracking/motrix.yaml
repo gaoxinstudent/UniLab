@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: G1MotionTracking
   sim_backend: motrix
   play_env_num: 16
 algo:

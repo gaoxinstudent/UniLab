@@ -2,3 +2,6 @@
 defaults:
   - /task/g1_climb_tracking/base
   - _self_
+training:
+  task_name: G1ClimbTracking
+  sim_backend: mujoco

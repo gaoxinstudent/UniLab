@@ -4,5 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: AllegroInhandRotation
+  sim_backend: mujoco
   cam_azimuth: 45.0
   replay_queue_size: 4

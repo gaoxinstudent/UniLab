@@ -1,9 +1,6 @@
 # @package _global_
 # Shared cross-backend config for go2_joystick_flat (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
-training:
-  task_name: Go2JoystickFlat
-  sim_backend: mujoco
 algo:
   max_iterations: 150
 reward:

@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: Go2JoystickFlat
   sim_backend: motrix
 env:
   commands:

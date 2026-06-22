@@ -2,3 +2,6 @@
 defaults:
   - /task/go2_arm_manip_loco/base
   - _self_
+training:
+  task_name: Go2ArmManipLoco
+  sim_backend: mujoco

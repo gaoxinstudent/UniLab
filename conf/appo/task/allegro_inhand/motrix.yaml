@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: AllegroInhandRotation
   sim_backend: motrix
   cam_distance: 1.5
   cam_lookat:

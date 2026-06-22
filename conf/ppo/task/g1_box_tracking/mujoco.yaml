@@ -8,3 +8,6 @@ env:
   sensor:
     gyro: pelvis_gyro
     upvector: pelvis_upvector
+training:
+  task_name: G1BoxTracking
+  sim_backend: mujoco

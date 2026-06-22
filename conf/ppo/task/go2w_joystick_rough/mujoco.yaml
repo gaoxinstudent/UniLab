@@ -4,4 +4,6 @@ defaults:
   - _self_
 
 training:
+  task_name: Go2WJoystickRough
+  sim_backend: mujoco
   render_spacing: 0.0

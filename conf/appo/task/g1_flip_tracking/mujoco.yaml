@@ -2,3 +2,6 @@
 defaults:
   - /task/g1_flip_tracking/base
   - _self_
+training:
+  task_name: G1FlipTracking
+  sim_backend: mujoco

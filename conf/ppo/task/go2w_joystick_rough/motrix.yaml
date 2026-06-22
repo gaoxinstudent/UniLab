@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: Go2WJoystickRough
   sim_backend: motrix
 env:
   render_offset_mode: zero

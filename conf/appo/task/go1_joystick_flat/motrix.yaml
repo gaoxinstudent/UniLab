@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: Go1JoystickFlat
   sim_backend: motrix
 algo:
   num_envs: 1024

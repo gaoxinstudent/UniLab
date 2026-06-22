@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: G1WalkRough
   sim_backend: motrix
 algo:
   learning_starts: 1

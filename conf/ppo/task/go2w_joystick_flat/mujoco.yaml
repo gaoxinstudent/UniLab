@@ -2,3 +2,6 @@
 defaults:
   - /task/go2w_joystick_flat/base
   - _self_
+training:
+  task_name: Go2WJoystickFlat
+  sim_backend: mujoco

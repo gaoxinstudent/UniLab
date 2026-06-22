@@ -2,3 +2,6 @@
 defaults:
   - /task/g1_motion_tracking/base
   - _self_
+training:
+  task_name: G1MotionTracking
+  sim_backend: mujoco

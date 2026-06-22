@@ -6,3 +6,6 @@ defaults:
 reward:
   scales:
     contact: 0.24
+training:
+  task_name: Go1JoystickFlat
+  sim_backend: mujoco

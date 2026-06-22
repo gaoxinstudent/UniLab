@@ -2,8 +2,6 @@
 # Shared cross-backend config for g1_climb_tracking (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
 training:
-  task_name: G1ClimbTracking
-  sim_backend: mujoco
   play_steps: 1000
 algo:
   num_envs: 1024

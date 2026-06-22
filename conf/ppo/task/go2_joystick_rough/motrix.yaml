@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: Go2JoystickRough
   sim_backend: motrix
 algo:
   num_envs: 4096

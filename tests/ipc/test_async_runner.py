@@ -223,7 +223,10 @@ def test_start_collector_does_not_merge_runner_runtime_fields():
             "token": "ok",
         },
     )
-    payload = report_queue.get(timeout=5)
+    # Spawn-context children re-import the full module graph before reaching the
+    # report_queue.put(); under coverage / heavy CI load that cold import can take
+    # well over 5s, so use the same 30s tolerance as the cooperative workers above.
+    payload = report_queue.get(timeout=30)
     assert payload == {"sim_backend": "missing", "token": "ok"}
     r.close()
 

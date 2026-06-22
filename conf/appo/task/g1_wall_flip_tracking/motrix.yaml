@@ -4,6 +4,7 @@ defaults:
   - _self_
 
 training:
+  task_name: G1WallFlipTracking
   sim_backend: motrix
 algo:
   max_iterations: 5000

@@ -54,3 +54,6 @@ reward:
   scales:
     motion_ee_body_pos_z: 2.0
     undesired_contacts: -0.1
+training:
+  task_name: G1FlipTracking
+  sim_backend: mujoco

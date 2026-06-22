@@ -2,8 +2,6 @@
 # Shared cross-backend config for go1_joystick_flat (mujoco/motrix). See AGENTS.md (Sim2Sim).
 
 training:
-  task_name: Go1JoystickFlat
-  sim_backend: mujoco
   play_steps: 500
   play_env_num: 16
   cam_tracking: true
