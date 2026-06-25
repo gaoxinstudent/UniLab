@@ -1,0 +1,59 @@
+# @package _global_
+training:
+  task_name: Real68BalanceFlat
+  sim_backend: mujoco
+algo:
+  num_envs: 256
+  max_iterations: 300
+  empirical_normalization: true
+  obs_groups:
+    actor:
+      - actor
+    critic:
+      - critic
+  policy:
+    init_noise_std: 0.5
+  algorithm:
+    learning_rate: 3.0e-4
+    entropy_coef: 2.0e-3
+env:
+  control_config:
+    hip_velocity_scale: 5.0
+    wheel_velocity_scale: 16.0
+    calf_action_scale: 0.3
+    hip_kd: 2.0
+    wheel_kd: 0.9
+    calf_kp: 40.0
+    calf_kd: 3.0
+  commands:
+    vel_limit:
+      - [0.0, 0.0, -0.6]
+      - [0.6, 0.0, 0.6]
+    resampling_time: 2.0
+    rel_standing_envs: 0.2
+  height_command:
+    range: [0.25, 0.32]
+  domain_rand:
+    randomize_ground_friction: false
+    randomize_base_mass: false
+    random_com: false
+reward:
+  scales:
+    tracking_lin_vel: 1.2
+    tracking_ang_vel: 0.6
+    height_tracking: 1.0
+    orientation: -3.0
+    lin_vel_z: -2.0
+    ang_vel_xy: -0.2
+    posture: -0.15
+    action_rate: -0.01
+    torques: -0.0005
+    wheel_vel: -0.001
+    nonwheel_contact: -2.0
+    alive: 0.5
+  tracking_sigma: 0.25
+  height_tracking_sigma: 0.02
+  base_height_target: 0.257282
+  min_base_height: 0.18
+  max_base_height: 0.38
+  max_tilt_cos: 0.45
