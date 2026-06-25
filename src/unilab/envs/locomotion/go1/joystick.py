@@ -86,6 +86,7 @@ class Go1JoystickDomainRandomizationProvider(LocomotionDRProvider):
 
 @registry.env("Go1JoystickFlat", sim_backend="mujoco")
 @registry.env("Go1JoystickFlat", sim_backend="motrix")
+@registry.env("Go1JoystickFlat", sim_backend="drake")
 class Go1WalkTask(Go1BaseEnv):
     _cfg: Go1JoystickCfg
 
@@ -103,6 +104,8 @@ class Go1WalkTask(Go1BaseEnv):
             base_name=cfg.asset.base_name,
             push_body_name=cfg.domain_rand.push_body_name,
             position_actuator_gains={"kp": cfg.control_config.Kp, "kd": cfg.control_config.Kd},
+            drake_backend_mode=cfg.drake_backend_mode,
+            drake_nthread=cfg.drake_nthread,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
         )

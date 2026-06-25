@@ -43,6 +43,18 @@ def _load_motrix_scene_export(name: str) -> Any:
     return getattr(scene, name)
 
 
+def _load_drake_backend() -> Any:
+    from .drake.backend import DrakeBackend
+
+    return DrakeBackend
+
+
+def _drake_available() -> bool:
+    from .drake.backend import ensure_drake_batch_available
+
+    return ensure_drake_batch_available()[0]
+
+
 def create_backend(
     backend_type: str,
     scene: SceneCfg,
@@ -53,7 +65,7 @@ def create_backend(
     """Create a simulation backend.
 
     Args:
-        backend_type: ``"mujoco"`` or ``"motrix"``.
+        backend_type: ``"mujoco"``, ``"motrix"``, or ``"drake"``.
         scene: SceneCfg for either static or composed scenes.
         num_envs: Number of environments.
         sim_dt: Simulation timestep.
@@ -69,6 +81,8 @@ def create_backend(
     position_actuator_gains = kwargs.pop("position_actuator_gains", None)
     motrix_max_iterations = kwargs.pop("motrix_max_iterations", None)
     post_step_forward_sensor = kwargs.pop("post_step_forward_sensor", None)
+    drake_backend_mode = kwargs.pop("drake_backend_mode", "batch")
+    drake_nthread = kwargs.pop("drake_nthread", None)
     if backend_type == "mujoco":
         MuJoCoBackend = _load_mujoco_backend()
         if position_actuator_gains is not None:
@@ -83,6 +97,18 @@ def create_backend(
         if motrix_max_iterations is not None:
             kwargs["max_iterations"] = motrix_max_iterations
         return cast(SimBackend, MotrixBackend(scene, num_envs, sim_dt, **kwargs))
+    if backend_type == "drake":
+        DrakeBackend = _load_drake_backend()
+        # DrakeUni is a generic batch engine. Task-level body names and scalar
+        # gain overrides are consumed by other backends, but Drake reads bodies,
+        # actuators, and sensors from the model contract itself.
+        kwargs.pop("base_name", None)
+        kwargs.pop("push_body_name", None)
+        kwargs.pop("add_body_sensors", None)
+        kwargs["drake_backend_mode"] = drake_backend_mode
+        if drake_nthread is not None:
+            kwargs["nthread"] = drake_nthread
+        return cast(SimBackend, DrakeBackend(scene, num_envs, sim_dt, **kwargs))
     raise ValueError(f"Unknown backend: {backend_type}")
 
 
@@ -93,6 +119,10 @@ def __getattr__(name: str):
         return _load_motrix_backend()[0]
     if name == "MOTRIX_AVAILABLE":
         return _load_motrix_backend()[1]
+    if name == "DrakeBackend":
+        return _load_drake_backend()
+    if name == "DRAKE_AVAILABLE":
+        return _drake_available()
     if name in _MUJOCO_XML_EXPORTS:
         from .mujoco import xml
 
@@ -106,6 +136,8 @@ __all__ = [
     "SimBackend",
     "MuJoCoBackend",
     "MotrixBackend",
+    "DrakeBackend",
+    "DRAKE_AVAILABLE",
     "add_sensor",
     "create_discardvisual_xml",
     "create_backend",
