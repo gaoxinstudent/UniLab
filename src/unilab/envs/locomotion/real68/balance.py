@@ -43,6 +43,10 @@ from unilab.envs.locomotion.real68.base import (
     scalarize_contacts,
 )
 
+_REAL68_LEFT_POSTURE = np.asarray([0, 1], dtype=np.int32)
+_REAL68_RIGHT_POSTURE = np.asarray([2, 3], dtype=np.int32)
+_REAL68_MIRROR_SIGNS = np.asarray([-1.0, -1.0], dtype=np.float64)
+
 
 @dataclass
 class HeightCommandConfig:
@@ -311,6 +315,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             "torques": self._reward_torques_l2,
             "wheel_vel": self._reward_wheel_vel,
             "posture": self._reward_posture,
+            "leg_symmetry": self._reward_leg_symmetry,
             "height_tracking": self._reward_height_tracking,
             "nonwheel_contact": self._reward_nonwheel_contact,
         }
@@ -534,6 +539,15 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _reward_posture(self, ctx: RewardContext) -> np.ndarray:
         posture = ctx.dof_pos[:, POSTURE_INDICES] - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
         return np.asarray(np.sum(np.square(posture), axis=1), dtype=self._np_dtype)
+
+    def _reward_leg_symmetry(self, ctx: RewardContext) -> np.ndarray:
+        posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
+        left = posture_diff[:, _REAL68_LEFT_POSTURE]
+        right = posture_diff[:, _REAL68_RIGHT_POSTURE]
+        mirrored_right = right * _REAL68_MIRROR_SIGNS
+        symmetry = np.sum(np.square(left - mirrored_right), axis=1)
+        upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
+        return np.asarray(symmetry * upright, dtype=self._np_dtype)
 
     def _reward_height_tracking(self, ctx: RewardContext) -> np.ndarray:
         targets = np.asarray(
