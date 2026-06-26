@@ -247,6 +247,8 @@ _ATTACH_PREFIXED_ATTRS = {
     "geom2",
     "body1",
     "body2",
+    "site1",
+    "site2",
     "objname",
     "refname",
     "hfield",

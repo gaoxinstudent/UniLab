@@ -1,0 +1,30 @@
+<mujoco model="real68 locomotion task">
+  <contact>
+    <pair geom1="base_link_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="left_chuanliangan3_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="left_chuanliangan5_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="right_liangan3_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="right_liangan5_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="left_wheel_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+    <pair geom1="right_wheel_ground_contact" geom2="floor" solref="0.02 1" solimp="0.8 0.95 0.002 0.9 2"/>
+  </contact>
+
+  <sensor>
+    <contact name="left_wheel_contact" geom1="floor" geom2="left_wheel_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="right_wheel_contact" geom1="floor" geom2="right_wheel_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="base_link_contact" geom1="floor" geom2="base_link_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="left_chuanliangan3_contact" geom1="floor" geom2="left_chuanliangan3_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="left_chuanliangan5_contact" geom1="floor" geom2="left_chuanliangan5_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="right_liangan3_contact" geom1="floor" geom2="right_liangan3_ground_contact" data="found" num="1" reduce="mindist"/>
+    <contact name="right_liangan5_contact" geom1="floor" geom2="right_liangan5_ground_contact" data="found" num="1" reduce="mindist"/>
+  </sensor>
+
+  <keyframe>
+    <key name="home" qpos="
+      0 0 0.257282
+      1 0 0 0
+      0.182222 0.275501 -0.045959 -0.470205 0.275452 -0.080660 0.275316
+      -0.219739 0.339126 -0.076009 0.563879 -0.339072 0.114231 0.338957"
+      ctrl="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

@@ -114,7 +114,12 @@ class Real68BalanceCfg(Real68BaseCfg):
 
 class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
     def validate(self, env: Any, capabilities) -> None:
-        validate_common_reset_randomization(env, capabilities)
+        validate_common_reset_randomization(
+            env,
+            capabilities,
+            base_geom_friction=getattr(env, "_base_geom_friction", None),
+            ground_geom_id=getattr(env, "_ground_geom_id", None),
+        )
         validate_interval_push_support(env, capabilities)
 
     def build_interval_randomization_plan(self, env: Any, step_counter: int):
@@ -157,7 +162,12 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
             qpos=qpos,
             qvel=qvel,
             info_updates=info_updates,
-            randomization=build_common_reset_randomization(env, num_reset),
+            randomization=build_common_reset_randomization(
+                env,
+                num_reset,
+                base_geom_friction=getattr(env, "_base_geom_friction", None),
+                ground_geom_id=getattr(env, "_ground_geom_id", None),
+            ),
         )
 
     def _compute_reset_obs(
@@ -222,17 +232,26 @@ class Real68BalanceEnv(Real68BaseEnv):
             raise ValueError(f"Real68 actuator ctrl_range must have shape ({NUM_ACTIONS}, 2)")
         self._ctrl_lower = ctrl_range[:, 0].astype(self._np_dtype)
         self._ctrl_upper = ctrl_range[:, 1].astype(self._np_dtype)
+        self._ground_geom_id = self._backend.get_geom_id(self._cfg.asset.ground)
+        self._base_geom_friction = np.asarray(
+            self._backend.get_geom_friction(), dtype=np.float64
+        ).copy()
         self._reward_cfg = cfg.reward_config
         self._last_motor_ctrl = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._last_dof_vel_for_acc = np.zeros((num_envs, NUM_ACTIONS), dtype=self._np_dtype)
         self._base_height = np.full((num_envs,), HOME_BASE_HEIGHT, dtype=self._np_dtype)
-        self._wheel_contacts = np.zeros((num_envs, len(WHEEL_CONTACT_SENSORS)), dtype=self._np_dtype)
+        self._wheel_contacts = np.zeros(
+            (num_envs, len(WHEEL_CONTACT_SENSORS)), dtype=self._np_dtype
+        )
         self._nonwheel_contacts = np.zeros(
             (num_envs, len(NONWHEEL_CONTACT_SENSORS)), dtype=self._np_dtype
         )
         self._backend.set_pre_step_control(self._pre_step_motor_control)
         self._init_reward_functions()
-        self._init_domain_randomization(Real68BalanceDomainRandomizationProvider())
+        self._init_domain_randomization(self._make_dr_provider())
+
+    def _make_dr_provider(self) -> Real68BalanceDomainRandomizationProvider:
+        return Real68BalanceDomainRandomizationProvider()
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
@@ -251,17 +270,27 @@ class Real68BalanceEnv(Real68BaseEnv):
         return np.asarray(np.random.uniform(low, high, size=(num_reset,)), dtype=self._np_dtype)
 
     def get_accel(self) -> np.ndarray:
-        return np.asarray(self._backend.get_sensor_data(self._cfg.sensor.accel), dtype=self._np_dtype)
+        return np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.accel), dtype=self._np_dtype
+        )
 
     def get_imu_quat(self) -> np.ndarray:
-        return np.asarray(self._backend.get_sensor_data(self._cfg.sensor.quat), dtype=self._np_dtype)
+        return np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.quat), dtype=self._np_dtype
+        )
 
     def apply_action(self, actions: np.ndarray, state: NpEnvState) -> np.ndarray:
         clipped_actions = np.asarray(
-            np.clip(actions, -self._cfg.control_config.clip_actions, self._cfg.control_config.clip_actions),
+            np.clip(
+                actions,
+                -self._cfg.control_config.clip_actions,
+                self._cfg.control_config.clip_actions,
+            ),
             dtype=self._np_dtype,
         )
-        state.info["last_actions"] = state.info.get("current_actions", np.zeros_like(clipped_actions))
+        state.info["last_actions"] = state.info.get(
+            "current_actions", np.zeros_like(clipped_actions)
+        )
         state.info["current_actions"] = clipped_actions
         exec_actions = (
             state.info["last_actions"]
@@ -269,8 +298,12 @@ class Real68BalanceEnv(Real68BaseEnv):
             else clipped_actions
         )
         targets = np.zeros_like(exec_actions, dtype=self._np_dtype)
-        targets[:, HIP_INDICES] = exec_actions[:, HIP_INDICES] * self._cfg.control_config.hip_velocity_scale
-        targets[:, WHEEL_INDICES] = exec_actions[:, WHEEL_INDICES] * self._cfg.control_config.wheel_velocity_scale
+        targets[:, HIP_INDICES] = (
+            exec_actions[:, HIP_INDICES] * self._cfg.control_config.hip_velocity_scale
+        )
+        targets[:, WHEEL_INDICES] = (
+            exec_actions[:, WHEEL_INDICES] * self._cfg.control_config.wheel_velocity_scale
+        )
         targets[:, CALF_INDICES] = (
             self.default_angles[CALF_INDICES]
             + exec_actions[:, CALF_INDICES] * self._cfg.control_config.calf_action_scale
@@ -280,9 +313,13 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _pre_step_motor_control(self, backend: Any, policy_ctrl: np.ndarray) -> np.ndarray:
         active_pos = self.get_dof_pos()
         active_vel = self.get_dof_vel()
-        hip_kd = np.full((self._num_envs, len(HIP_INDICES)), self._cfg.control_config.hip_kd, dtype=np.float64)
+        hip_kd = np.full(
+            (self._num_envs, len(HIP_INDICES)), self._cfg.control_config.hip_kd, dtype=np.float64
+        )
         wheel_kd = np.full(
-            (self._num_envs, len(WHEEL_INDICES)), self._cfg.control_config.wheel_kd, dtype=np.float64
+            (self._num_envs, len(WHEEL_INDICES)),
+            self._cfg.control_config.wheel_kd,
+            dtype=np.float64,
         )
         calf_kp = np.full(
             (self._num_envs, len(CALF_INDICES)), self._cfg.control_config.calf_kp, dtype=np.float64
@@ -324,7 +361,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._update_commands(state.info)
         linvel = self.get_local_linvel()
         gyro = self.get_gyro()
-        gravity = np.asarray(self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype)
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
         accel = self.get_accel()
         quat = self.get_imu_quat()
         dof_pos = self.get_dof_pos()
@@ -391,7 +430,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         noisy_wheel_vel = self._obs_noise(wheel_vel, noise_cfg.scale_joint_vel)
         base_height = self._reward_base_height_values(gyro.shape[0])
         height_commands = np.asarray(
-            info.get("height_commands", np.full((gyro.shape[0],), self._reward_cfg.base_height_target)),
+            info.get(
+                "height_commands", np.full((gyro.shape[0],), self._reward_cfg.base_height_target)
+            ),
             dtype=self._np_dtype,
         )
         height_error = (height_commands - base_height)[:, None]
@@ -484,11 +525,15 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
 
     def _update_commands(self, info: dict) -> None:
-        commands = np.asarray(info.get("commands", np.zeros((self._num_envs, 3))), dtype=self._np_dtype)
+        commands = np.asarray(
+            info.get("commands", np.zeros((self._num_envs, 3))), dtype=self._np_dtype
+        )
         height_commands = np.asarray(
             info.get(
                 "height_commands",
-                np.full((self._num_envs,), self._reward_cfg.base_height_target, dtype=self._np_dtype),
+                np.full(
+                    (self._num_envs,), self._reward_cfg.base_height_target, dtype=self._np_dtype
+                ),
             ),
             dtype=self._np_dtype,
         )
@@ -514,7 +559,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         info["height_commands"] = height_commands
 
     def _estimate_dof_acc(self, dof_vel: np.ndarray) -> np.ndarray:
-        qacc = np.asarray((dof_vel - self._last_dof_vel_for_acc) / self._cfg.ctrl_dt, dtype=self._np_dtype)
+        qacc = np.asarray(
+            (dof_vel - self._last_dof_vel_for_acc) / self._cfg.ctrl_dt, dtype=self._np_dtype
+        )
         self._last_dof_vel_for_acc[:] = dof_vel
         return qacc
 
@@ -534,7 +581,9 @@ class Real68BalanceEnv(Real68BaseEnv):
 
     def _reward_wheel_vel(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.dof_vel is not None
-        return np.asarray(np.sum(np.square(ctx.dof_vel[:, WHEEL_INDICES]), axis=1), dtype=self._np_dtype)
+        return np.asarray(
+            np.sum(np.square(ctx.dof_vel[:, WHEEL_INDICES]), axis=1), dtype=self._np_dtype
+        )
 
     def _reward_posture(self, ctx: RewardContext) -> np.ndarray:
         posture = ctx.dof_pos[:, POSTURE_INDICES] - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
@@ -551,7 +600,9 @@ class Real68BalanceEnv(Real68BaseEnv):
 
     def _reward_height_tracking(self, ctx: RewardContext) -> np.ndarray:
         targets = np.asarray(
-            ctx.info.get("height_commands", np.full((ctx.num_envs,), self._reward_cfg.base_height_target)),
+            ctx.info.get(
+                "height_commands", np.full((ctx.num_envs,), self._reward_cfg.base_height_target)
+            ),
             dtype=self._np_dtype,
         )
         error = targets - ctx.base_height
