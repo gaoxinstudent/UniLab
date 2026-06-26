@@ -1,0 +1,11 @@
+# @package _global_
+# Exp-7 lift line, v3 easy: same proximity-gated lift fix as v3 but with a lower / wider
+# success criterion (goal z 1.13 -> 1.09, success_dist 0.05 -> 0.06) to make the first
+# non-zero successes easier to reach. Used as the gpu1 / gpu2 arms of the exp7e/f matrix.
+defaults:
+  - /task/openarm_demo_pick/mujoco_lift3d_v3
+  - _self_
+env:
+  goal_pos: [0.46, 0.0, 1.09]
+reward:
+  success_dist: 0.06
