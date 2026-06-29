@@ -70,17 +70,20 @@ class Real68RoughDomainRandConfig(Real68DomainRandConfig):
 class Real68CommandCurriculumCfg:
     enabled: bool = True
     initial_vel_limit: list[list[float]] = field(
-        default_factory=lambda: [[0.1, 0.0, -0.1], [0.35, 0.0, 0.1]]
+        default_factory=lambda: [[0.1, 0.0, -0.3], [0.35, 0.0, 0.3]]
     )
     final_vel_limit: list[list[float]] = field(
         default_factory=lambda: [[-2.0, 0.0, -5.0], [3.0, 0.0, 5.0]]
     )
-    step: float = 0.03
+    vx_step: float = 0.03
+    yaw_step: float = 0.02
     update_interval_logs: int = 6
     min_speed_ratio: float = 0.45
     max_vx_error: float = 0.25
     max_wz_error: float = 0.9
-    terrain_unlock_progress: float = 0.6
+    yaw_unlock_vx_progress: float = 0.6
+    reverse_unlock_vx_progress: float = 0.7
+    terrain_unlock_vx_progress: float = 0.8
 
 
 @dataclass
@@ -243,7 +246,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._rough_scan_base_pos: np.ndarray | None = None
         self._rough_scan_height_obs: np.ndarray | None = None
         self._rough_scan_base_height: np.ndarray | None = None
-        self._command_curriculum_progress = 0.0
+        self._command_curriculum_vx_progress = 0.0
+        self._command_curriculum_yaw_progress = 0.0
         self._command_curriculum_log_count = 0
         self._command_curriculum_low = np.asarray(
             cfg.command_curriculum.initial_vel_limit[0]
@@ -302,30 +306,46 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         wz_error: float,
     ) -> None:
         cfg = self._cfg.command_curriculum
-        if not cfg.enabled or self._command_curriculum_progress >= 1.0:
+        if not cfg.enabled:
             return
         self._command_curriculum_log_count += 1
         interval = max(int(cfg.update_interval_logs), 1)
         if self._command_curriculum_log_count % interval != 0:
             return
         speed_ratio = mean_abs_vx / max(mean_abs_cmd_x, 1.0e-6)
-        ready = (
-            speed_ratio >= float(cfg.min_speed_ratio)
-            and vx_error <= float(cfg.max_vx_error)
-            and wz_error <= float(cfg.max_wz_error)
-        )
-        if not ready:
-            return
-        self._command_curriculum_progress = min(
-            1.0, self._command_curriculum_progress + float(cfg.step)
-        )
-        alpha = self._command_curriculum_progress
+        vx_ready = speed_ratio >= float(cfg.min_speed_ratio) and vx_error <= float(cfg.max_vx_error)
+        if vx_ready and self._command_curriculum_vx_progress < 1.0:
+            self._command_curriculum_vx_progress = min(
+                1.0, self._command_curriculum_vx_progress + float(cfg.vx_step)
+            )
+        yaw_ready = self._command_curriculum_vx_progress >= float(
+            cfg.yaw_unlock_vx_progress
+        ) and wz_error <= float(cfg.max_wz_error)
+        if yaw_ready and self._command_curriculum_yaw_progress < 1.0:
+            self._command_curriculum_yaw_progress = min(
+                1.0, self._command_curriculum_yaw_progress + float(cfg.yaw_step)
+            )
+        self._refresh_command_curriculum_limits()
+
+    def _refresh_command_curriculum_limits(self) -> None:
+        cfg = self._cfg.command_curriculum
         initial_low = np.asarray(cfg.initial_vel_limit[0], dtype=self._np_dtype)
         initial_high = np.asarray(cfg.initial_vel_limit[1], dtype=self._np_dtype)
         final_low = np.asarray(cfg.final_vel_limit[0], dtype=self._np_dtype)
         final_high = np.asarray(cfg.final_vel_limit[1], dtype=self._np_dtype)
-        self._command_curriculum_low = (1.0 - alpha) * initial_low + alpha * final_low
-        self._command_curriculum_high = (1.0 - alpha) * initial_high + alpha * final_high
+        low = initial_low.copy()
+        high = initial_high.copy()
+        vx_alpha = self._command_curriculum_vx_progress
+        yaw_alpha = self._command_curriculum_yaw_progress
+        high[0] = (1.0 - vx_alpha) * initial_high[0] + vx_alpha * final_high[0]
+        reverse_unlock = float(cfg.reverse_unlock_vx_progress)
+        if vx_alpha >= reverse_unlock:
+            reverse_alpha = (vx_alpha - reverse_unlock) / max(1.0 - reverse_unlock, 1.0e-6)
+            low[0] = (1.0 - reverse_alpha) * initial_low[0] + reverse_alpha * final_low[0]
+        low[2] = (1.0 - yaw_alpha) * initial_low[2] + yaw_alpha * final_low[2]
+        high[2] = (1.0 - yaw_alpha) * initial_high[2] + yaw_alpha * final_high[2]
+        self._command_curriculum_low = low
+        self._command_curriculum_high = high
 
     def _init_reward_functions(self) -> None:
         def gated(fn):
@@ -407,7 +427,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         cfg = self._cfg.command_curriculum
         if not cfg.enabled:
             return True
-        return self._command_curriculum_progress >= float(cfg.terrain_unlock_progress)
+        return self._command_curriculum_vx_progress >= float(cfg.terrain_unlock_vx_progress)
 
     def _after_update_state(
         self,
@@ -460,7 +480,9 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         log["metrics/mean_abs_cmd_yaw"] = mean_abs_cmd_yaw
         log["metrics/commanded_nonzero_frac"] = float(np.mean(active))
         log["metrics/commanded_yaw_nonzero_frac"] = float(np.mean(active_yaw))
-        log["command_curriculum/progress"] = float(self._command_curriculum_progress)
+        log["command_curriculum/progress"] = float(self._command_curriculum_vx_progress)
+        log["command_curriculum/vx_progress"] = float(self._command_curriculum_vx_progress)
+        log["command_curriculum/yaw_progress"] = float(self._command_curriculum_yaw_progress)
         log["command_curriculum/speed_ratio"] = float(mean_abs_vx / max(mean_abs_cmd_x, 1.0e-6))
         log["command_curriculum/terrain_unlocked"] = float(self._terrain_curriculum_unlocked())
         log["command_curriculum/low_vx"] = float(self._command_curriculum_low[0])

@@ -55,17 +55,20 @@ env:
   command_curriculum:
     enabled: true
     initial_vel_limit:
-      - [0.1, 0.0, -0.1]
-      - [0.35, 0.0, 0.1]
+      - [0.1, 0.0, -0.3]
+      - [0.35, 0.0, 0.3]
     final_vel_limit:
       - [-2.0, 0.0, -5.0]
       - [3.0, 0.0, 5.0]
-    step: 0.03
+    vx_step: 0.03
+    yaw_step: 0.02
     update_interval_logs: 6
     min_speed_ratio: 0.45
     max_vx_error: 0.25
     max_wz_error: 0.9
-    terrain_unlock_progress: 0.6
+    yaw_unlock_vx_progress: 0.6
+    reverse_unlock_vx_progress: 0.7
+    terrain_unlock_vx_progress: 0.8
   height_command:
     range: [0.199, 0.35]
   terrain_scan:
@@ -104,8 +107,8 @@ env:
 reward:
   scales:
     tracking_lin_vel: 2.0
-    tracking_ang_vel: 1.0
-    forward_progress: 4.0
+    tracking_ang_vel: 0.4
+    forward_progress: 8.0
     under_speed: -0.75
     height_tracking: 0.5
     orientation: -3.5
