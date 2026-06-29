@@ -290,6 +290,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             dtype=self._np_dtype,
         )
         commands[:, 1] = 0.0
+        if self._yaw_curriculum_locked():
+            commands[:, 2] = 0.0
         zero_small_xy_commands(commands, threshold=0.08)
         standing_prob = float(getattr(self._cfg.commands, "rel_standing_envs", 0.0))
         if standing_prob > 0.0:
@@ -347,6 +349,12 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._command_curriculum_low = low
         self._command_curriculum_high = high
 
+    def _yaw_curriculum_locked(self) -> bool:
+        cfg = self._cfg.command_curriculum
+        return bool(
+            cfg.enabled and self._command_curriculum_vx_progress < float(cfg.yaw_unlock_vx_progress)
+        )
+
     def _init_reward_functions(self) -> None:
         def gated(fn):
             return lambda ctx: fn(ctx) * self._upright_scale(ctx.gravity)
@@ -383,6 +391,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             "tracking_ang_vel": gated(rewards.tracking_ang_vel),
             "forward_progress": gated(rewards.forward_progress),
             "under_speed": gated(rewards.under_speed),
+            "yaw_rate_when_uncommanded": gated(rewards.yaw_rate_when_uncommanded),
             "lin_vel_z": gated(rewards.lin_vel_z),
             "ang_vel_xy": gated(rewards.ang_vel_xy),
             "orientation": gated(rewards.orientation),

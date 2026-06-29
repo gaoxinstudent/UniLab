@@ -67,6 +67,13 @@ def tracking_ang_vel(ctx: RewardContext) -> np.ndarray:
     return np.exp(-ang_vel_error / ctx.tracking_sigma)  # type: ignore[no-any-return]
 
 
+def yaw_rate_when_uncommanded(ctx: RewardContext, command_threshold: float = 0.05) -> np.ndarray:
+    """Penalty for yawing when the commanded yaw rate is near zero."""
+    commands = ctx.info["commands"]
+    uncommanded = np.abs(commands[:, 2]) < command_threshold
+    return np.asarray(np.square(ctx.gyro[:, 2]) * uncommanded, dtype=get_global_dtype())
+
+
 def forward_progress(ctx: RewardContext) -> np.ndarray:
     """Reward signed progress relative to commanded x velocity."""
     commands = ctx.info["commands"]

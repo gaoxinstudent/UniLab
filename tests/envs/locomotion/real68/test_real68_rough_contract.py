@@ -112,8 +112,7 @@ def test_real68_command_curriculum_starts_small_and_expands():
         commands = env.sample_velocity_commands(256)
         assert float(commands[:, 0].min()) >= 0.1 - 1.0e-6
         assert float(commands[:, 0].max()) <= 0.35 + 1.0e-6
-        assert float(commands[:, 2].min()) >= -0.3 - 1.0e-6
-        assert float(commands[:, 2].max()) <= 0.3 + 1.0e-6
+        np.testing.assert_allclose(commands[:, 2], 0.0)
 
         env._update_command_curriculum(
             mean_abs_vx=0.12,
@@ -137,5 +136,10 @@ def test_real68_command_curriculum_starts_small_and_expands():
         assert env._command_curriculum_yaw_progress == pytest.approx(0.25)
         assert env._command_curriculum_low[0] < 0.1
         assert env._command_curriculum_high[2] > 0.3
+
+        commands = env.sample_velocity_commands(256)
+        assert float(commands[:, 2].min()) >= -5.0
+        assert float(commands[:, 2].max()) <= 5.0
+        assert np.any(np.abs(commands[:, 2]) > 0.0)
     finally:
         env.close()
