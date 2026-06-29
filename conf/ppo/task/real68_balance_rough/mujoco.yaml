@@ -48,10 +48,24 @@ env:
     calf_kd: 3.0
   commands:
     vel_limit:
-      - [-0.15, 0.0, -0.1]
-      - [0.3, 0.0, 0.1]
+      - [-2.0, 0.0, -5.0]
+      - [3.0, 0.0, 5.0]
     resampling_time: 3.0
     rel_standing_envs: 0.0
+  command_curriculum:
+    enabled: true
+    initial_vel_limit:
+      - [0.1, 0.0, -0.1]
+      - [0.35, 0.0, 0.1]
+    final_vel_limit:
+      - [-2.0, 0.0, -5.0]
+      - [3.0, 0.0, 5.0]
+    step: 0.03
+    update_interval_logs: 6
+    min_speed_ratio: 0.45
+    max_vx_error: 0.25
+    max_wz_error: 0.9
+    terrain_unlock_progress: 0.6
   height_command:
     range: [0.199, 0.35]
   terrain_scan:
@@ -69,6 +83,7 @@ env:
     nonwheel_contact_max_steps: 8
   terrain_curriculum:
     enabled: true
+    promote_frac: 0.2
   domain_rand:
     reset_roll_range: [-0.1, 0.1]
     reset_pitch_range: [-0.1, 0.1]
@@ -88,8 +103,10 @@ env:
 
 reward:
   scales:
-    tracking_lin_vel: 3.0
+    tracking_lin_vel: 2.0
     tracking_ang_vel: 1.0
+    forward_progress: 4.0
+    under_speed: -0.75
     height_tracking: 0.5
     orientation: -3.5
     lin_vel_z: -2.0
@@ -102,7 +119,7 @@ reward:
     joint_pos_penalty: -1.0
     joint_power: -2.0e-5
     nonwheel_contact: -2.0
-    alive: 0.1
+    alive: 0.02
   tracking_sigma: 0.5
   height_tracking_sigma: 0.02
   base_height_target: 0.257282

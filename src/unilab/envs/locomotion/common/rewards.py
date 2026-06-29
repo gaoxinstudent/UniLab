@@ -68,20 +68,25 @@ def tracking_ang_vel(ctx: RewardContext) -> np.ndarray:
 
 
 def forward_progress(ctx: RewardContext) -> np.ndarray:
-    """Reward for forward progress relative to commanded speed."""
+    """Reward signed progress relative to commanded x velocity."""
     commands = ctx.info["commands"]
-    commanded_speed = np.maximum(commands[:, 0], 1e-6)
-    forward_speed = np.maximum(ctx.linvel[:, 0], 0.0)
-    return np.asarray(np.minimum(forward_speed / commanded_speed, 1.0), dtype=get_global_dtype())
+    cmd_x = np.asarray(commands[:, 0], dtype=get_global_dtype())
+    active = np.abs(cmd_x) > 0.05
+    cmd_abs = np.maximum(np.abs(cmd_x), 1e-6)
+    signed_speed = ctx.linvel[:, 0] * np.sign(cmd_x)
+    progress = np.clip(signed_speed / cmd_abs, 0.0, 1.0)
+    return np.asarray(np.where(active, progress, 0.0), dtype=get_global_dtype())
 
 
 def under_speed(ctx: RewardContext) -> np.ndarray:
-    """Penalty for being below commanded forward speed."""
+    """Penalty for being below signed commanded x velocity."""
     commands = ctx.info["commands"]
-    commanded_speed = np.maximum(commands[:, 0], 1e-6)
-    forward_speed = np.maximum(ctx.linvel[:, 0], 0.0)
-    gap = np.maximum(commands[:, 0] - forward_speed, 0.0)
-    return np.asarray(gap / commanded_speed, dtype=get_global_dtype())
+    cmd_x = np.asarray(commands[:, 0], dtype=get_global_dtype())
+    active = np.abs(cmd_x) > 0.05
+    cmd_abs = np.maximum(np.abs(cmd_x), 1e-6)
+    signed_speed = ctx.linvel[:, 0] * np.sign(cmd_x)
+    gap = np.maximum(cmd_abs - signed_speed, 0.0)
+    return np.asarray(np.where(active, gap / cmd_abs, 0.0), dtype=get_global_dtype())
 
 
 # ── velocity / orientation penalties ─────────────────────────────────

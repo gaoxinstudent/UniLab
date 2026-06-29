@@ -21,8 +21,7 @@ from unilab.dr.dr_utils import (
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import np_quat_mul, np_yaw_to_quat
 from unilab.envs.locomotion.common import rewards
-from unilab.envs.locomotion.common.commands import Commands
-from unilab.envs.locomotion.common.commands import zero_small_xy_commands
+from unilab.envs.locomotion.common.commands import Commands, zero_small_xy_commands
 from unilab.envs.locomotion.common.domain_rand import DomainRandConfig
 from unilab.envs.locomotion.common.dr_provider import LocomotionDRProvider
 from unilab.envs.locomotion.common.rewards import RewardContext
@@ -35,10 +34,10 @@ from unilab.envs.locomotion.real68.base import (
     NONWHEEL_CONTACT_SENSORS,
     NUM_ACTIONS,
     POSTURE_INDICES,
-    Real68BaseCfg,
-    Real68BaseEnv,
     WHEEL_CONTACT_SENSORS,
     WHEEL_INDICES,
+    Real68BaseCfg,
+    Real68BaseEnv,
     compute_real68_motor_ctrl,
     scalarize_contacts,
 )
@@ -398,7 +397,17 @@ class Real68BalanceEnv(Real68BaseEnv):
             dof_pos,
             dof_vel,
         )
-        return state.replace(obs=obs, reward=reward, terminated=terminated)
+        state = state.replace(obs=obs, reward=reward, terminated=terminated)
+        self._after_update_state(state, linvel, gyro)
+        return state
+
+    def _after_update_state(
+        self,
+        state: NpEnvState,
+        linvel: np.ndarray,
+        gyro: np.ndarray,
+    ) -> None:
+        del state, linvel, gyro
 
     def _compute_terminated(self, gravity: np.ndarray) -> np.ndarray:
         base_z = self._reward_base_height_values(gravity.shape[0])

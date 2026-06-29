@@ -50,7 +50,7 @@ from unilab.terrains import (
 @dataclass
 class Real68RoughCommands(Real68Commands):
     vel_limit: list[list[float]] = field(
-        default_factory=lambda: [[-0.15, 0.0, -0.1], [0.3, 0.0, 0.1]]
+        default_factory=lambda: [[-2.0, 0.0, -5.0], [3.0, 0.0, 5.0]]
     )
     resampling_time: float = 3.0
     rel_standing_envs: float = 0.0
@@ -64,6 +64,23 @@ class Real68RoughDomainRandConfig(Real68DomainRandConfig):
     reset_pitch_range: list[float] = field(default_factory=lambda: [-0.1, 0.1])
     reset_yaw_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     reset_qvel_limit: float = 0.15
+
+
+@dataclass
+class Real68CommandCurriculumCfg:
+    enabled: bool = True
+    initial_vel_limit: list[list[float]] = field(
+        default_factory=lambda: [[0.1, 0.0, -0.1], [0.35, 0.0, 0.1]]
+    )
+    final_vel_limit: list[list[float]] = field(
+        default_factory=lambda: [[-2.0, 0.0, -5.0], [3.0, 0.0, 5.0]]
+    )
+    step: float = 0.03
+    update_interval_logs: int = 6
+    min_speed_ratio: float = 0.45
+    max_vx_error: float = 0.25
+    max_wz_error: float = 0.9
+    terrain_unlock_progress: float = 0.6
 
 
 @dataclass
@@ -148,6 +165,9 @@ class Real68BalanceRoughCfg(Real68BalanceCfg):
         )
     )
     commands: Real68RoughCommands = field(default_factory=Real68RoughCommands)
+    command_curriculum: Real68CommandCurriculumCfg = field(
+        default_factory=Real68CommandCurriculumCfg
+    )
     terrain_scan: HeightScanConfig = field(default_factory=HeightScanConfig)
     termination_config: RoughTerminationConfig = field(default_factory=RoughTerminationConfig)
     terrain_curriculum: TerrainCurriculumCfg = field(default_factory=TerrainCurriculumCfg)
@@ -157,9 +177,6 @@ class Real68BalanceRoughCfg(Real68BalanceCfg):
 class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomizationProvider):
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         num_reset = len(env_ids)
-        current_base_pos = np.asarray(env._backend.get_base_pos(), dtype=np.float64)
-        if current_base_pos.shape[0] == env._num_envs:
-            env._spawn.update_on_done(env_ids, current_base_pos[env_ids])
         qpos = np.tile(env._init_qpos, (num_reset, 1))
         qvel = np.tile(env._init_qvel, (num_reset, 1))
 
@@ -226,6 +243,20 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._rough_scan_base_pos: np.ndarray | None = None
         self._rough_scan_height_obs: np.ndarray | None = None
         self._rough_scan_base_height: np.ndarray | None = None
+        self._command_curriculum_progress = 0.0
+        self._command_curriculum_log_count = 0
+        self._command_curriculum_low = np.asarray(
+            cfg.command_curriculum.initial_vel_limit[0]
+            if cfg.command_curriculum.enabled
+            else cfg.commands.vel_limit[0],
+            dtype=self._np_dtype,
+        )
+        self._command_curriculum_high = np.asarray(
+            cfg.command_curriculum.initial_vel_limit[1]
+            if cfg.command_curriculum.enabled
+            else cfg.commands.vel_limit[1],
+            dtype=self._np_dtype,
+        )
         terrain_origins = getattr(self._backend, "terrain_origins", None)
         terrain_generator = cfg.scene.terrain.generator if cfg.scene.terrain is not None else None
         if terrain_origins is not None and terrain_generator is not None:
@@ -248,8 +279,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         return obs, info
 
     def sample_velocity_commands(self, num_samples: int) -> np.ndarray:
-        low = np.asarray(self._cfg.commands.vel_limit[0], dtype=self._np_dtype)
-        high = np.asarray(self._cfg.commands.vel_limit[1], dtype=self._np_dtype)
+        low = self._command_curriculum_low
+        high = self._command_curriculum_high
         commands = np.asarray(
             np.random.uniform(low=low, high=high, size=(num_samples, 3)),
             dtype=self._np_dtype,
@@ -261,6 +292,40 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             standing = np.random.uniform(size=(num_samples,)) < min(standing_prob, 1.0)
             commands[standing] = 0.0
         return commands
+
+    def _update_command_curriculum(
+        self,
+        *,
+        mean_abs_vx: float,
+        mean_abs_cmd_x: float,
+        vx_error: float,
+        wz_error: float,
+    ) -> None:
+        cfg = self._cfg.command_curriculum
+        if not cfg.enabled or self._command_curriculum_progress >= 1.0:
+            return
+        self._command_curriculum_log_count += 1
+        interval = max(int(cfg.update_interval_logs), 1)
+        if self._command_curriculum_log_count % interval != 0:
+            return
+        speed_ratio = mean_abs_vx / max(mean_abs_cmd_x, 1.0e-6)
+        ready = (
+            speed_ratio >= float(cfg.min_speed_ratio)
+            and vx_error <= float(cfg.max_vx_error)
+            and wz_error <= float(cfg.max_wz_error)
+        )
+        if not ready:
+            return
+        self._command_curriculum_progress = min(
+            1.0, self._command_curriculum_progress + float(cfg.step)
+        )
+        alpha = self._command_curriculum_progress
+        initial_low = np.asarray(cfg.initial_vel_limit[0], dtype=self._np_dtype)
+        initial_high = np.asarray(cfg.initial_vel_limit[1], dtype=self._np_dtype)
+        final_low = np.asarray(cfg.final_vel_limit[0], dtype=self._np_dtype)
+        final_high = np.asarray(cfg.final_vel_limit[1], dtype=self._np_dtype)
+        self._command_curriculum_low = (1.0 - alpha) * initial_low + alpha * final_low
+        self._command_curriculum_high = (1.0 - alpha) * initial_high + alpha * final_high
 
     def _init_reward_functions(self) -> None:
         def gated(fn):
@@ -296,6 +361,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._reward_fns = {
             "tracking_lin_vel": gated(rewards.tracking_lin_vel),
             "tracking_ang_vel": gated(rewards.tracking_ang_vel),
+            "forward_progress": gated(rewards.forward_progress),
+            "under_speed": gated(rewards.under_speed),
             "lin_vel_z": gated(rewards.lin_vel_z),
             "ang_vel_xy": gated(rewards.ang_vel_xy),
             "orientation": gated(rewards.orientation),
@@ -320,7 +387,89 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._clear_height_scan_cache()
-        return super().update_state(state)
+        state = super().update_state(state)
+        done = state.terminated | state.truncated
+        if np.any(done):
+            done_indices = np.where(done)[0]
+            if self._terrain_curriculum_unlocked():
+                stats = self._spawn.update_on_done(
+                    done_indices, self._backend.get_base_pos()[done_indices]
+                )
+            else:
+                stats = {}
+            if stats:
+                log = state.info.setdefault("log", {})
+                for k, v in stats.items():
+                    log[f"terrain_curriculum/{k}"] = float(v)
+        return state
+
+    def _terrain_curriculum_unlocked(self) -> bool:
+        cfg = self._cfg.command_curriculum
+        if not cfg.enabled:
+            return True
+        return self._command_curriculum_progress >= float(cfg.terrain_unlock_progress)
+
+    def _after_update_state(
+        self,
+        state: NpEnvState,
+        linvel: np.ndarray,
+        gyro: np.ndarray,
+    ) -> None:
+        self._log_motion_and_curriculum_metrics(state, linvel, gyro)
+
+    def _log_motion_and_curriculum_metrics(
+        self,
+        state: NpEnvState,
+        linvel: np.ndarray,
+        gyro: np.ndarray,
+    ) -> None:
+        log = state.info.get("log")
+        if not isinstance(log, dict):
+            return
+        commands = np.asarray(
+            state.info.get("commands", np.zeros((self._num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        cmd_x = commands[:, 0]
+        cmd_yaw = commands[:, 2]
+        linvel_x = linvel[:, 0]
+        gyro_z = gyro[:, 2]
+        active = np.abs(cmd_x) > 0.05
+        active_yaw = np.abs(cmd_yaw) > 0.05
+        mean_abs_vx = float(np.mean(np.abs(linvel_x)))
+        mean_abs_wz = float(np.mean(np.abs(gyro_z)))
+        mean_abs_cmd_x = float(np.mean(np.abs(cmd_x)))
+        mean_abs_cmd_yaw = float(np.mean(np.abs(cmd_yaw)))
+        vx_error = float(np.mean(np.abs(cmd_x - linvel_x)))
+        wz_error = float(np.mean(np.abs(cmd_yaw - gyro_z)))
+        self._update_command_curriculum(
+            mean_abs_vx=mean_abs_vx,
+            mean_abs_cmd_x=mean_abs_cmd_x,
+            vx_error=vx_error,
+            wz_error=wz_error,
+        )
+        log["metrics/linvel_x"] = float(np.mean(linvel_x))
+        log["metrics/gyro_z"] = float(np.mean(gyro_z))
+        log["metrics/cmd_x"] = float(np.mean(cmd_x))
+        log["metrics/cmd_yaw"] = float(np.mean(cmd_yaw))
+        log["metrics/vx_error"] = vx_error
+        log["metrics/wz_error"] = wz_error
+        log["metrics/mean_abs_vx"] = mean_abs_vx
+        log["metrics/mean_abs_wz"] = mean_abs_wz
+        log["metrics/mean_abs_cmd_x"] = mean_abs_cmd_x
+        log["metrics/mean_abs_cmd_yaw"] = mean_abs_cmd_yaw
+        log["metrics/commanded_nonzero_frac"] = float(np.mean(active))
+        log["metrics/commanded_yaw_nonzero_frac"] = float(np.mean(active_yaw))
+        log["command_curriculum/progress"] = float(self._command_curriculum_progress)
+        log["command_curriculum/speed_ratio"] = float(mean_abs_vx / max(mean_abs_cmd_x, 1.0e-6))
+        log["command_curriculum/terrain_unlocked"] = float(self._terrain_curriculum_unlocked())
+        log["command_curriculum/low_vx"] = float(self._command_curriculum_low[0])
+        log["command_curriculum/high_vx"] = float(self._command_curriculum_high[0])
+        log["command_curriculum/low_wz"] = float(self._command_curriculum_low[2])
+        log["command_curriculum/high_wz"] = float(self._command_curriculum_high[2])
+        log["terrain_curriculum/mean_level"] = float(self._spawn.levels.mean())
+        log["terrain_curriculum/max_level"] = float(self._spawn.levels.max())
+        log["terrain_curriculum/min_level"] = float(self._spawn.levels.min())
 
     def _clear_height_scan_cache(self) -> None:
         self._rough_scan_raw = None

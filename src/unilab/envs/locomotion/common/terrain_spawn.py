@@ -195,6 +195,7 @@ class TerrainSpawnManager(BaseSpawnManager):
             return {
                 "mean_level": float(self.levels.mean()),
                 "max_level": float(self.levels.max()),
+                "min_level": float(self.levels.min()),
                 "mean_walked": 0.0,
                 "num_promoted": 0,
                 "num_demoted": 0,
@@ -235,6 +236,7 @@ class TerrainSpawnManager(BaseSpawnManager):
         return {
             "mean_level": float(self.levels.mean()),
             "max_level": float(self.levels.max()),
+            "min_level": float(self.levels.min()),
             "mean_walked": float(walked.mean()),
             "num_promoted": num_promoted,
             "num_demoted": num_demoted,
