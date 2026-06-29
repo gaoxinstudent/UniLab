@@ -39,7 +39,6 @@ from unilab.envs.locomotion.real68.balance import (
 from unilab.terrains import (
     SubTerrainCfg,
     TerrainGeneratorCfg,
-    flat,
     hf_pyramid_slope,
     hf_pyramid_slope_inv,
     pyramid_stairs,
@@ -75,6 +74,9 @@ class RoughTerminationConfig:
     fall_termination: bool = True
     min_up_proj: float = 0.2
     min_base_height: float = 0.12
+    nonwheel_contact_termination: bool = True
+    nonwheel_contact_threshold: float = 0.5
+    nonwheel_contact_max_steps: int = 8
 
 
 @dataclass(kw_only=True)
@@ -88,41 +90,40 @@ class Real68RoughTerrainCfg(TerrainGeneratorCfg):
 
     sub_terrains: dict[str, SubTerrainCfg] = field(
         default_factory=lambda: {
-            "flat": flat(proportion=0.35),
             "pyramid_stairs": pyramid_stairs(
-                proportion=0.1,
+                proportion=0.2,
                 step_height_range=(0.025, 0.20),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "pyramid_stairs_inv": pyramid_stairs_inv(
-                proportion=0.1,
+                proportion=0.2,
                 step_height_range=(0.025, 0.20),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope": hf_pyramid_slope(
-                proportion=0.15,
+                proportion=0.2,
                 slope_range=(0.0, 0.3),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
-                proportion=0.15,
+                proportion=0.2,
                 slope_range=(0.0, 0.3),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "random_rough": random_rough(
-                proportion=0.075,
+                proportion=0.1,
                 noise_range=(0.01, 0.06),
                 noise_step=0.01,
                 border_width=0.2,
             ),
             "wave_terrain": wave_terrain(
-                proportion=0.075,
+                proportion=0.1,
                 amplitude_range=(0.0, 0.12),
                 num_waves=4,
                 border_width=0.2,
@@ -155,16 +156,6 @@ class Real68BalanceRoughCfg(Real68BalanceCfg):
 
 
 class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomizationProvider):
-    def _sample_commands(self, env: Any, num_reset: int) -> np.ndarray:
-        commands = super()._sample_commands(env, num_reset)
-        commands[:, 1] = 0.0
-        zero_small_xy_commands(commands, threshold=0.08)
-        standing_prob = float(env.cfg.commands.rel_standing_envs)
-        if standing_prob > 0.0:
-            standing = np.random.uniform(size=(num_reset,)) < min(standing_prob, 1.0)
-            commands[standing] = 0.0
-        return commands
-
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         num_reset = len(env_ids)
         current_base_pos = np.asarray(env._backend.get_base_pos(), dtype=np.float64)
@@ -177,7 +168,6 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         qpos[:, 0:2] += np.random.uniform(xy_low, xy_high, (num_reset, 2))
         z_low, z_high = env.cfg.domain_rand.reset_height_offset_range
         qpos[:, 2] += np.random.uniform(z_low, z_high, (num_reset,))
-        qpos[:, 0:3] += env._spawn.origins_for(env_ids)
 
         roll_low, roll_high = env.cfg.domain_rand.reset_roll_range
         pitch_low, pitch_high = env.cfg.domain_rand.reset_pitch_range
@@ -185,6 +175,7 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         roll = np.random.uniform(roll_low, roll_high, (num_reset,))
         pitch = np.random.uniform(pitch_low, pitch_high, (num_reset,))
         yaw = np.random.uniform(yaw_low, yaw_high, (num_reset,))
+        qpos[:, 0:3] = env._spawn.apply_spawn(env_ids, qpos[:, 0:3], yaw=yaw)
         qpos[:, 3:7] = np_quat_mul(qpos[:, 3:7], np_quat_from_euler_xyz(roll, pitch, yaw))
         env._spawn.record_episode_start(env_ids, qpos[:, 0:3])
 
@@ -194,7 +185,7 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
             dtype=get_global_dtype(),
         )
 
-        commands = self._sample_commands(env, num_reset)
+        commands = env.sample_velocity_commands(num_reset)
         height_commands = env.sample_height_commands(num_reset)
         info_updates = {
             "commands": commands,
@@ -231,6 +222,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
 
     def __init__(self, cfg: Real68BalanceRoughCfg, num_envs=1, backend_type="mujoco"):
         super().__init__(cfg, num_envs=num_envs, backend_type=backend_type)
+        self._nonwheel_contact_steps = np.zeros((num_envs,), dtype=np.int32)
         terrain_origins = getattr(self._backend, "terrain_origins", None)
         terrain_generator = cfg.scene.terrain.generator if cfg.scene.terrain is not None else None
         if terrain_origins is not None and terrain_generator is not None:
@@ -245,6 +237,27 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
 
     def _make_dr_provider(self) -> Real68BalanceRoughDomainRandomizationProvider:
         return Real68BalanceRoughDomainRandomizationProvider()
+
+    def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
+        env_ids = np.asarray(env_indices, dtype=np.int32)
+        obs, info = super().reset(env_ids)
+        self._nonwheel_contact_steps[env_ids] = 0
+        return obs, info
+
+    def sample_velocity_commands(self, num_samples: int) -> np.ndarray:
+        low = np.asarray(self._cfg.commands.vel_limit[0], dtype=self._np_dtype)
+        high = np.asarray(self._cfg.commands.vel_limit[1], dtype=self._np_dtype)
+        commands = np.asarray(
+            np.random.uniform(low=low, high=high, size=(num_samples, 3)),
+            dtype=self._np_dtype,
+        )
+        commands[:, 1] = 0.0
+        zero_small_xy_commands(commands, threshold=0.08)
+        standing_prob = float(getattr(self._cfg.commands, "rel_standing_envs", 0.0))
+        if standing_prob > 0.0:
+            standing = np.random.uniform(size=(num_samples,)) < min(standing_prob, 1.0)
+            commands[standing] = 0.0
+        return commands
 
     def _init_reward_functions(self) -> None:
         def gated(fn):
@@ -268,6 +281,12 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         def _nonwheel_contact(ctx: RewardContext) -> np.ndarray:
             return self._reward_nonwheel_contact(ctx) * self._upright_scale(ctx.gravity)
 
+        def _joint_pos_penalty(ctx: RewardContext) -> np.ndarray:
+            return self._reward_joint_pos_penalty(ctx) * self._upright_scale(ctx.gravity)
+
+        def _joint_power(ctx: RewardContext) -> np.ndarray:
+            return self._reward_joint_power(ctx) * self._upright_scale(ctx.gravity)
+
         def _alive(ctx: RewardContext) -> np.ndarray:
             return rewards.alive(ctx) * self._upright_scale(ctx.gravity)
 
@@ -282,6 +301,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             "posture": _posture,
             "leg_symmetry": _leg_symmetry,
             "height_tracking": _height_tracking,
+            "joint_pos_penalty": _joint_pos_penalty,
+            "joint_power": _joint_power,
             "nonwheel_contact": _nonwheel_contact,
             "alive": _alive,
             "action_rate": rewards.action_rate,
@@ -338,14 +359,28 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         return np.asarray(height, dtype=self._np_dtype)
 
     def _compute_terminated(self, gravity: np.ndarray) -> np.ndarray:
+        terminated = np.zeros((self._num_envs,), dtype=bool)
+        if self._cfg.termination_config.nonwheel_contact_termination:
+            threshold = float(self._cfg.termination_config.nonwheel_contact_threshold)
+            max_steps = max(int(self._cfg.termination_config.nonwheel_contact_max_steps), 1)
+            contact_active = np.max(self._nonwheel_contacts, axis=1) > threshold
+            self._nonwheel_contact_steps[contact_active] += 1
+            self._nonwheel_contact_steps[~contact_active] = 0
+            np.logical_or(
+                terminated,
+                self._nonwheel_contact_steps >= max_steps,
+                out=terminated,
+            )
         if not self._cfg.termination_config.fall_termination:
-            return np.zeros((self._num_envs,), dtype=bool)
+            return terminated
         base_height = self._reward_base_height_values(gravity.shape[0])
-        return np.asarray(
+        np.logical_or(
+            terminated,
             (gravity[:, 2] <= float(self._cfg.termination_config.min_up_proj))
             | (base_height <= float(self._cfg.termination_config.min_base_height)),
-            dtype=bool,
+            out=terminated,
         )
+        return terminated
 
     def _compute_truncated(self, state: NpEnvState) -> np.ndarray:
         truncated = super()._compute_truncated(state)

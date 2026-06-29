@@ -140,8 +140,7 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
             np.random.uniform(-limit, limit, size=(num_reset, 6)),
             dtype=get_global_dtype(),
         )
-        commands = self._sample_commands(env, num_reset)
-        zero_small_xy_commands(commands, threshold=0.15)
+        commands = env.sample_velocity_commands(num_reset)
         height_commands = env.sample_height_commands(num_reset)
         info_updates = {
             "commands": commands,
@@ -269,6 +268,21 @@ class Real68BalanceEnv(Real68BaseEnv):
         low, high = self._cfg.height_command.range
         return np.asarray(np.random.uniform(low, high, size=(num_reset,)), dtype=self._np_dtype)
 
+    def sample_velocity_commands(self, num_samples: int) -> np.ndarray:
+        low = np.asarray(self._cfg.commands.vel_limit[0], dtype=self._np_dtype)
+        high = np.asarray(self._cfg.commands.vel_limit[1], dtype=self._np_dtype)
+        commands = np.asarray(
+            np.random.uniform(low=low, high=high, size=(num_samples, 3)),
+            dtype=self._np_dtype,
+        )
+        commands[:, 1] = 0.0
+        zero_small_xy_commands(commands, threshold=0.15)
+        standing_prob = float(getattr(self._cfg.commands, "rel_standing_envs", 0.0))
+        if standing_prob > 0.0:
+            standing = np.random.uniform(size=(num_samples,)) < min(standing_prob, 1.0)
+            commands[standing] = 0.0
+        return commands
+
     def get_accel(self) -> np.ndarray:
         return np.asarray(
             self._backend.get_sensor_data(self._cfg.sensor.accel), dtype=self._np_dtype
@@ -354,6 +368,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             "posture": self._reward_posture,
             "leg_symmetry": self._reward_leg_symmetry,
             "height_tracking": self._reward_height_tracking,
+            "joint_pos_penalty": self._reward_joint_pos_penalty,
+            "joint_power": self._reward_joint_power,
             "nonwheel_contact": self._reward_nonwheel_contact,
         }
 
@@ -544,15 +560,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             resample_mask = (steps > 0) & ((steps % interval_steps) == 0)
             if np.any(resample_mask):
                 num_resample = int(np.count_nonzero(resample_mask))
-                low = np.asarray(self._cfg.commands.vel_limit[0], dtype=self._np_dtype)
-                high = np.asarray(self._cfg.commands.vel_limit[1], dtype=self._np_dtype)
-                sampled = np.asarray(
-                    np.random.uniform(low=low, high=high, size=(num_resample, 3)),
-                    dtype=self._np_dtype,
-                )
-                sampled[:, 1] = 0.0
-                zero_small_xy_commands(sampled, threshold=0.15)
-                commands[resample_mask] = sampled
+                commands[resample_mask] = self.sample_velocity_commands(num_resample)
                 height_commands[resample_mask] = self.sample_height_commands(num_resample)
         commands[:, 1] = 0.0
         info["commands"] = commands
@@ -597,6 +605,21 @@ class Real68BalanceEnv(Real68BaseEnv):
         symmetry = np.sum(np.square(left - mirrored_right), axis=1)
         upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
         return np.asarray(symmetry * upright, dtype=self._np_dtype)
+
+    def _reward_joint_pos_penalty(self, ctx: RewardContext) -> np.ndarray:
+        posture = ctx.dof_pos[:, POSTURE_INDICES] - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
+        return np.asarray(np.linalg.norm(posture, axis=1), dtype=self._np_dtype)
+
+    def _reward_joint_power(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.dof_vel is not None
+        torques = np.asarray(
+            ctx.info.get("torques", np.zeros((ctx.num_envs, self._num_action))),
+            dtype=self._np_dtype,
+        )
+        return np.asarray(
+            np.sum(np.abs(ctx.dof_vel[:, POSTURE_INDICES] * torques[:, POSTURE_INDICES]), axis=1),
+            dtype=self._np_dtype,
+        )
 
     def _reward_height_tracking(self, ctx: RewardContext) -> np.ndarray:
         targets = np.asarray(
