@@ -354,6 +354,8 @@ class OffPolicyRunner(AsyncRunner):
             # Wait for data
             wait_start = time.perf_counter()
             wait_start_ns = time.perf_counter_ns() if trace_recorder else 0
+            sync_coordination_time = 0.0
+            collector_wait_overhead = 0.0
             if self.sync_collection and collection_ready_queue:
                 import queue
 
@@ -403,9 +405,15 @@ class OffPolicyRunner(AsyncRunner):
                         break
                     if cur_size - last_buf_log >= self.num_envs * 10:
                         last_buf_log = cur_size
+                        _fill_t = time.perf_counter()
                         logger.log_buffer_fill(cur_size, train_start_threshold)
+                        collector_wait_overhead += time.perf_counter() - _fill_t
                     if trainer_done_queue:
+                        _coord_t = time.perf_counter()
                         trainer_done_queue.put(1)
+                        _coord_d = time.perf_counter() - _coord_t
+                        sync_coordination_time += _coord_d
+                        collector_wait_overhead += _coord_d
             else:
                 while not replay_buffer_ready_for_learning(
                     int(replay_buffer.size[0]),
@@ -435,7 +443,9 @@ class OffPolicyRunner(AsyncRunner):
                     cur_size = int(replay_buffer.size[0])
                     if cur_size - last_buf_log >= self.num_envs * 10:
                         last_buf_log = cur_size
+                        _fill_t = time.perf_counter()
                         logger.log_buffer_fill(cur_size, train_start_threshold)
+                        collector_wait_overhead += time.perf_counter() - _fill_t
                     time.sleep(0.1)
                     self._drain_metrics(
                         metrics_queue,
@@ -445,7 +455,7 @@ class OffPolicyRunner(AsyncRunner):
                         trace_recorder,
                     )
 
-            wait_time = time.perf_counter() - wait_start
+            collector_wait_time = time.perf_counter() - wait_start - collector_wait_overhead
             if trace_recorder:
                 trace_recorder.add_slice(
                     "learner/wait_for_data",
@@ -485,7 +495,9 @@ class OffPolicyRunner(AsyncRunner):
 
             # Sample from torch buffer (zero-copy on CUDA/MPS)
             _sample_ns = time.perf_counter_ns() if trace_recorder else 0
+            replay_sample_start = time.perf_counter()
             large_batch = replay_buffer.sample(self.batch_size * self.updates_per_step)
+            learner_replay_sample_time = time.perf_counter() - replay_sample_start
             learner_incremental_h2d_time = float(
                 getattr(replay_buffer, "last_incremental_h2d_time_s", 0.0)
             )
@@ -573,7 +585,9 @@ class OffPolicyRunner(AsyncRunner):
                 trace_recorder.flush_cuda_pending()
 
             if self.sync_collection and trainer_done_queue:
+                _sync_coord_start = time.perf_counter()
                 trainer_done_queue.put(1)
+                sync_coordination_time += time.perf_counter() - _sync_coord_start
             iteration_time = time.perf_counter() - iteration_start
 
             write_delta = int(replay_buffer.ptr[0]) - ptr_before
@@ -594,12 +608,17 @@ class OffPolicyRunner(AsyncRunner):
                 reward_metrics=build_reward_comparison_metrics(reward_history, mean_reward),
                 reward_components=latest_reward_components,
                 train_time=train_time,
-                wait_time=wait_time,
+                collector_wait_time=collector_wait_time,
+                replay_batch_wait_time=0.0,
+                learner_replay_sample_time=learner_replay_sample_time,
+                rank_barrier_time=0.0,
+                sync_coordination_time=sync_coordination_time,
                 learner_incremental_h2d_time=learner_incremental_h2d_time,
                 weight_sync_time=weight_sync_time,
                 iteration_time=iteration_time,
                 extra_info={
                     "throughput_steps": self.num_envs * self.env_steps_per_sync,
+                    "collector_active_steps_per_sec": (logger._collector_active_steps_per_sec),
                     **build_offpolicy_sample_info(
                         replay_batch_size_per_rank=self.batch_size,
                         updates_per_step=self.updates_per_step,
@@ -679,6 +698,12 @@ class OffPolicyRunner(AsyncRunner):
 
                 if "collector_timing_ms" in m:
                     logger.update_collector_timing(m["collector_timing_ms"])
+
+                collector_active_steps_per_sec = m.get("collector_active_steps_per_sec")
+                if collector_active_steps_per_sec is not None:
+                    logger.update_collector_active_steps_per_sec(
+                        float(collector_active_steps_per_sec)
+                    )
 
                 if "timeout_rate" in m or "terminated_rate" in m:
                     logger.update_done_rates(

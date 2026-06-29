@@ -24,6 +24,11 @@ cost of larger inter-rank parameter drift. In `local_sgd` mode, optimizer state
 is intentionally rank-local and is not averaged at the synchronization boundary;
 this avoids extending communication to AdamW momentum state.
 
+When `algo.obs_normalization=true`, each learner rank updates its observation
+normalizer from cross-rank global batch moments; rank 0 publishes the matching
+mean/std to the CPU collector at the same synchronization point as actor
+weights.
+
 For strict per-update gradient averaging, set
 `training.multi_gpu_sync_mode=sync_sgd`. That mode is closer to single-GPU
 global-batch semantics, but it performs many more collectives and is usually a
@@ -50,7 +55,6 @@ single-GPU `algo.batch_size=8192` corresponds to two-GPU
 
 - SAC only: `training.num_gpus > 1` rejects TD3, FlashSAC, PPO, MLX PPO, and APPO.
 - CUDA is required; select physical cards with `CUDA_VISIBLE_DEVICES`.
-- This validation round requires `algo.obs_normalization=false`.
 - SAC symmetry augmentation is not supported in multi-GPU mode. If the task
   owner enables it by default, set `algo.use_symmetry=false`.
 - Collection must stay synchronized; do not set `training.no_sync_collection=true`.
@@ -63,7 +67,6 @@ Two adjacent visible GPUs:
 uv run train --algo sac --task g1_walk_flat --sim mujoco \
   training.num_gpus=2 \
   training.multi_gpu_sync_mode=local_sgd \
-  algo.obs_normalization=false \
   algo.use_symmetry=false
 ```
 
@@ -74,7 +77,6 @@ For non-adjacent physical GPUs, map them into the visible set with
 CUDA_VISIBLE_DEVICES=0,7 uv run train --algo sac --task g1_walk_flat --sim mujoco \
   training.num_gpus=2 \
   training.multi_gpu_sync_mode=local_sgd \
-  algo.obs_normalization=false \
   algo.use_symmetry=false
 ```
 
@@ -85,7 +87,6 @@ playback:
 CUDA_VISIBLE_DEVICES=0,7 uv run train --algo sac --task g1_walk_flat --sim mujoco \
   training.num_gpus=2 \
   training.multi_gpu_sync_mode=local_sgd \
-  algo.obs_normalization=false \
   algo.use_symmetry=false \
   algo.max_iterations=10 \
   algo.num_envs=512 \
@@ -96,20 +97,28 @@ Logs still use SAC's default directory: `logs/fast_sac/<TaskName>/`.
 
 ## Performance Checks
 
-Multi-GPU mainly targets learner update bottlenecks. For small env counts,
-batches, or short runs, distributed startup, batch packing, and gradient
-synchronization can cost more than they save. When comparing single-GPU and
-multi-GPU runs, keep the task, env count, iteration count, playback settings,
-logger, and visible GPUs consistent; also decide whether you are comparing the
-same per-rank batch or the same global batch. Then compare steady-state
-`train_fps`, learner step time, and end-to-end iteration time.
+Multi-GPU mainly targets learner update bottlenecks. The collector is still one
+CPU process, so `algo.num_envs=4096` is collected by one collector instead of
+being split across two GPUs. With the same per-rank `algo.batch_size`, a two-GPU
+run also doubles replay packing and H2D traffic. The runner prefetches each
+rank's next batch from the current replay snapshot and excludes the next
+collector write window, so CPU random gather can overlap with the next env step
+without reading rows being overwritten.
+
+For small env counts, batches, or short runs, distributed startup, batch packing,
+rank barriers, and parameter synchronization can cost more than they save. When
+comparing single-GPU and multi-GPU runs, keep the task, env count, iteration
+count, playback settings, logger, and visible GPUs consistent; also decide
+whether you are comparing the same per-rank batch or the same global batch. Then
+compare steady-state `perf/iter_ms`, `timing/learner_train_ms`,
+`timing/learner_collector_wait_ms`, `timing/learner_rank_barrier_ms`, and
+`perf/effective_samples_per_sec`.
 
 ## Common Errors
 
 - `Only SAC supports training.num_gpus > 1`: only SAC is validated right now.
 - `SAC multi-GPU training requires a CUDA device`: CUDA is unavailable, or
   `training.device` was set to CPU.
-- `requires algo.obs_normalization=false`: add `algo.obs_normalization=false`.
 - `set training.num_gpus=1 or algo.use_symmetry=false`: multi-GPU SAC does not
   support symmetry augmentation yet; add `algo.use_symmetry=false`.
 
