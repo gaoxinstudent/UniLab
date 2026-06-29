@@ -316,7 +316,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
-        return {"obs": 29, "critic": 65 + self._height_scan_dim}
+        return {"obs": 29, "critic": 45 + self._height_scan_dim}
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._clear_height_scan_cache()
@@ -372,11 +372,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         gyro: np.ndarray,
         gravity: np.ndarray,
         accel: np.ndarray,
-        quat: np.ndarray,
         dof_pos: np.ndarray,
         dof_vel: np.ndarray,
-        passive_pos: np.ndarray,
-        passive_vel: np.ndarray,
     ) -> dict[str, np.ndarray]:
         obs_dict = super()._compute_obs(
             info,
@@ -384,11 +381,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             gyro,
             gravity,
             accel,
-            quat,
             dof_pos,
             dof_vel,
-            passive_pos,
-            passive_vel,
         )
         critic = np.concatenate(
             [

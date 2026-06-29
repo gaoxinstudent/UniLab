@@ -181,9 +181,6 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
         dof_vel: np.ndarray,
     ) -> dict[str, np.ndarray]:
         accel = env.get_accel()[env_ids]
-        passive_pos = env.get_passive_dof_pos()[env_ids]
-        passive_vel = env.get_passive_dof_vel()[env_ids]
-        quat = env.get_imu_quat()[env_ids]
         reset_info = dict(info_updates)
         reset_info["wheel_contacts"] = scalarize_contacts(
             env._backend, WHEEL_CONTACT_SENSORS, dtype=get_global_dtype()
@@ -199,11 +196,8 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
                 gyro,
                 gravity,
                 accel,
-                quat,
                 dof_pos,
                 dof_vel,
-                passive_pos,
-                passive_vel,
             ),
         )
 
@@ -254,7 +248,7 @@ class Real68BalanceEnv(Real68BaseEnv):
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
-        return {"obs": 29, "critic": 65}
+        return {"obs": 29, "critic": 45}
 
     def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
         env_ids = np.asarray(env_indices, dtype=np.int32)
@@ -381,11 +375,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
         )
         accel = self.get_accel()
-        quat = self.get_imu_quat()
         dof_pos = self.get_dof_pos()
         dof_vel = self.get_dof_vel()
-        passive_pos = self.get_passive_dof_pos()
-        passive_vel = self.get_passive_dof_vel()
         self._wheel_contacts[:] = scalarize_contacts(
             self._backend, WHEEL_CONTACT_SENSORS, dtype=self._np_dtype
         )
@@ -404,11 +395,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             gyro,
             gravity,
             accel,
-            quat,
             dof_pos,
             dof_vel,
-            passive_pos,
-            passive_vel,
         )
         return state.replace(obs=obs, reward=reward, terminated=terminated)
 
@@ -428,11 +416,8 @@ class Real68BalanceEnv(Real68BaseEnv):
         gyro: np.ndarray,
         gravity: np.ndarray,
         accel: np.ndarray,
-        quat: np.ndarray,
         dof_pos: np.ndarray,
         dof_vel: np.ndarray,
-        passive_pos: np.ndarray,
-        passive_vel: np.ndarray,
     ) -> dict[str, np.ndarray]:
         noise_cfg = self._cfg.noise_config
         posture_diff = dof_pos[:, POSTURE_INDICES] - self.default_angles[POSTURE_INDICES]
@@ -503,10 +488,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 info["commands"],
                 height_error,
                 linvel,
-                passive_pos,
-                passive_vel,
                 motor_torque,
-                quat,
                 wheel_contacts,
                 nonwheel_contacts,
             ],

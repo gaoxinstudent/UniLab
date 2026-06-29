@@ -41,6 +41,7 @@ htmlcov/
 # Project specific
 logs/
 runs/
+sim2sim_real68_mujoco/bundles/
 run_config.json
 run_summary.json
 .worktrees/

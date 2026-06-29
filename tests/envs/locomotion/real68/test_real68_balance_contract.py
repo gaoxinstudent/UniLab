@@ -45,10 +45,10 @@ def test_real68_balance_env_reset_and_step_contract():
         state = env.init_state()
         assert set(state.obs) == {"obs", "critic"}
         assert state.obs["obs"].shape == (2, 29)
-        assert state.obs["critic"].shape == (2, 65)
+        assert state.obs["critic"].shape == (2, 45)
         reset_obs, _ = env.reset(np.asarray([0], dtype=np.int32))
         assert reset_obs["obs"].shape == (1, 29)
-        assert reset_obs["critic"].shape == (1, 65)
+        assert reset_obs["critic"].shape == (1, 45)
         step_state = env.step(np.zeros((2, 6), dtype=np.float32))
         assert step_state.obs["obs"].shape == (2, 29)
         assert step_state.reward.shape == (2,)

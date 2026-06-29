@@ -25,7 +25,7 @@ def test_real68_rough_env_reset_and_step_contract():
     )
     try:
         state = env.init_state()
-        critic_dim = 65 + env._height_scan_dim
+        critic_dim = 45 + env._height_scan_dim
         assert env._height_scan_dim > 0
         assert set(state.obs) == {"obs", "critic"}
         assert state.obs["obs"].shape == (2, 29)
