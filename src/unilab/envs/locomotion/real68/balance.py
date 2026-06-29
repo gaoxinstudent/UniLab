@@ -7,7 +7,7 @@ import numpy as np
 
 from unilab.assets import ASSETS_ROOT_PATH
 from unilab.base import registry
-from unilab.base.backend import create_backend
+from unilab.base.backend import create_backend, env_backend_kwargs
 from unilab.base.np_env import NpEnvState
 from unilab.base.scene import SceneCfg
 from unilab.dr import ResetPlan
@@ -222,7 +222,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             cfg.sim_dt,
             base_name=cfg.asset.base_name,
             push_body_name=cfg.domain_rand.push_body_name,
-            post_step_forward_sensor=cfg.post_step_forward_sensor,
+            **env_backend_kwargs(cfg),
         )
         super().__init__(cfg, backend, num_envs)
         self._np_dtype = get_global_dtype()

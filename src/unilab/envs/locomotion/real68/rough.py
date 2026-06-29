@@ -17,9 +17,8 @@ from unilab.envs.locomotion.common import rewards
 from unilab.envs.locomotion.common.commands import zero_small_xy_commands
 from unilab.envs.locomotion.common.height_scan import (
     HeightScanConfig,
-    base_height_from_scan,
-    height_scan_obs,
     init_height_scan_sensor,
+    raw_height_scan_obs,
     terrain_out_of_bounds,
 )
 from unilab.envs.locomotion.common.rewards import RewardContext
@@ -223,6 +222,10 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
     def __init__(self, cfg: Real68BalanceRoughCfg, num_envs=1, backend_type="mujoco"):
         super().__init__(cfg, num_envs=num_envs, backend_type=backend_type)
         self._nonwheel_contact_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._rough_scan_raw: np.ndarray | None = None
+        self._rough_scan_base_pos: np.ndarray | None = None
+        self._rough_scan_height_obs: np.ndarray | None = None
+        self._rough_scan_base_height: np.ndarray | None = None
         terrain_origins = getattr(self._backend, "terrain_origins", None)
         terrain_generator = cfg.scene.terrain.generator if cfg.scene.terrain is not None else None
         if terrain_origins is not None and terrain_generator is not None:
@@ -315,6 +318,53 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
     def obs_groups_spec(self) -> dict[str, int]:
         return {"obs": 29, "critic": 65 + self._height_scan_dim}
 
+    def update_state(self, state: NpEnvState) -> NpEnvState:
+        self._clear_height_scan_cache()
+        return super().update_state(state)
+
+    def _clear_height_scan_cache(self) -> None:
+        self._rough_scan_raw = None
+        self._rough_scan_base_pos = None
+        self._rough_scan_height_obs = None
+        self._rough_scan_base_height = None
+
+    def _ensure_height_scan_cache(self, num_obs: int) -> None:
+        if (
+            self._rough_scan_raw is not None
+            and self._rough_scan_base_pos is not None
+            and self._rough_scan_raw.shape == (num_obs, self._height_scan_dim)
+            and self._rough_scan_base_pos.shape[0] == num_obs
+        ):
+            return
+        raw_heights, base_pos = raw_height_scan_obs(self, num_obs)
+        if raw_heights is None or base_pos is None:
+            self._rough_scan_raw = None
+            self._rough_scan_base_pos = None
+            self._rough_scan_height_obs = None
+            self._rough_scan_base_height = None
+            return
+        self._rough_scan_raw = np.asarray(raw_heights, dtype=self._np_dtype)
+        self._rough_scan_base_pos = np.asarray(base_pos, dtype=self._np_dtype)
+        self._rough_scan_height_obs = None
+        self._rough_scan_base_height = None
+
+    def _cached_height_scan_obs(self, num_obs: int) -> np.ndarray:
+        self._ensure_height_scan_cache(num_obs)
+        if self._rough_scan_raw is None or self._rough_scan_base_pos is None:
+            return np.zeros((num_obs, self._height_scan_dim), dtype=self._np_dtype)
+        if self._rough_scan_height_obs is None:
+            heights = np.clip(
+                self._rough_scan_base_pos[:, 2:3]
+                - float(self._cfg.terrain_scan.vertical_offset)
+                - self._rough_scan_raw,
+                -1.0,
+                1.0,
+            )
+            self._rough_scan_height_obs = np.asarray(
+                heights * float(self._cfg.terrain_scan.scale), dtype=self._np_dtype
+            )
+        return self._rough_scan_height_obs
+
     def _compute_obs(
         self,
         info: dict,
@@ -343,7 +393,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         critic = np.concatenate(
             [
                 obs_dict["critic"],
-                height_scan_obs(self, self._cfg.terrain_scan, gyro.shape[0]),
+                self._cached_height_scan_obs(gyro.shape[0]),
             ],
             axis=1,
             dtype=self._np_dtype,
@@ -353,10 +403,15 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
     def _reward_base_height_values(self, num_obs: int) -> np.ndarray:
         if num_obs != self._num_envs:
             return super()._reward_base_height_values(num_obs)
-        height = base_height_from_scan(self, num_obs)
-        if height.shape[0] != num_obs:
+        self._ensure_height_scan_cache(num_obs)
+        if self._rough_scan_raw is None or self._rough_scan_base_pos is None:
             return super()._reward_base_height_values(num_obs)
-        return np.asarray(height, dtype=self._np_dtype)
+        if self._rough_scan_base_height is None:
+            self._rough_scan_base_height = np.asarray(
+                np.mean(self._rough_scan_base_pos[:, 2:3] - self._rough_scan_raw, axis=1),
+                dtype=self._np_dtype,
+            )
+        return self._rough_scan_base_height
 
     def _compute_terminated(self, gravity: np.ndarray) -> np.ndarray:
         terminated = np.zeros((self._num_envs,), dtype=bool)
