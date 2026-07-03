@@ -2,7 +2,7 @@
 training:
   task_name: Real68BalanceRough
   sim_backend: mujoco
-  play_steps: 400
+  play_steps: 40
   play_env_num: 16
   render_spacing: 0.0
   cam_tracking: true

@@ -145,6 +145,7 @@ class NpEnv(ABEnv):
         done = self._state.terminated | self._state.truncated
         t0 = time.perf_counter()
         if self._autoreset and np.any(done):
+            self._before_autoreset(done)
             self._reset_done_envs()
         reset_done_time = time.perf_counter() - t0
 
@@ -175,6 +176,10 @@ class NpEnv(ABEnv):
         np.nan_to_num(self._state.reward, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
 
         return self._state
+
+    def _before_autoreset(self, done: np.ndarray) -> None:
+        """Hook for env-owned bookkeeping right before done envs are reset."""
+        del done
 
     def _reset_done_envs(self) -> None:
         assert self._state is not None

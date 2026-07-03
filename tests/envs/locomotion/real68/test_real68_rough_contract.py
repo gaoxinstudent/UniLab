@@ -27,13 +27,13 @@ def test_real68_rough_env_reset_and_step_contract():
         critic_dim = 45 + env._height_scan_dim
         assert env._height_scan_dim > 0
         assert set(state.obs) == {"obs", "critic"}
-        assert state.obs["obs"].shape == (2, 29)
+        assert state.obs["obs"].shape == (2, 32)
         assert state.obs["critic"].shape == (2, critic_dim)
         reset_obs, _ = env.reset(np.asarray([0], dtype=np.int32))
-        assert reset_obs["obs"].shape == (1, 29)
+        assert reset_obs["obs"].shape == (1, 32)
         assert reset_obs["critic"].shape == (1, critic_dim)
         step_state = env.step(np.zeros((2, 6), dtype=np.float32))
-        assert step_state.obs["obs"].shape == (2, 29)
+        assert step_state.obs["obs"].shape == (2, 32)
         assert step_state.obs["critic"].shape == (2, critic_dim)
         assert step_state.reward.shape == (2,)
         assert step_state.terminated.shape == (2,)
@@ -99,6 +99,7 @@ def test_real68_command_curriculum_starts_small_and_expands():
                 "min_speed_ratio": 0.45,
                 "max_vx_error": 0.3,
                 "max_wz_error": 0.9,
+                "min_segment_count": 1,
                 "yaw_unlock_vx_progress": 0.6,
                 "reverse_unlock_vx_progress": 0.7,
             },
@@ -114,12 +115,17 @@ def test_real68_command_curriculum_starts_small_and_expands():
         assert float(commands[:, 0].max()) <= 0.35 + 1.0e-6
         np.testing.assert_allclose(commands[:, 2], 0.0)
 
-        env._update_command_curriculum(
-            mean_abs_vx=0.12,
-            mean_abs_cmd_x=0.2,
+        env._record_command_segment_stats(
+            cmd_x=0.3,
+            cmd_yaw=0.0,
+            mean_abs_vx=0.18,
+            mean_abs_wz=0.7,
             vx_error=0.2,
             wz_error=0.7,
+            mean_nonwheel_contact=0.0,
+            segment_steps=100,
         )
+        env._update_command_curriculum()
         assert env._command_curriculum_vx_progress == pytest.approx(0.25)
         assert env._command_curriculum_yaw_progress == pytest.approx(0.0)
         assert env._command_curriculum_low[0] == pytest.approx(0.1)
@@ -127,12 +133,19 @@ def test_real68_command_curriculum_starts_small_and_expands():
         assert env._command_curriculum_high[2] == pytest.approx(0.3)
 
         env._command_curriculum_vx_progress = 0.75
-        env._update_command_curriculum(
-            mean_abs_vx=0.12,
-            mean_abs_cmd_x=0.2,
+        env._refresh_command_curriculum_limits()
+        env._reset_command_curriculum_stats()
+        env._record_command_segment_stats(
+            cmd_x=1.5,
+            cmd_yaw=1.5,
+            mean_abs_vx=0.9,
+            mean_abs_wz=0.7,
             vx_error=0.2,
             wz_error=0.7,
+            mean_nonwheel_contact=0.0,
+            segment_steps=100,
         )
+        env._update_command_curriculum()
         assert env._command_curriculum_yaw_progress == pytest.approx(0.25)
         assert env._command_curriculum_low[0] < 0.1
         assert env._command_curriculum_high[2] > 0.3
@@ -141,5 +154,70 @@ def test_real68_command_curriculum_starts_small_and_expands():
         assert float(commands[:, 2].min()) >= -5.0
         assert float(commands[:, 2].max()) <= 5.0
         assert np.any(np.abs(commands[:, 2]) > 0.0)
+    finally:
+        env.close()
+
+
+def test_real68_command_curriculum_can_delay_reverse_until_completion():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceRough",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "command_curriculum": {
+                "enabled": True,
+                "initial_vel_limit": [[0.35, 0.0, 0.0], [0.45, 0.0, 0.0]],
+                "final_vel_limit": [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                "reverse_unlock_vx_progress": 1.0,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._command_curriculum_vx_progress = 0.8
+        env._refresh_command_curriculum_limits()
+        assert env._command_curriculum_low[0] == pytest.approx(0.35)
+
+        env._command_curriculum_vx_progress = 1.0
+        env._refresh_command_curriculum_limits()
+        assert env._command_curriculum_low[0] == pytest.approx(-1.0)
+    finally:
+        env.close()
+
+
+def test_real68_command_curriculum_can_schedule_standing_commands():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceRough",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "command_curriculum": {
+                "enabled": True,
+                "initial_vel_limit": [[0.35, 0.0, 0.0], [0.45, 0.0, 0.0]],
+                "final_vel_limit": [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                "standing_prob_initial": 0.5,
+                "standing_prob_final": 0.3,
+                "standing_decay_vx_progress": 1.0,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._command_curriculum_vx_progress = 0.0
+        assert env._standing_command_probability() == pytest.approx(0.5)
+
+        env._command_curriculum_vx_progress = 0.3
+        assert env._standing_command_probability() == pytest.approx(0.44)
+
+        env._command_curriculum_vx_progress = 1.0
+        assert env._standing_command_probability() == pytest.approx(0.3)
     finally:
         env.close()

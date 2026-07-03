@@ -1,0 +1,97 @@
+# @package _global_
+training:
+  task_name: Real68BalanceFlat
+  sim_backend: mujoco
+  play_steps: 400
+
+algo:
+  num_envs: 4096
+  max_iterations: 30
+  empirical_normalization: true
+  obs_groups:
+    actor:
+      - actor
+    critic:
+      - critic
+  policy:
+    init_noise_std: 0.5
+  algorithm:
+    learning_rate: 1.0e-4
+    entropy_coef: 2.0e-3
+
+env:
+  control_config:
+    hip_velocity_scale: 5.0
+    wheel_velocity_scale: 16.0
+    calf_action_scale: 0.3
+    hip_kd: 2.0
+    wheel_kd: 0.9
+    calf_kp: 40.0
+    calf_kd: 3.0
+  commands:
+    vel_limit:
+      - [-1.0, 0.0, 0.0]
+      - [1.0, 0.0, 0.0]
+    resampling_time: 2.0
+    rel_standing_envs: 0.0
+  command_curriculum:
+    enabled: true
+    initial_vel_limit:
+      - [0.35, 0.0, 0.0]
+      - [0.45, 0.0, 0.0]
+    final_vel_limit:
+      - [-1.0, 0.0, 0.0]
+      - [1.0, 0.0, 0.0]
+    vx_step: 0.08
+    min_speed_ratio: 0.3
+    max_vx_error: 0.5
+    reverse_unlock_vx_progress: 1.0
+    standing_bootstrap_enabled: true
+    standing_bootstrap_min_segments: 256
+    standing_bootstrap_min_segment_steps: 60
+    standing_bootstrap_max_wz_error: 0.45
+    standing_bootstrap_max_nonwheel_contact: 0.05
+    standing_prob_initial: 0.5
+    standing_prob_final: 0.3
+    standing_decay_vx_progress: 1.0
+  height_command:
+    range: [0.257282, 0.257282]
+  domain_rand:
+    randomize_ground_friction: false
+    randomize_base_mass: false
+    random_com: false
+
+reward:
+  scales:
+    tracking_lin_vel: 4.0
+    tracking_ang_vel: 0.2
+    forward_progress: 6.0
+    under_speed: -1.0
+    yaw_rate_when_uncommanded: -0.3
+    height_tracking: 0.5
+    orientation: -2.0
+    lin_vel_z: -1.0
+    ang_vel_xy: -0.1
+    posture: -0.05
+    leg_symmetry: -0.1
+    action_rate: -0.003
+    torques: -0.0005
+    wheel_vel: 0.0
+    joint_pos_penalty: -1.0
+    joint_power: -2.0e-5
+    nonwheel_contact: -2.0
+    alive: 0.02
+  tracking_sigma: 0.25
+  height_tracking_sigma: 0.02
+  base_height_target: 0.257282
+  min_base_height: 0.18
+  max_base_height: 0.38
+  max_tilt_cos: 0.45
+  command_lean:
+    enabled: true
+    gravity_x_gain: 0.12
+    gravity_x_limit: 0.12
+    hip_gain: 0.18
+    hip_limit: 0.18
+    calf_gain: 0.12
+    calf_limit: 0.12

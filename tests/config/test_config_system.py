@@ -410,6 +410,44 @@ def test_ppo_go2w_mujoco_uses_motor_owner_dr_path():
     assert cfg.reward.scales.torques < 0.0
 
 
+def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
+    cfg = _compose("ppo", overrides=["task=real68_balance_veltrack_flat/mujoco"])
+
+    assert cfg.training.task_name == "Real68BalanceFlat"
+    assert cfg.training.sim_backend == "mujoco"
+    assert cfg.algo.num_envs == 4096
+    assert cfg.env.commands.vel_limit == [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    assert cfg.reward.scales.forward_progress == pytest.approx(6.0)
+    assert cfg.reward.scales.under_speed == pytest.approx(-1.0)
+    assert cfg.reward.scales.tracking_lin_vel == pytest.approx(4.0)
+    assert cfg.reward.scales.yaw_rate_when_uncommanded == pytest.approx(-0.3)
+    assert cfg.reward.scales.joint_pos_penalty == pytest.approx(-1.0)
+    assert cfg.reward.scales.ang_vel_xy == pytest.approx(-0.1)
+    assert cfg.reward.scales.orientation == pytest.approx(-2.0)
+    assert cfg.reward.tracking_sigma == pytest.approx(0.25)
+    assert cfg.reward.scales.wheel_vel == pytest.approx(0.0)
+    assert cfg.reward.max_tilt_cos == pytest.approx(0.45)
+    assert cfg.reward.min_base_height == pytest.approx(0.18)
+    assert cfg.reward.command_lean.enabled is True
+    assert cfg.reward.command_lean.gravity_x_gain == pytest.approx(0.12)
+    assert cfg.reward.command_lean.hip_gain == pytest.approx(0.18)
+    assert cfg.reward.command_lean.calf_gain == pytest.approx(0.12)
+    assert cfg.env.height_command.range == pytest.approx([0.257282, 0.257282])
+    ccfg = cfg.env.command_curriculum
+    assert ccfg.enabled is True
+    assert ccfg.initial_vel_limit == [[0.35, 0.0, 0.0], [0.45, 0.0, 0.0]]
+    assert ccfg.final_vel_limit == [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    assert ccfg.reverse_unlock_vx_progress == pytest.approx(1.0)
+    assert ccfg.standing_bootstrap_enabled is True
+    assert ccfg.standing_bootstrap_min_segments == 256
+    assert ccfg.standing_bootstrap_min_segment_steps == 60
+    assert ccfg.standing_bootstrap_max_wz_error == pytest.approx(0.45)
+    assert ccfg.standing_bootstrap_max_nonwheel_contact == pytest.approx(0.05)
+    assert ccfg.standing_prob_initial == pytest.approx(0.5)
+    assert ccfg.standing_prob_final == pytest.approx(0.3)
+    assert ccfg.standing_decay_vx_progress == pytest.approx(1.0)
+
+
 def test_ppo_go2w_motrix_uses_motor_owner_dr_path():
     cfg = _compose("ppo", overrides=["task=go2w_joystick_flat/motrix"])
 
