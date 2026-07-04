@@ -352,16 +352,14 @@ def create_rsl_rl_playback_session(
     runner_cls: Any,
     policy_obs_dims_getter: Callable[[Any], tuple[int, int]],
     train_cfg_normalizer: Callable[[dict[str, Any]], dict[str, Any]],
+    sim2sim_cfg: Any | None = None,
+    sim2sim_strict: bool = True,
+    algo_name: str = "ppo",
     log: LogFn = print,
 ) -> tuple[RslRlPlaybackSession, str, str | None]:
     """Create a playback session and load the selected policy checkpoint."""
 
     device_name = select_torch_device() if device is None else str(device)
-    env = env_factory(int(playback_cfg.num_envs))
-    if env is None:
-        raise RuntimeError("Playback env factory did not return an environment.")
-    actor_obs_dim, flat_obs_dim = policy_obs_dims_getter(env.obs_groups_spec)
-
     policy_obs_mode = playback_cfg.policy_obs_mode
     checkpoint_path: str | None = None
     if playback_cfg.action_mode == "policy":
@@ -372,6 +370,22 @@ def create_rsl_rl_playback_session(
             playback_cfg.algo_log_name,
             playback_cfg.log_root,
         )
+        if checkpoint_path is not None and sim2sim_cfg is not None:
+            from unilab.training.sim2sim import resolve_sim2sim_config
+
+            resolve_sim2sim_config(
+                Path(checkpoint_path).parent,
+                sim2sim_cfg,
+                algo_name=algo_name,
+                strict=sim2sim_strict,
+            )
+
+    env = env_factory(int(playback_cfg.num_envs))
+    if env is None:
+        raise RuntimeError("Playback env factory did not return an environment.")
+    actor_obs_dim, flat_obs_dim = policy_obs_dims_getter(env.obs_groups_spec)
+
+    if playback_cfg.action_mode == "policy":
         if policy_obs_mode == "auto" and checkpoint_path is not None:
             ckpt_dim = checkpoint_input_dim_reader(checkpoint_path)
             if ckpt_dim == actor_obs_dim:
@@ -410,16 +424,23 @@ def create_rsl_rl_playback_session(
                 / "play_temp"
             )
             runner = runner_cls(wrapped_env, train_cfg, log_dir=log_dir, device=device_name)
-            runner.load(
-                checkpoint_path,
-                load_cfg={
-                    "actor": True,
-                    "critic": False,
-                    "optimizer": False,
-                    "iteration": False,
-                    "rnd": False,
-                },
-            )
+            from unilab.training.sim2sim import policy_load_dim_guard
+
+            with policy_load_dim_guard(
+                env_obs_dim=getattr(wrapped_env, "num_obs", None),
+                env_action_dim=getattr(wrapped_env, "num_actions", None),
+                algo_name=algo_name,
+            ):
+                runner.load(
+                    checkpoint_path,
+                    load_cfg={
+                        "actor": True,
+                        "critic": False,
+                        "optimizer": False,
+                        "iteration": False,
+                        "rnd": False,
+                    },
+                )
             policy = runner.get_inference_policy(device=device_name)
 
     log(f"Action mode: {playback_cfg.action_mode}")

@@ -43,7 +43,10 @@ class HfieldSampler:
             raise ValueError(f"Geom '{geom_name}' not found")
         hfield_id = int(model.geom_dataid[geom_id])
         if hfield_id < 0:
-            raise ValueError(f"Geom '{geom_name}' is not bound to a heightfield")
+            self._is_hfield = False
+            self._plane_z = float(model.geom_pos[geom_id, 2])
+            return
+        self._is_hfield = True
         self._geom_pos = np.asarray(model.geom_pos[geom_id], dtype=np.float64).copy()
         adr = int(model.hfield_adr[hfield_id])
         nrow = int(model.hfield_nrow[hfield_id])
@@ -58,6 +61,8 @@ class HfieldSampler:
         self._ncol = ncol
 
     def sample(self, xy_world: np.ndarray) -> float:
+        if not self._is_hfield:
+            return self._plane_z
         x = float(xy_world[0] - self._geom_pos[0])
         y = float(xy_world[1] - self._geom_pos[1])
         col = int(np.rint((x + self._half_x) / (2.0 * self._half_x) * (self._ncol - 1)))
@@ -67,6 +72,8 @@ class HfieldSampler:
         return float(self._geom_pos[2] + self._data[row, col] * self._z_top)
 
     def sample_many_max(self, xy_world: np.ndarray) -> float:
+        if not self._is_hfield:
+            return self._plane_z
         points = np.asarray(xy_world, dtype=np.float64).reshape(-1, 2)
         return max(self.sample(point) for point in points)
 
@@ -139,7 +146,11 @@ class Real68Sim2Sim:
             str(self.cfg.resolve_path("policy_file")),
             providers=["CPUExecutionProvider"],
         )
-        self.obs_name = self.session.get_inputs()[0].name
+        obs_input = self.session.get_inputs()[0]
+        self.obs_name = obs_input.name
+        self.obs_dim = int(obs_input.shape[-1])
+        if self.obs_dim not in (29, 32):
+            raise ValueError(f"Unsupported Real68 policy obs dim: {self.obs_dim}")
         self.action_name = self.session.get_outputs()[0].name
         self.control_cfg = self.cfg["control_config"]
         self.default_angles = np.asarray(self.cfg["default_active_angles"], dtype=np.float64)
@@ -151,6 +162,9 @@ class Real68Sim2Sim:
         self.ctrl_lower = np.asarray(self.model.actuator_ctrlrange[:, 0], dtype=np.float64)
         self.ctrl_upper = np.asarray(self.model.actuator_ctrlrange[:, 1], dtype=np.float64)
         self.command_limits = np.asarray(self.cfg["command_limits"], dtype=np.float64)
+        self.forward_axis = int(self.cfg.raw.get("forward_axis", 0))
+        self.lateral_axis = int(self.cfg.raw.get("lateral_axis", 1 if self.forward_axis == 0 else 0))
+        self.forward_sign = float(self.cfg.raw.get("forward_sign", 1.0))
         self.command = (
             np.asarray(command_override, dtype=np.float64).copy()
             if command_override is not None
@@ -209,6 +223,7 @@ class Real68Sim2Sim:
         return float(self.data.qpos[2] - terrain_z)
 
     def _compute_obs(self) -> np.ndarray:
+        linvel = self.sensors.read(self.data, self.cfg["sensor_names"]["local_linvel"])
         gyro = self.sensors.read(self.data, self.cfg["sensor_names"]["gyro"])
         gravity = self.sensors.read(self.data, self.cfg["sensor_names"]["gravity"])
         accel = self.sensors.read(self.data, self.cfg["sensor_names"]["accel"])
@@ -218,22 +233,22 @@ class Real68Sim2Sim:
         posture_vel = dof_vel[self.posture]
         wheel_vel = dof_vel[self.wheel]
         height_error = np.asarray([self.height_command - self._base_height()], dtype=np.float64)
-        obs = np.concatenate(
-            [
-                gyro,
-                -gravity,
-                accel,
-                posture_diff,
-                posture_vel,
-                wheel_vel,
-                self.last_action,
-                self.command,
-                height_error,
-            ],
-            axis=0,
-        )
-        if obs.shape != (29,):
-            raise ValueError(f"Expected obs shape (29,), got {obs.shape}")
+        parts = [
+            gyro,
+            -gravity,
+            accel,
+            posture_diff,
+            posture_vel,
+            wheel_vel,
+            self.last_action,
+            self.command,
+            height_error,
+        ]
+        if self.obs_dim == 32:
+            parts.insert(0, linvel)
+        obs = np.concatenate(parts, axis=0)
+        if obs.shape != (self.obs_dim,):
+            raise ValueError(f"Expected obs shape ({self.obs_dim},), got {obs.shape}")
         return obs.astype(np.float32, copy=False)
 
     def _policy_action(self, obs: np.ndarray) -> np.ndarray:
@@ -384,10 +399,12 @@ class Real68Sim2Sim:
 
     def status_line(self) -> str:
         linvel = self.sensors.read(self.data, self.cfg["sensor_names"]["local_linvel"])
+        forward_vel = float(linvel[self.forward_axis] * self.forward_sign)
+        lateral_vel = float(linvel[self.lateral_axis])
         failed, nonwheel_max = self._failure_state()
         return (
             f"cmd(vx={self.command[0]:+.2f}, wz={self.command[2]:+.2f}) "
-            f"vel(vx={linvel[0]:+.2f}, vy={linvel[1]:+.2f}) "
+            f"vel(forward={forward_vel:+.2f}, lateral={lateral_vel:+.2f}) "
             f"base_h={self._base_height():.3f} "
             f"nonwheel={nonwheel_max:.2f} "
             f"failed={failed} "

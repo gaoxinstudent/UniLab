@@ -256,6 +256,9 @@ def play_viser(args: PlayInteractiveArgs, cfg: DictConfig) -> None:
         runner_cls=OnPolicyRunner,
         policy_obs_dims_getter=get_policy_obs_dims,
         train_cfg_normalizer=normalize_ppo_train_cfg,
+        sim2sim_cfg=cfg,
+        sim2sim_strict=bool(OmegaConf.select(cfg, "training.sim2sim_strict", default=True)),
+        algo_name="ppo",
         log=lambda message: print(f"[play_viser] {message}"),
     )
     env = playback_session.env

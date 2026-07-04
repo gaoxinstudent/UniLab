@@ -66,7 +66,23 @@ def _terrain_cfg_from_run(run_cfg: dict[str, Any]) -> Real68RoughTerrainCfg:
     return cfg
 
 
-def _sim2sim_config(run_dir: Path, output_dir: Path, run_cfg: dict[str, Any]) -> dict[str, Any]:
+def _has_terrain_generator(run_cfg: dict[str, Any]) -> bool:
+    return bool(
+        run_cfg.get("config", {})
+        .get("env", {})
+        .get("scene", {})
+        .get("terrain", {})
+        .get("generator")
+    )
+
+
+def _sim2sim_config(
+    run_dir: Path,
+    output_dir: Path,
+    run_cfg: dict[str, Any],
+    *,
+    terrain_type: str,
+) -> dict[str, Any]:
     env_cfg = run_cfg["config"]["env"]
     reward_cfg = run_cfg["config"]["reward"]
     control_cfg = env_cfg["control_config"]
@@ -87,6 +103,9 @@ def _sim2sim_config(run_dir: Path, output_dir: Path, run_cfg: dict[str, Any]) ->
         "steps_per_control": int(round(0.02 / 0.001)),
         "home_base_height": HOME_BASE_HEIGHT,
         "base_height_target": float(reward_cfg["base_height_target"]),
+        "forward_axis": 1,
+        "lateral_axis": 0,
+        "forward_sign": 1.0,
         "default_active_angles": DEFAULT_ACTIVE_ANGLES.tolist(),
         "active_joint_pos_sensors": list(ACTIVE_JOINT_POS_SENSORS),
         "active_joint_vel_sensors": list(ACTIVE_JOINT_VEL_SENSORS),
@@ -132,12 +151,15 @@ def _sim2sim_config(run_dir: Path, output_dir: Path, run_cfg: dict[str, Any]) ->
             "spawn_height_margin": 0.05,
         },
         "termination_config": {
-            "min_up_proj": float(termination["min_up_proj"]),
-            "min_base_height": float(termination["min_base_height"]),
+            "min_up_proj": float(termination.get("min_up_proj", reward_cfg.get("max_tilt_cos", 0.45))),
+            "min_base_height": float(
+                termination.get("min_base_height", reward_cfg.get("min_base_height", 0.16))
+            ),
             "nonwheel_contact_threshold": float(termination.get("nonwheel_contact_threshold", 0.5)),
             "nonwheel_contact_max_steps": int(termination.get("nonwheel_contact_max_steps", 8)),
         },
         "terrain": {
+            "type": terrain_type,
             "geom_name": "floor",
             "hfield_name": "terrain_hfield",
             "cell_size": 8.0,
@@ -157,21 +179,30 @@ def _copy_artifacts(run_dir: Path, output_dir: Path) -> None:
 def prepare_bundle(run_dir: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     run_cfg = _load_run_config(run_dir)
-    terrain_cfg = _terrain_cfg_from_run(run_cfg)
     robot_model = ASSETS_ROOT_PATH / "robots" / "real68" / "real68.xml"
-    fragment = ASSETS_ROOT_PATH / "robots" / "real68" / "locomotion_task.xml"
-    _, terrain_origins = materialize_mujoco_hfield_attached_scene(
-        model_file=str(robot_model),
-        terrain_cfg=terrain_cfg,
-        output_dir=output_dir,
-        fragment_files=[str(fragment)],
-        hfield_name="terrain_hfield",
-        geom_name="floor",
-        return_surface_sampler=False,
-    )
+    if _has_terrain_generator(run_cfg):
+        terrain_cfg = _terrain_cfg_from_run(run_cfg)
+        fragment = ASSETS_ROOT_PATH / "robots" / "real68" / "locomotion_task.xml"
+        _, terrain_origins = materialize_mujoco_hfield_attached_scene(
+            model_file=str(robot_model),
+            terrain_cfg=terrain_cfg,
+            output_dir=output_dir,
+            fragment_files=[str(fragment)],
+            hfield_name="terrain_hfield",
+            geom_name="floor",
+            return_surface_sampler=False,
+        )
+        terrain_type = "hfield"
+    else:
+        scene_flat = ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml"
+        shutil.copy2(scene_flat, output_dir / "scene.xml")
+        shutil.copy2(robot_model, output_dir / "real68.xml")
+        shutil.copytree(robot_model.parent / "assets", output_dir / "assets", dirs_exist_ok=True)
+        terrain_origins = np.zeros((1, 1, 3), dtype=np.float64)
+        terrain_type = "plane"
     np.save(output_dir / "terrain_origins.npy", terrain_origins)
     _copy_artifacts(run_dir, output_dir)
-    sim2sim_cfg = _sim2sim_config(run_dir, output_dir, run_cfg)
+    sim2sim_cfg = _sim2sim_config(run_dir, output_dir, run_cfg, terrain_type=terrain_type)
     (output_dir / "sim2sim_config.json").write_text(
         json.dumps(sim2sim_cfg, indent=2),
         encoding="utf-8",

@@ -25,17 +25,17 @@ def _default_bundle_dir() -> Path:
 
 
 def _headless_run(sim: Real68Sim2Sim, *, steps: int) -> None:
-    start_x = float(sim.data.qpos[0])
+    start_forward = float(sim.data.qpos[sim.forward_axis])
     linvel_samples: list[float] = []
     for _ in range(steps):
         sim.step()
         sim.maybe_print_status()
         linvel = sim.sensors.read(sim.data, sim.cfg["sensor_names"]["local_linvel"])
-        linvel_samples.append(float(linvel[0]))
-    distance = float(sim.data.qpos[0] - start_x)
+        linvel_samples.append(float(linvel[sim.forward_axis] * sim.forward_sign))
+    distance = float((sim.data.qpos[sim.forward_axis] - start_forward) * sim.forward_sign)
     mean_vx = float(np.mean(linvel_samples)) if linvel_samples else 0.0
     print(
-        f"[sim2sim] headless summary: steps={steps} distance_x={distance:.3f} mean_vx={mean_vx:.3f}"
+        f"[sim2sim] headless summary: steps={steps} distance_forward={distance:.3f} mean_vx={mean_vx:.3f}"
     )
 
 

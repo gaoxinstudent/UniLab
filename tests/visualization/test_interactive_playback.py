@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS_DIR = _REPO_ROOT / "scripts"
@@ -25,6 +26,7 @@ from unilab.visualization.interactive_playback import (
     create_sac_playback_session,
     prepare_motion_overlay_selection,
 )
+from unilab.training.sim2sim import CrossBackendIncompatibleError
 
 _VEL_LIMIT = [[-0.6, -0.4, -0.8], [1.0, 0.4, 0.8]]
 
@@ -170,6 +172,55 @@ def test_create_rsl_rl_playback_session_loads_checkpoint_and_runner_log_dir() ->
     assert captured["runner_log_dir"].replace("\\", "/") == "/tmp/custom_ppo/MyTask/play_temp"
     assert captured["checkpoint"] == "/tmp/model_10.pt"
     assert captured["train_cfg"]["runner"]["logger"] == "none"
+
+
+def test_create_rsl_rl_playback_session_checks_sim2sim_before_env_creation(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    checkpoint_path = run_dir / "model_10.pt"
+    checkpoint_path.write_bytes(b"checkpoint")
+    (run_dir / "run_config.json").write_text(
+        '{"contract_snapshot": {"env.control_config": {"action_scale": 0.25}}}',
+        encoding="utf-8",
+    )
+    target_cfg = OmegaConf.create({"env": {"control_config": {"action_scale": 0.5}}})
+    env_calls = 0
+
+    def env_factory(num_envs: int):
+        nonlocal env_calls
+        env_calls += 1
+        return _fake_env(num_envs)
+
+    with pytest.raises(CrossBackendIncompatibleError):
+        create_rsl_rl_playback_session(
+            playback_cfg=RslRlPlaybackConfig(
+                task="MyTask",
+                load_run="-1",
+                checkpoint=None,
+                action_mode="policy",
+                policy_obs_mode="auto",
+                algo_log_name="custom_ppo",
+                log_root=None,
+                num_envs=1,
+            ),
+            env_factory=env_factory,
+            algo_config={},
+            root_dir=Path("/repo"),
+            device="cpu",
+            checkpoint_resolver=lambda *args: str(checkpoint_path),
+            checkpoint_input_dim_reader=lambda path: 5,
+            entrypoint_log_root=lambda root_dir, *, algo_log_name, log_root=None: Path("/tmp"),
+            wrapper_cls=object,
+            runner_cls=object,
+            policy_obs_dims_getter=lambda spec: (0, 0),
+            train_cfg_normalizer=lambda cfg: cfg,
+            sim2sim_cfg=target_cfg,
+            log=lambda message: None,
+        )
+
+    assert env_calls == 0
 
 
 def test_create_rsl_rl_playback_session_rejects_missing_env() -> None:

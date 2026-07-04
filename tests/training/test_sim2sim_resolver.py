@@ -66,6 +66,10 @@ def test_field_lists_are_disjoint():
 def test_extract_snapshot_includes_only_present_contract_fields():
     snapshot = extract_contract_snapshot(_mujoco_cfg())
     # Present DENY/WARN fields are captured...
+    assert snapshot["env.control_config"] == {
+        "action_scale": 0.25,
+        "simulate_action_latency": False,
+    }
     assert snapshot["env.control_config.action_scale"] == 0.25
     assert snapshot["algo.obs_groups"] == {"actor": ["actor"]}
     assert snapshot["algo.empirical_normalization"] is False
@@ -99,6 +103,36 @@ def test_denylist_mismatch_raises_with_field_in_message(tmp_path):
     assert "action_scale" in msg
     assert "0.25" in msg
     assert "0.5" in msg
+
+
+def test_control_config_nested_field_mismatch_raises(tmp_path):
+    source = OmegaConf.create(
+        {
+            "env": {
+                "control_config": {
+                    "clip_actions": 1.0,
+                    "hip_velocity_scale": 6.0,
+                    "wheel_velocity_scale": 20.0,
+                    "calf_action_scale": 0.35,
+                    "hip_kd": 2.0,
+                    "wheel_kd": 1.0,
+                    "calf_kp": 45.0,
+                    "calf_kd": 3.0,
+                }
+            }
+        }
+    )
+    _write_sidecar(tmp_path, extract_contract_snapshot(source))
+    target = OmegaConf.create(OmegaConf.to_container(source, resolve=True))
+    target.env.control_config.wheel_velocity_scale = 12.0
+
+    with pytest.raises(CrossBackendIncompatibleError) as excinfo:
+        resolve_sim2sim_config(tmp_path, target)
+    msg = str(excinfo.value)
+    assert "env.control_config" in msg
+    assert "wheel_velocity_scale" in msg
+    assert "20.0" in msg
+    assert "12.0" in msg
 
 
 def test_denylist_nested_dict_mismatch_raises(tmp_path):
@@ -185,7 +219,11 @@ def test_action_scale_list_form(tmp_path):
 
 
 def test_env_structural_denylist_is_the_env_subset():
-    assert ENV_STRUCTURAL_DENYLIST == ["env.control_config.action_scale", "env.sampling_mode"]
+    assert ENV_STRUCTURAL_DENYLIST == [
+        "env.control_config",
+        "env.control_config.action_scale",
+        "env.sampling_mode",
+    ]
     assert set(ENV_STRUCTURAL_DENYLIST) <= set(DENYLIST)
 
 

@@ -1068,6 +1068,13 @@ def play_interactive(args, cfg: DictConfig | None = None, *, algo: str | None = 
                 runner_cls=OnPolicyRunner,
                 policy_obs_dims_getter=get_policy_obs_dims,
                 train_cfg_normalizer=normalize_ppo_train_cfg,
+                sim2sim_cfg=cfg,
+                sim2sim_strict=(
+                    True
+                    if cfg is None
+                    else bool(OmegaConf.select(cfg, "training.sim2sim_strict", default=True))
+                ),
+                algo_name=algo,
                 log=lambda message: print(f"[play_interactive] {message}"),
             )
         elif algo == "appo":

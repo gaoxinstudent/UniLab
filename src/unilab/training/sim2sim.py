@@ -29,12 +29,14 @@ WARNING_LIST: list[str] = [
     "reward.base_height_target",
     "reward.max_tilt_deg",
     "reward.min_base_height",
-    "env.control_config.simulate_action_latency",
     "env.ctrl_dt",
 ]
 
 DENYLIST: list[str] = [
     "algo.obs_groups",
+    "env.control_config",
+    # Kept for legacy run_config.json files written before env.control_config was
+    # captured as a whole.
     "env.control_config.action_scale",
     "algo.policy.actor_hidden_dims",
     "algo.policy.critic_hidden_dims",
@@ -46,6 +48,9 @@ DENYLIST: list[str] = [
 SNAPSHOT_FIELDS: list[str] = DENYLIST + WARNING_LIST
 
 ENV_STRUCTURAL_DENYLIST: list[str] = [path for path in DENYLIST if path.startswith("env.")]
+ENV_STRUCTURAL_REVERSE_DENYLIST: list[str] = [
+    path for path in ENV_STRUCTURAL_DENYLIST if path != "env.control_config"
+]
 
 
 def _select(cfg: Any, path: str) -> Any:
@@ -113,6 +118,11 @@ def _asymmetric_line(path: str, present_value: Any, *, source_present: bool) -> 
     )
 
 
+def _snapshot_has_path_or_descendant(snapshot: dict[str, Any], path: str) -> bool:
+    prefix = f"{path}."
+    return any(key == path or key.startswith(prefix) for key in snapshot)
+
+
 def _read_snapshot(run_dir: Path) -> dict[str, Any] | None:
     """Read ``contract_snapshot`` from ``run_dir/run_config.json`` (``None`` if absent)."""
     path = run_dir / "run_config.json"
@@ -173,9 +183,19 @@ def resolve_sim2sim_config(
             print(f"[sim2sim] WARNING override {line}")
 
     for path in ENV_STRUCTURAL_DENYLIST:
-        if path in snapshot:
+        if _snapshot_has_path_or_descendant(snapshot, path):
             continue
-        if _select(target_cfg, path) is not None:
+        target_value = _select(target_cfg, path)
+        if target_value is None:
+            continue
+        if path not in ENV_STRUCTURAL_REVERSE_DENYLIST:
+            print(
+                f"[sim2sim] WARNING {path}: source=<absent> target={_format_value(target_value)} "
+                "(the trained run predates this contract field; retrain or backfill the "
+                "run_config.json contract_snapshot to enforce it strictly)"
+            )
+            continue
+        if target_value is not None:
             denials.append(_asymmetric_line(path, _select(target_cfg, path), source_present=False))
 
     if denials:
