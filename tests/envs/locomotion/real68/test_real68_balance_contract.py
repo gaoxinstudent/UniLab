@@ -148,7 +148,7 @@ def test_real68_command_lean_targets_reduce_orientation_and_posture_penalties():
     try:
         cmd_x = np.asarray([0.8], dtype=np.float32)
         commands = np.asarray([[0.8, 0.0, 0.0]], dtype=np.float32)
-        target_gx = env._command_lean_gravity_target(cmd_x)
+        target_gy = env._command_lean_gravity_target(cmd_x)
         target_posture = env._command_target_posture(cmd_x)
         default = env.default_angles[POSTURE_INDICES][None, :].copy()
 
@@ -168,7 +168,7 @@ def test_real68_command_lean_targets_reduce_orientation_and_posture_penalties():
             info={"commands": commands},
             linvel=np.zeros((1, 3), dtype=np.float32),
             gyro=np.zeros((1, 3), dtype=np.float32),
-            gravity=np.asarray([[target_gx[0], 0.0, 1.0]], dtype=np.float32),
+            gravity=np.asarray([[0.0, target_gy[0], 1.0]], dtype=np.float32),
             dof_pos=leaned_dof,
             dof_vel=np.zeros((1, env._num_action), dtype=np.float32),
             num_envs=1,
@@ -229,5 +229,56 @@ def test_real68_command_curriculum_bootstraps_standing_before_velocity_commands(
         assert np.all(commands[:, 0] >= 0.35)
         assert np.all(commands[:, 0] <= 0.45)
         np.testing.assert_allclose(commands[:, 1:], np.zeros((8, 2)))
+    finally:
+        env.close()
+
+
+def test_real68_command_curriculum_reports_velocity_safety_rates():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {
+                "min_segment_count": 1,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._record_command_segment_stats(
+            cmd_x=0.4,
+            cmd_yaw=0.0,
+            mean_abs_vx=0.3,
+            mean_signed_vx=0.28,
+            mean_abs_wz=0.0,
+            vx_error=0.12,
+            wz_error=0.0,
+            mean_nonwheel_contact=0.02,
+            mean_tilt=0.03,
+            mean_height_violation=0.01,
+            segment_steps=25,
+        )
+
+        vx_eval = env._curriculum_vx_eval()
+        assert vx_eval is not None
+        assert vx_eval["speed_ratio"] == pytest.approx(0.7)
+        assert vx_eval["vx_error"] == pytest.approx(0.12)
+        assert vx_eval["tilt_rate"] == pytest.approx(0.03)
+        assert vx_eval["height_violation_rate"] == pytest.approx(0.01)
+        assert vx_eval["nonwheel_contact_rate"] == pytest.approx(0.02)
+
+        log: dict[str, float] = {}
+        env._write_command_curriculum_metrics(log)
+        assert log["command_curriculum/eval_tilt_rate"] == pytest.approx(0.03)
+        assert log["command_curriculum/eval_height_violation_rate"] == pytest.approx(0.01)
+        assert log["command_curriculum/eval_nonwheel_contact_rate"] == pytest.approx(0.02)
     finally:
         env.close()

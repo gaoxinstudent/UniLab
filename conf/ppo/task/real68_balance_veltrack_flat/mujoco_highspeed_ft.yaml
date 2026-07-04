@@ -1,0 +1,28 @@
+# @package _global_
+# Fine-tune profile for high-speed forward tracking after the standing/safe curriculum converges.
+defaults:
+  - /task/real68_balance_veltrack_flat/mujoco
+  - _self_
+
+algo:
+  num_envs: 8192
+  max_iterations: 30
+
+env:
+  commands:
+    vel_limit:
+      - [-0.6, 0.0, 0.0]
+      - [0.6, 0.0, 0.0]
+    rel_standing_envs: 0.0
+  command_curriculum:
+    enabled: false
+
+play_profile:
+  env:
+    commands:
+      vel_limit:
+        - [0.6, 0.0, 0.0]
+        - [0.6, 0.0, 0.0]
+      rel_standing_envs: 0.0
+    command_curriculum:
+      enabled: false
