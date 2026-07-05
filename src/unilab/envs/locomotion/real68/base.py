@@ -62,10 +62,18 @@ HIP_INDICES = np.asarray([0, 3], dtype=np.int32)
 WHEEL_INDICES = np.asarray([1, 4], dtype=np.int32)
 CALF_INDICES = np.asarray([2, 5], dtype=np.int32)
 POSTURE_INDICES = np.asarray([0, 2, 3, 5], dtype=np.int32)
-DEFAULT_ACTIVE_ANGLES = np.asarray(
-    [0.182222, -0.045959, -0.470205, -0.219739, -0.076009, 0.563879],
+SYMMETRIC_STANDING_ACTIVE_ANGLES = np.asarray(
+    [
+        0.2009805,
+        -0.045959,
+        -0.517042,
+        -0.2009805,
+        -0.076009,
+        0.517042,
+    ],
     dtype=np.float64,
 )
+DEFAULT_ACTIVE_ANGLES = SYMMETRIC_STANDING_ACTIVE_ANGLES.copy()
 HOME_BASE_HEIGHT = 0.257282
 
 

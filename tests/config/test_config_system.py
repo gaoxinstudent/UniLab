@@ -416,8 +416,11 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.training.task_name == "Real68BalanceFlat"
     assert cfg.training.sim_backend == "mujoco"
     assert cfg.algo.num_envs == 8192
-    assert cfg.algo.load_run == "2026-07-05_15-17-20_mujoco"
-    assert cfg.algo.checkpoint == 583
+    # Owner YAML deliberately does not bind a resume lineage; load_run/checkpoint
+    # fall back to the structured-config defaults ("-1" / -1) and are passed
+    # explicitly at train/eval time. See commit da69f9a3.
+    assert cfg.algo.load_run == "-1"
+    assert cfg.algo.checkpoint == -1
     assert cfg.env.commands.vel_limit == [[-0.8, 0.0, -1.5], [1.32, 0.0, 1.5]]
     assert cfg.reward.scales.forward_progress == pytest.approx(1.1)
     assert cfg.reward.scales.under_speed == pytest.approx(-3.0)
@@ -441,15 +444,21 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     ccfg = cfg.env.command_curriculum
     assert ccfg.enabled is True
     assert ccfg.initial_vel_limit == [[-0.8, 0.0, -1.5], [1.32, 0.0, 1.5]]
-    assert ccfg.final_vel_limit == [[-2.0, 0.0, -9.0], [2.0, 0.0, 9.0]]
+    assert ccfg.final_vel_limit == [[-1.6, 0.0, -7.5], [1.6, 0.0, 7.5]]
     assert ccfg.yaw_unlock_vx_progress == pytest.approx(0.0)
     assert ccfg.reverse_unlock_vx_progress == pytest.approx(0.25)
     assert ccfg.standing_bootstrap_enabled is False
-    assert ccfg.standing_prob_initial == pytest.approx(0.0)
-    assert ccfg.standing_prob_final == pytest.approx(0.0)
+    assert ccfg.standing_prob_initial == pytest.approx(0.10)
+    assert ccfg.standing_prob_final == pytest.approx(0.04)
+    assert ccfg.standing_decay_vx_progress == pytest.approx(0.8)
     assert ccfg.straight_command_prob == pytest.approx(0.35)
     assert ccfg.yaw_only_command_prob == pytest.approx(0.20)
     assert ccfg.high_speed_command_prob == pytest.approx(0.35)
+    assert cfg.env.commands.rel_standing_envs == pytest.approx(0.05)
+    assert cfg.reward.scales.standing_orientation == pytest.approx(-8.0)
+    assert cfg.reward.scales.standing_posture == pytest.approx(-1.0)
+    assert cfg.reward.scales.standing_leg_symmetry == pytest.approx(-1.5)
+    assert cfg.reward.balance_gate.standing_roll_pitch_sigma == pytest.approx(0.03)
 
 
 def test_ppo_go2w_motrix_uses_motor_owner_dr_path():

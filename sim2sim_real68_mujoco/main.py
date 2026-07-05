@@ -53,13 +53,8 @@ def _build_commander(
         commander.command[:] = sim.command
         return commander
 
-    command_limits = np.asarray(sim.cfg["command_limits"], dtype=np.float64)
-    default_vx_scale = float(
-        max(abs(command_limits[0, 0]), abs(command_limits[1, 0]), abs(sim.command[0]), 0.8)
-    )
-    default_wz_scale = float(
-        max(abs(command_limits[0, 2]), abs(command_limits[1, 2]), abs(sim.command[2]), 0.4)
-    )
+    default_vx_scale = float(max(abs(sim.command[0]), 0.8))
+    default_wz_scale = float(max(abs(sim.command[2]), 0.4))
     return GamepadCommander(
         joystick_index=joystick_index,
         deadzone=deadzone,
@@ -110,7 +105,7 @@ def _interactive_run(
             "[sim2sim] PS2 controls: left stick Y choose forward/back direction, "
             "right stick X choose yaw direction, D-pad up/down adjust |vx|, "
             "D-pad left/right adjust |wz|, CROSS zero, START reset, SELECT pause, CIRCLE next terrain, "
-            "TRIANGLE follow-camera, SQUARE single-step."
+            "TRIANGLE follow-camera, SQUARE single-step. D-pad magnitude is uncapped."
         )
     try:
         with mujoco.viewer.launch_passive(sim.model, sim.data, key_callback=_on_key) as viewer:
@@ -175,10 +170,16 @@ def main() -> None:
         "--deadzone", type=float, default=0.12, help="Joystick deadzone for PS2 mode."
     )
     parser.add_argument(
-        "--vx-scale", type=float, default=None, help="Max forward speed mapped from stick."
+        "--vx-scale",
+        type=float,
+        default=None,
+        help="Initial forward-speed magnitude and D-pad step-size reference for PS2 mode.",
     )
     parser.add_argument(
-        "--wz-scale", type=float, default=None, help="Max yaw rate mapped from stick."
+        "--wz-scale",
+        type=float,
+        default=None,
+        help="Initial yaw-rate magnitude and D-pad step-size reference for PS2 mode.",
     )
     args = parser.parse_args()
 

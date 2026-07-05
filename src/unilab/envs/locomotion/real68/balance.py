@@ -19,7 +19,12 @@ from unilab.dr.dr_utils import (
     zero_actions,
 )
 from unilab.dtype_config import get_global_dtype
-from unilab.envs.common.rotation import np_quat_mul, np_yaw_to_quat
+from unilab.envs.common.rotation import (
+    np_quat_mul,
+    np_wrap_to_pi,
+    np_yaw_from_quat,
+    np_yaw_to_quat,
+)
 from unilab.envs.locomotion.common import rewards
 from unilab.envs.locomotion.common.commands import Commands, zero_small_xy_commands
 from unilab.envs.locomotion.common.domain_rand import DomainRandConfig
@@ -34,6 +39,7 @@ from unilab.envs.locomotion.real68.base import (
     NONWHEEL_CONTACT_SENSORS,
     NUM_ACTIONS,
     POSTURE_INDICES,
+    SYMMETRIC_STANDING_ACTIVE_ANGLES,
     WHEEL_CONTACT_SENSORS,
     WHEEL_INDICES,
     Real68BaseCfg,
@@ -53,13 +59,16 @@ _REAL68_LEFT_WHEEL_INDEX = int(WHEEL_INDICES[0])
 _REAL68_RIGHT_WHEEL_INDEX = int(WHEEL_INDICES[1])
 _REAL68_LEFT_CALF_INDEX = int(CALF_INDICES[0])
 _REAL68_RIGHT_CALF_INDEX = int(CALF_INDICES[1])
-_REAL68_LEFT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index(
-    "left_chuanliangan5_contact"
-)
+_REAL68_LEFT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("left_chuanliangan5_contact")
 _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("right_liangan5_contact")
 _REAL68_FORWARD_AXIS = 1
 _REAL68_LATERAL_AXIS = 0
 _REAL68_FORWARD_SIGN = 1.0
+_REAL68_WHEEL_RADIUS = 0.06
+# Left/right wheel bodies sit at y = ±0.215 in real68.xml (lines 54, 110),
+# so the differential-drive wheelbase is 2 * 0.215 = 0.43 m. Used to clip the
+# commanded (vx, wz) into the reachable diamond |vx| + |wz| * L/2 <= v_wheel_max.
+_REAL68_WHEEL_BASE = 0.43
 
 
 @dataclass
@@ -85,6 +94,8 @@ class Real68CommandCurriculumCfg:
     max_wz_error_high: float = 1.1
     max_tilt_rate: float = 0.02
     max_tilt_rate_high: float = 0.05
+    max_tilt_angle_deg: float = float("inf")
+    max_tilt_angle_deg_high: float = float("inf")
     max_height_violation_rate: float = 0.01
     max_height_violation_rate_high: float = 0.03
     max_nonwheel_contact_rate: float = 0.02
@@ -101,6 +112,11 @@ class Real68CommandCurriculumCfg:
     standing_prob_initial: float = 0.0
     standing_prob_final: float = 0.0
     standing_decay_vx_progress: float = 1.0
+    straight_command_prob: float = 0.0
+    yaw_only_command_prob: float = 0.0
+    yaw_only_max_abs_vx: float = 0.04
+    high_speed_command_prob: float = 0.0
+    high_speed_min_abs_vx: float = 0.0
 
 
 @dataclass
@@ -136,6 +152,23 @@ class RewardConfig:
         calf_gain: float = 0.0
         calf_limit: float = 0.0
 
+    @dataclass
+    class BalanceGateConfig:
+        enabled: bool = False
+        upright_cos_min: float = 0.75
+        upright_cos_full: float = 0.96
+        straight_command_yaw_threshold: float = 0.2
+        moving_command_vx_threshold: float = 0.08
+        heading_error_limit: float = 0.35
+        lateral_drift_limit: float = 0.35
+        yaw_tracking_sigma: float = 1.5
+        standing_roll_pitch_sigma: float = 0.10
+
+    @dataclass
+    class ExcessTiltConfig:
+        limit_deg: float = 3.0
+        scale_deg: float = 3.0
+
     scales: dict[str, float]
     tracking_sigma: float
     height_tracking_sigma: float = 0.015
@@ -146,6 +179,8 @@ class RewardConfig:
     max_tilt_cos: float = 0.5
     only_positive_rewards: bool = False
     command_lean: CommandLeanConfig = field(default_factory=CommandLeanConfig)
+    balance_gate: BalanceGateConfig = field(default_factory=BalanceGateConfig)
+    excess_tilt: ExcessTiltConfig = field(default_factory=ExcessTiltConfig)
 
 
 @dataclass
@@ -222,6 +257,11 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
             dtype=get_global_dtype(),
         )
         commands = env.sample_velocity_commands(num_reset)
+        if (
+            hasattr(env, "_last_command_clip_scale")
+            and env._last_command_clip_scale.shape[0] == num_reset
+        ):
+            env._command_clip_scale[env_ids] = env._last_command_clip_scale
         height_commands = env.sample_height_commands(num_reset, commands=commands)
         info_updates = {
             "commands": commands,
@@ -320,6 +360,19 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._nonwheel_contacts = np.zeros(
             (num_envs, len(NONWHEEL_CONTACT_SENSORS)), dtype=self._np_dtype
         )
+        self._segment_start_pos_xy = np.zeros((num_envs, 2), dtype=self._np_dtype)
+        self._segment_start_yaw = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._heading_error = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._lateral_drift = np.zeros((num_envs,), dtype=self._np_dtype)
+        # Per-env clip scale applied by _clip_to_diamond at command resample
+        # time. 1.0 = command was inside the reachable diamond (unchanged);
+        # < 1.0 = the (vx, wz) ray was scaled back to the diamond boundary.
+        # Read by the metrics writer to expose how often the nominal command
+        # box overshoots the differential-drive reachable set.
+        self._command_clip_scale = np.ones((num_envs,), dtype=self._np_dtype)
+        # Staging buffer written by _clip_to_diamond; sampled by callers that
+        # know the resampled env_ids to scatter into _command_clip_scale.
+        self._last_command_clip_scale = np.ones((num_envs,), dtype=self._np_dtype)
         self._backend.set_pre_step_control(self._pre_step_motor_control)
         self._init_reward_functions()
         self._init_domain_randomization(self._make_dr_provider())
@@ -348,6 +401,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._curriculum_vx_tilt_rate_sum = np.zeros(
             (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
+        self._curriculum_vx_tilt_angle_sum = np.zeros(
+            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+        )
         self._curriculum_vx_height_violation_rate_sum = np.zeros(
             (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
@@ -356,6 +412,18 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
         self._curriculum_yaw_count = np.zeros((_REAL68_CURRICULUM_NUM_BINS,), dtype=np.int32)
         self._curriculum_yaw_error_sum = np.zeros(
+            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+        )
+        self._curriculum_yaw_tilt_rate_sum = np.zeros(
+            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+        )
+        self._curriculum_yaw_tilt_angle_sum = np.zeros(
+            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+        )
+        self._curriculum_yaw_height_violation_rate_sum = np.zeros(
+            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+        )
+        self._curriculum_yaw_nonwheel_contact_rate_sum = np.zeros(
             (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._nonwheel_contact_steps = np.zeros((num_envs,), dtype=np.int32)
@@ -374,6 +442,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._segment_wz_error_sum = np.zeros((num_envs,), dtype=self._np_dtype)
         self._segment_nonwheel_contact_sum = np.zeros((num_envs,), dtype=self._np_dtype)
         self._segment_tilt_sum = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._segment_tilt_angle_sum = np.zeros((num_envs,), dtype=self._np_dtype)
         self._segment_height_violation_sum = np.zeros((num_envs,), dtype=self._np_dtype)
         self._segment_steps = np.zeros((num_envs,), dtype=np.int32)
         self._curriculum_recorded_segments = 0
@@ -440,19 +509,118 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         commands[:, 1] = 0.0
+        yaw_only_mask = np.zeros((num_samples,), dtype=bool)
         if self._yaw_curriculum_locked():
             commands[:, 2] = 0.0
+        else:
+            straight_prob, yaw_only_prob = self._command_mix_probabilities()
+            if straight_prob > 0.0 or yaw_only_prob > 0.0:
+                mix = np.random.uniform(size=(num_samples,))
+                straight_mask = mix < straight_prob
+                yaw_only_mask = (mix >= straight_prob) & (mix < straight_prob + yaw_only_prob)
+                commands[straight_mask, 2] = 0.0
+                if np.any(yaw_only_mask):
+                    max_abs_vx = max(float(self._cfg.command_curriculum.yaw_only_max_abs_vx), 0.0)
+                    commands[yaw_only_mask, 0] = np.random.uniform(
+                        low=-max_abs_vx,
+                        high=max_abs_vx,
+                        size=(int(np.count_nonzero(yaw_only_mask)),),
+                    )
+        self._apply_high_speed_command_bias(commands, eligible_mask=~yaw_only_mask)
         zero_small_xy_commands(commands, threshold=0.08)
+        self._clip_to_diamond(commands)
         standing_prob = self._standing_command_probability()
         if standing_prob > 0.0:
             standing = np.random.uniform(size=(num_samples,)) < min(standing_prob, 1.0)
             commands[standing] = 0.0
         return commands
 
+    def _clip_to_diamond(self, commands: np.ndarray) -> None:
+        """Clip commanded (vx, wz) into the differential-drive reachable set, in place.
+
+        The reachable set is the diamond ``|vx| + |wz| * L/2 <= v_wheel_max`` where
+        ``v_wheel_max = wheel_velocity_scale * wheel_radius`` is the per-wheel surface
+        speed ceiling. Scaling both vx and wz by the same factor keeps the command on
+        its original ray (preserving direction and the relative vx/wz mix) while
+        pulling it back to the diamond boundary.
+
+        Also stages per-sample clip scales in ``self._last_command_clip_scale`` (1.0 =
+        unchanged, <1.0 = scaled back) so callers that know the resampled env_ids can
+        scatter them into ``self._command_clip_scale`` for diagnostics.
+        """
+        wheel_velocity_scale = float(self._cfg.control_config.wheel_velocity_scale)
+        v_wheel_max = wheel_velocity_scale * _REAL68_WHEEL_RADIUS
+        demand = np.abs(commands[:, 0]) + np.abs(commands[:, 2]) * (0.5 * _REAL68_WHEEL_BASE)
+        clip_scale = np.ones_like(demand, dtype=self._np_dtype)
+        over = demand > v_wheel_max
+        if np.any(over):
+            scale = v_wheel_max / np.maximum(demand[over], 1.0e-6)
+            clip_scale[over] = scale
+            commands[over, 0] *= scale
+            commands[over, 2] *= scale
+        self._last_command_clip_scale = clip_scale
+
+    def _apply_high_speed_command_bias(
+        self,
+        commands: np.ndarray,
+        *,
+        eligible_mask: np.ndarray,
+    ) -> None:
+        ccfg = self._cfg.command_curriculum
+        prob = float(np.clip(ccfg.high_speed_command_prob, 0.0, 1.0))
+        min_abs_vx = max(float(ccfg.high_speed_min_abs_vx), 0.0)
+        if prob <= 0.0 or min_abs_vx <= 0.0 or commands.shape[0] == 0:
+            return
+
+        low_vx = float(self._command_curriculum_low[0])
+        high_vx = float(self._command_curriculum_high[0])
+        can_sample_negative = low_vx <= -min_abs_vx
+        can_sample_positive = high_vx >= min_abs_vx
+        if not (can_sample_negative or can_sample_positive):
+            return
+
+        eligible = np.asarray(eligible_mask, dtype=bool)
+        selected = eligible & (np.random.uniform(size=(commands.shape[0],)) < prob)
+        selected_count = int(np.count_nonzero(selected))
+        if selected_count == 0:
+            return
+
+        choose_negative = np.zeros((selected_count,), dtype=bool)
+        if can_sample_negative and can_sample_positive:
+            choose_negative = np.random.uniform(size=(selected_count,)) < 0.5
+        elif can_sample_negative:
+            choose_negative.fill(True)
+
+        sampled = np.empty((selected_count,), dtype=self._np_dtype)
+        negative_count = int(np.count_nonzero(choose_negative))
+        if negative_count > 0:
+            sampled[choose_negative] = np.random.uniform(
+                low=low_vx,
+                high=-min_abs_vx,
+                size=(negative_count,),
+            )
+        positive_count = selected_count - negative_count
+        if positive_count > 0:
+            sampled[~choose_negative] = np.random.uniform(
+                low=min_abs_vx,
+                high=high_vx,
+                size=(positive_count,),
+            )
+        commands[selected, 0] = sampled
+
+    def _command_mix_probabilities(self) -> tuple[float, float]:
+        ccfg = self._cfg.command_curriculum
+        if not ccfg.enabled:
+            return 0.0, 0.0
+        straight_prob = float(np.clip(ccfg.straight_command_prob, 0.0, 1.0))
+        yaw_only_prob = float(np.clip(ccfg.yaw_only_command_prob, 0.0, 1.0 - straight_prob))
+        return straight_prob, yaw_only_prob
+
     def _yaw_curriculum_locked(self) -> bool:
         ccfg = self._cfg.command_curriculum
         return bool(
-            ccfg.enabled and self._command_curriculum_vx_progress < float(ccfg.yaw_unlock_vx_progress)
+            ccfg.enabled
+            and self._command_curriculum_vx_progress < float(ccfg.yaw_unlock_vx_progress)
         )
 
     def _standing_command_probability(self) -> float:
@@ -484,9 +652,8 @@ class Real68BalanceEnv(Real68BaseEnv):
                 and standing_eval["mean_steps"] >= float(ccfg.standing_bootstrap_min_segment_steps)
                 and standing_eval["abs_vx"] <= float(ccfg.standing_bootstrap_max_abs_vx)
                 and standing_eval["wz_error"] <= float(ccfg.standing_bootstrap_max_wz_error)
-                and standing_eval["nonwheel_contact"] <= float(
-                    ccfg.standing_bootstrap_max_nonwheel_contact
-                )
+                and standing_eval["nonwheel_contact"]
+                <= float(ccfg.standing_bootstrap_max_nonwheel_contact)
             )
             if standing_ready:
                 self._last_standing_bootstrap_eval = standing_eval
@@ -505,6 +672,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 vx_eval["speed_ratio"] >= float(ccfg.min_speed_ratio)
                 and vx_eval["vx_error"] <= vx_up_threshold
                 and vx_eval["tilt_rate"] <= float(ccfg.max_tilt_rate)
+                and vx_eval["tilt_angle_deg"] <= float(ccfg.max_tilt_angle_deg)
                 and vx_eval["height_violation_rate"] <= float(ccfg.max_height_violation_rate)
                 and vx_eval["nonwheel_contact_rate"] <= float(ccfg.max_nonwheel_contact_rate)
             )
@@ -512,8 +680,8 @@ class Real68BalanceEnv(Real68BaseEnv):
                 vx_eval["speed_ratio"] <= float(ccfg.min_speed_ratio_down)
                 or vx_eval["vx_error"] >= float(ccfg.vx_error_range[2])
                 or vx_eval["tilt_rate"] >= float(ccfg.max_tilt_rate_high)
-                or vx_eval["height_violation_rate"]
-                >= float(ccfg.max_height_violation_rate_high)
+                or vx_eval["tilt_angle_deg"] >= float(ccfg.max_tilt_angle_deg_high)
+                or vx_eval["height_violation_rate"] >= float(ccfg.max_height_violation_rate_high)
                 or vx_eval["nonwheel_contact_rate"] >= float(ccfg.max_nonwheel_contact_rate_high)
             )
             if vx_ready and self._command_curriculum_vx_progress < 1.0:
@@ -530,8 +698,20 @@ class Real68BalanceEnv(Real68BaseEnv):
         if yaw_eval is not None and self._command_curriculum_vx_progress >= float(
             ccfg.yaw_unlock_vx_progress
         ):
-            yaw_ready = bool(yaw_eval["wz_error"] <= float(ccfg.max_wz_error))
-            yaw_should_backoff = bool(yaw_eval["wz_error"] >= float(ccfg.max_wz_error_high))
+            yaw_ready = bool(
+                yaw_eval["wz_error"] <= float(ccfg.max_wz_error)
+                and yaw_eval["tilt_rate"] <= float(ccfg.max_tilt_rate)
+                and yaw_eval["tilt_angle_deg"] <= float(ccfg.max_tilt_angle_deg)
+                and yaw_eval["height_violation_rate"] <= float(ccfg.max_height_violation_rate)
+                and yaw_eval["nonwheel_contact_rate"] <= float(ccfg.max_nonwheel_contact_rate)
+            )
+            yaw_should_backoff = bool(
+                yaw_eval["wz_error"] >= float(ccfg.max_wz_error_high)
+                or yaw_eval["tilt_rate"] >= float(ccfg.max_tilt_rate_high)
+                or yaw_eval["tilt_angle_deg"] >= float(ccfg.max_tilt_angle_deg_high)
+                or yaw_eval["height_violation_rate"] >= float(ccfg.max_height_violation_rate_high)
+                or yaw_eval["nonwheel_contact_rate"] >= float(ccfg.max_nonwheel_contact_rate_high)
+            )
             if yaw_ready and self._command_curriculum_yaw_progress < 1.0:
                 self._command_curriculum_yaw_progress = min(
                     1.0, self._command_curriculum_yaw_progress + float(ccfg.yaw_step)
@@ -655,14 +835,24 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._reward_fns: dict[str, Any] = {
             "tracking_lin_vel": self._reward_tracking_forward_vel,
             "tracking_ang_vel": rewards.tracking_ang_vel,
+            "balanced_tracking_lin_vel": self._reward_balanced_tracking_forward_vel,
+            "balanced_tracking_ang_vel": self._reward_balanced_tracking_ang_vel,
+            "balanced_speed_match": self._reward_balanced_speed_match,
+            "balanced_forward_progress": self._reward_balanced_forward_progress,
+            "balanced_net_progress": self._reward_balanced_net_progress,
             "forward_progress": self._reward_forward_progress,
             "net_progress": self._reward_net_progress,
             "vx_abs_net_gap": self._reward_vx_abs_net_gap,
             "under_speed": self._reward_under_speed,
+            "balanced_under_speed": self._reward_balanced_under_speed,
+            "drive_wheel_command": self._reward_drive_wheel_command,
             "yaw_rate_when_uncommanded": rewards.yaw_rate_when_uncommanded,
+            "heading_stability": self._reward_heading_stability,
+            "lateral_drift": self._reward_lateral_drift,
             "lin_vel_z": rewards.lin_vel_z,
             "ang_vel_xy": rewards.ang_vel_xy,
             "orientation": self._reward_orientation,
+            "excess_tilt": self._reward_excess_tilt,
             "tilt_termination": self._reward_tilt_termination,
             "action_rate": rewards.action_rate,
             "alive": rewards.alive,
@@ -676,6 +866,9 @@ class Real68BalanceEnv(Real68BaseEnv):
             "standing_wheel_action": self._reward_standing_wheel_action,
             "standing_under_height": self._reward_standing_under_height,
             "standing_liangan5_contact": self._reward_standing_liangan5_contact,
+            "standing_orientation": self._reward_standing_orientation,
+            "standing_posture": self._reward_standing_posture,
+            "standing_leg_symmetry": self._reward_standing_leg_symmetry,
             "height_tracking": self._reward_height_tracking,
             "height_safety": self._reward_height_safety,
             "under_height": self._reward_under_height,
@@ -771,6 +964,10 @@ class Real68BalanceEnv(Real68BaseEnv):
             info.get("termination_tilt", np.zeros((self._num_envs,), dtype=bool)),
             dtype=self._np_dtype,
         )
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
+        tilt_angle_deg = np.rad2deg(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0)))
         height_violation = np.asarray(
             info.get("height_violation", np.zeros((self._num_envs,), dtype=bool)),
             dtype=self._np_dtype,
@@ -785,12 +982,15 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._segment_wz_error_sum += np.abs(commands[:, 2] - gyro_z)
         self._segment_nonwheel_contact_sum += nonwheel_contact_frac
         self._segment_tilt_sum += tilt
+        self._segment_tilt_angle_sum += tilt_angle_deg
         self._segment_height_violation_sum += height_violation
         self._segment_steps += 1
 
     def _reset_command_segments(self, env_ids: np.ndarray, commands: np.ndarray) -> None:
         if env_ids.size == 0:
             return
+        base_pos = np.asarray(self._backend.get_base_pos(), dtype=self._np_dtype)
+        base_quat = np.asarray(self._backend.get_base_quat(), dtype=self._np_dtype)
         self._segment_cmd_x[env_ids] = commands[:, 0]
         self._segment_cmd_yaw[env_ids] = commands[:, 2]
         self._segment_abs_vx_sum[env_ids] = 0.0
@@ -800,18 +1000,28 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._segment_wz_error_sum[env_ids] = 0.0
         self._segment_nonwheel_contact_sum[env_ids] = 0.0
         self._segment_tilt_sum[env_ids] = 0.0
+        self._segment_tilt_angle_sum[env_ids] = 0.0
         self._segment_height_violation_sum[env_ids] = 0.0
         self._segment_steps[env_ids] = 0
+        if base_pos.shape[0] == self._num_envs:
+            self._segment_start_pos_xy[env_ids] = base_pos[env_ids, :2]
+        if base_quat.shape[0] == self._num_envs:
+            self._segment_start_yaw[env_ids] = np_yaw_from_quat(base_quat[env_ids])
 
     def _reset_command_curriculum_stats(self) -> None:
         self._curriculum_vx_count.fill(0)
         self._curriculum_vx_signed_speed_ratio_sum.fill(0.0)
         self._curriculum_vx_error_sum.fill(0.0)
         self._curriculum_vx_tilt_rate_sum.fill(0.0)
+        self._curriculum_vx_tilt_angle_sum.fill(0.0)
         self._curriculum_vx_height_violation_rate_sum.fill(0.0)
         self._curriculum_vx_nonwheel_contact_rate_sum.fill(0.0)
         self._curriculum_yaw_count.fill(0)
         self._curriculum_yaw_error_sum.fill(0.0)
+        self._curriculum_yaw_tilt_rate_sum.fill(0.0)
+        self._curriculum_yaw_tilt_angle_sum.fill(0.0)
+        self._curriculum_yaw_height_violation_rate_sum.fill(0.0)
+        self._curriculum_yaw_nonwheel_contact_rate_sum.fill(0.0)
         self._reset_standing_bootstrap_stats()
         self._last_standing_bootstrap_eval = None
         self._curriculum_recorded_segments = 0
@@ -824,13 +1034,20 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._standing_segment_nonwheel_contact_sum = 0.0
 
     def _curriculum_abs_limit_x(self) -> float:
-        return float(max(abs(self._command_curriculum_low[0]), abs(self._command_curriculum_high[0])))
+        return float(
+            max(abs(self._command_curriculum_low[0]), abs(self._command_curriculum_high[0]))
+        )
 
     def _curriculum_abs_limit_yaw(self) -> float:
-        return float(max(abs(self._command_curriculum_low[2]), abs(self._command_curriculum_high[2])))
+        return float(
+            max(abs(self._command_curriculum_low[2]), abs(self._command_curriculum_high[2]))
+        )
 
     def _curriculum_bin_index(self, magnitude: float, max_abs: float) -> int | None:
-        if magnitude <= _REAL68_CURRICULUM_MIN_ABS_COMMAND or max_abs <= _REAL68_CURRICULUM_MIN_ABS_COMMAND:
+        if (
+            magnitude <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+            or max_abs <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        ):
             return None
         span = max(max_abs - _REAL68_CURRICULUM_MIN_ABS_COMMAND, 1.0e-6)
         normalized = np.clip(
@@ -859,6 +1076,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         wz_error: float,
         mean_nonwheel_contact: float,
         mean_tilt: float,
+        mean_tilt_angle_deg: float,
         mean_height_violation: float,
         segment_steps: int,
     ) -> None:
@@ -882,6 +1100,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             self._curriculum_vx_signed_speed_ratio_sum[vx_index] += signed_speed_ratio
             self._curriculum_vx_error_sum[vx_index] += vx_error
             self._curriculum_vx_tilt_rate_sum[vx_index] += mean_tilt
+            self._curriculum_vx_tilt_angle_sum[vx_index] += mean_tilt_angle_deg
             self._curriculum_vx_height_violation_rate_sum[vx_index] += mean_height_violation
             self._curriculum_vx_nonwheel_contact_rate_sum[vx_index] += mean_nonwheel_contact
 
@@ -890,6 +1109,10 @@ class Real68BalanceEnv(Real68BaseEnv):
         if yaw_index is not None:
             self._curriculum_yaw_count[yaw_index] += 1
             self._curriculum_yaw_error_sum[yaw_index] += wz_error
+            self._curriculum_yaw_tilt_rate_sum[yaw_index] += mean_tilt
+            self._curriculum_yaw_tilt_angle_sum[yaw_index] += mean_tilt_angle_deg
+            self._curriculum_yaw_height_violation_rate_sum[yaw_index] += mean_height_violation
+            self._curriculum_yaw_nonwheel_contact_rate_sum[yaw_index] += mean_nonwheel_contact
 
         self._curriculum_recorded_segments += 1
 
@@ -910,6 +1133,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 self._segment_nonwheel_contact_sum[env_id] / max(steps, 1)
             )
             mean_tilt = float(self._segment_tilt_sum[env_id] / max(steps, 1))
+            mean_tilt_angle_deg = float(self._segment_tilt_angle_sum[env_id] / max(steps, 1))
             mean_height_violation = float(
                 self._segment_height_violation_sum[env_id] / max(steps, 1)
             )
@@ -923,6 +1147,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 wz_error=wz_error,
                 mean_nonwheel_contact=mean_nonwheel_contact,
                 mean_tilt=mean_tilt,
+                mean_tilt_angle_deg=mean_tilt_angle_deg,
                 mean_height_violation=mean_height_violation,
                 segment_steps=steps,
             )
@@ -953,6 +1178,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 "speed_ratio": float(self._curriculum_vx_signed_speed_ratio_sum[index] / count),
                 "vx_error": float(self._curriculum_vx_error_sum[index] / count),
                 "tilt_rate": float(self._curriculum_vx_tilt_rate_sum[index] / count),
+                "tilt_angle_deg": float(self._curriculum_vx_tilt_angle_sum[index] / count),
                 "height_violation_rate": float(
                     self._curriculum_vx_height_violation_rate_sum[index] / count
                 ),
@@ -973,6 +1199,14 @@ class Real68BalanceEnv(Real68BaseEnv):
                 "bucket_upper": self._curriculum_bucket_upper(index, max_abs),
                 "count": float(count),
                 "wz_error": float(self._curriculum_yaw_error_sum[index] / count),
+                "tilt_rate": float(self._curriculum_yaw_tilt_rate_sum[index] / count),
+                "tilt_angle_deg": float(self._curriculum_yaw_tilt_angle_sum[index] / count),
+                "height_violation_rate": float(
+                    self._curriculum_yaw_height_violation_rate_sum[index] / count
+                ),
+                "nonwheel_contact_rate": float(
+                    self._curriculum_yaw_nonwheel_contact_rate_sum[index] / count
+                ),
             }
         return None
 
@@ -1012,6 +1246,16 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["metrics/cmd_yaw"] = float(np.mean(cmd_yaw))
         log["metrics/vx_error"] = float(np.mean(np.abs(cmd_x - linvel_forward)))
         log["metrics/wz_error"] = float(np.mean(np.abs(cmd_yaw - gyro_z)))
+        log["metrics/heading_error"] = float(np.mean(np.abs(self._compute_heading_error())))
+        log["metrics/lateral_drift"] = float(np.mean(np.abs(self._compute_lateral_drift())))
+        log["metrics/upright_gate"] = float(np.mean(self._upright_gate()))
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
+        log["metrics/upright_cos"] = float(np.mean(gravity[:, 2]))
+        log["metrics/tilt_angle_deg"] = float(
+            np.rad2deg(np.mean(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0))))
+        )
         log["metrics/mean_abs_vx"] = float(np.mean(np.abs(linvel_forward)))
         log["metrics/mean_abs_lateral_vel"] = float(np.mean(np.abs(linvel_lateral)))
         log["metrics/mean_signed_vx"] = float(np.mean(mean_signed_vx))
@@ -1024,6 +1268,14 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["metrics/mean_abs_cmd_yaw"] = float(np.mean(np.abs(cmd_yaw)))
         log["metrics/commanded_nonzero_frac"] = float(np.mean(np.abs(cmd_x) > 0.05))
         log["metrics/commanded_yaw_nonzero_frac"] = float(np.mean(np.abs(cmd_yaw) > 0.05))
+        # Effective (post-diamond-clip) command magnitudes and clip diagnostics.
+        # info["commands"] already holds the clipped commands, so these expose
+        # what the policy actually had to track vs. the nominal box.
+        log["metrics/mean_abs_cmd_vx_effective"] = float(np.mean(np.abs(cmd_x)))
+        log["metrics/mean_abs_cmd_wz_effective"] = float(np.mean(np.abs(cmd_yaw)))
+        clip_scale = np.asarray(self._command_clip_scale, dtype=self._np_dtype)
+        log["metrics/command_clip_frac"] = float(np.mean(clip_scale < (1.0 - 1.0e-6)))
+        log["metrics/command_clip_scale_mean"] = float(np.mean(clip_scale))
         target_lean_forward = self._command_lean_gravity_target(cmd_x)
         log["metrics/target_lean_gx"] = 0.0
         log["metrics/target_lean_gy"] = float(np.mean(target_lean_forward))
@@ -1031,7 +1283,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         height_commands = np.asarray(
             info.get(
                 "height_commands",
-                np.full((self._num_envs,), self._reward_cfg.base_height_target, dtype=self._np_dtype),
+                np.full(
+                    (self._num_envs,), self._reward_cfg.base_height_target, dtype=self._np_dtype
+                ),
             ),
             dtype=self._np_dtype,
         )
@@ -1043,26 +1297,53 @@ class Real68BalanceEnv(Real68BaseEnv):
             info.get("current_actions", np.zeros((self._num_envs, self._num_action))),
             dtype=self._np_dtype,
         )
+        last_actions = np.asarray(
+            info.get("last_actions", np.zeros((self._num_envs, self._num_action))),
+            dtype=self._np_dtype,
+        )
+        exec_actions = last_actions if self._cfg.control_config.simulate_action_latency else actions
         wheel_actions = actions[:, WHEEL_INDICES]
+        wheel_exec_actions = exec_actions[:, WHEEL_INDICES]
+        dof_vel = self.get_dof_vel()
+        wheel_vel = dof_vel[:, WHEEL_INDICES]
+        wheel_target_vel = wheel_exec_actions * float(self._cfg.control_config.wheel_velocity_scale)
+        wheel_surface_speed = -np.mean(wheel_vel, axis=1) * _REAL68_WHEEL_RADIUS
+        wheel_target_surface_speed = -np.mean(wheel_target_vel, axis=1) * _REAL68_WHEEL_RADIUS
+        wheel_target_error = wheel_target_vel - wheel_vel
+        torques = np.asarray(
+            info.get("torques", np.zeros((self._num_envs, self._num_action))),
+            dtype=self._np_dtype,
+        )
+        wheel_torques = torques[:, WHEEL_INDICES]
+        wheel_lower = self._ctrl_lower[WHEEL_INDICES]
+        wheel_upper = self._ctrl_upper[WHEEL_INDICES]
+        wheel_torque_clipped = (wheel_torques <= (wheel_lower + 1.0e-5)) | (
+            wheel_torques >= (wheel_upper - 1.0e-5)
+        )
         log["metrics/mean_wheel_action"] = float(np.mean(wheel_actions))
         log["metrics/mean_left_wheel_action"] = float(np.mean(actions[:, WHEEL_INDICES[0]]))
         log["metrics/mean_right_wheel_action"] = float(np.mean(actions[:, WHEEL_INDICES[1]]))
         log["metrics/mean_abs_wheel_action"] = float(np.mean(np.abs(wheel_actions)))
+        log["metrics/mean_wheel_exec_action"] = float(np.mean(wheel_exec_actions))
+        log["metrics/mean_abs_wheel_exec_action"] = float(np.mean(np.abs(wheel_exec_actions)))
+        log["metrics/mean_left_wheel_vel"] = float(np.mean(wheel_vel[:, 0]))
+        log["metrics/mean_right_wheel_vel"] = float(np.mean(wheel_vel[:, 1]))
+        log["metrics/mean_abs_wheel_vel"] = float(np.mean(np.abs(wheel_vel)))
+        log["metrics/mean_wheel_target_vel"] = float(np.mean(wheel_target_vel))
+        log["metrics/mean_abs_wheel_target_vel"] = float(np.mean(np.abs(wheel_target_vel)))
+        log["metrics/mean_abs_wheel_target_error"] = float(np.mean(np.abs(wheel_target_error)))
+        log["metrics/wheel_surface_speed"] = float(np.mean(wheel_surface_speed))
+        log["metrics/mean_abs_wheel_surface_speed"] = float(np.mean(np.abs(wheel_surface_speed)))
+        log["metrics/wheel_target_surface_speed"] = float(np.mean(wheel_target_surface_speed))
+        log["metrics/mean_abs_wheel_torque"] = float(np.mean(np.abs(wheel_torques)))
+        log["metrics/wheel_torque_clip_frac"] = float(np.mean(wheel_torque_clipped))
         log["metrics/mean_left_hip_action"] = float(np.mean(actions[:, _REAL68_LEFT_HIP_INDEX]))
-        log["metrics/mean_right_hip_action"] = float(
-            np.mean(actions[:, _REAL68_RIGHT_HIP_INDEX])
-        )
-        log["metrics/mean_left_calf_action"] = float(
-            np.mean(actions[:, _REAL68_LEFT_CALF_INDEX])
-        )
-        log["metrics/mean_right_calf_action"] = float(
-            np.mean(actions[:, _REAL68_RIGHT_CALF_INDEX])
-        )
+        log["metrics/mean_right_hip_action"] = float(np.mean(actions[:, _REAL68_RIGHT_HIP_INDEX]))
+        log["metrics/mean_left_calf_action"] = float(np.mean(actions[:, _REAL68_LEFT_CALF_INDEX]))
+        log["metrics/mean_right_calf_action"] = float(np.mean(actions[:, _REAL68_RIGHT_CALF_INDEX]))
         log["metrics/hip_action_mirror_error"] = float(
             np.mean(
-                np.square(
-                    actions[:, _REAL68_LEFT_HIP_INDEX] + actions[:, _REAL68_RIGHT_HIP_INDEX]
-                )
+                np.square(actions[:, _REAL68_LEFT_HIP_INDEX] + actions[:, _REAL68_RIGHT_HIP_INDEX])
             )
         )
         log["metrics/calf_action_mirror_error"] = float(
@@ -1075,8 +1356,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["metrics/wheel_action_sync_error"] = float(
             np.mean(
                 np.square(
-                    actions[:, _REAL68_LEFT_WHEEL_INDEX]
-                    - actions[:, _REAL68_RIGHT_WHEEL_INDEX]
+                    actions[:, _REAL68_LEFT_WHEEL_INDEX] - actions[:, _REAL68_RIGHT_WHEEL_INDEX]
                 )
             )
         )
@@ -1124,9 +1404,14 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["command_curriculum/eval_signed_vx_ratio"] = float(
             0.0 if vx_eval is None else vx_eval["speed_ratio"]
         )
-        log["command_curriculum/eval_vx_error"] = float(0.0 if vx_eval is None else vx_eval["vx_error"])
+        log["command_curriculum/eval_vx_error"] = float(
+            0.0 if vx_eval is None else vx_eval["vx_error"]
+        )
         log["command_curriculum/eval_tilt_rate"] = float(
             0.0 if vx_eval is None else vx_eval["tilt_rate"]
+        )
+        log["command_curriculum/eval_tilt_angle_deg"] = float(
+            0.0 if vx_eval is None else vx_eval["tilt_angle_deg"]
         )
         log["command_curriculum/eval_height_violation_rate"] = float(
             0.0 if vx_eval is None else vx_eval["height_violation_rate"]
@@ -1134,17 +1419,41 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["command_curriculum/eval_nonwheel_contact_rate"] = float(
             0.0 if vx_eval is None else vx_eval["nonwheel_contact_rate"]
         )
-        log["command_curriculum/eval_wz_error"] = float(0.0 if yaw_eval is None else yaw_eval["wz_error"])
+        log["command_curriculum/eval_wz_error"] = float(
+            0.0 if yaw_eval is None else yaw_eval["wz_error"]
+        )
+        log["command_curriculum/eval_yaw_tilt_rate"] = float(
+            0.0 if yaw_eval is None else yaw_eval["tilt_rate"]
+        )
+        log["command_curriculum/eval_yaw_tilt_angle_deg"] = float(
+            0.0 if yaw_eval is None else yaw_eval["tilt_angle_deg"]
+        )
+        log["command_curriculum/eval_yaw_height_violation_rate"] = float(
+            0.0 if yaw_eval is None else yaw_eval["height_violation_rate"]
+        )
+        log["command_curriculum/eval_yaw_nonwheel_contact_rate"] = float(
+            0.0 if yaw_eval is None else yaw_eval["nonwheel_contact_rate"]
+        )
         log["command_curriculum/eval_bucket_high_vx"] = float(
             0.0 if vx_eval is None else vx_eval["bucket_upper"]
         )
         log["command_curriculum/eval_bucket_high_wz"] = float(
             0.0 if yaw_eval is None else yaw_eval["bucket_upper"]
         )
-        log["command_curriculum/eval_count_vx"] = float(0.0 if vx_eval is None else vx_eval["count"])
-        log["command_curriculum/eval_count_wz"] = float(0.0 if yaw_eval is None else yaw_eval["count"])
+        log["command_curriculum/eval_count_vx"] = float(
+            0.0 if vx_eval is None else vx_eval["count"]
+        )
+        log["command_curriculum/eval_count_wz"] = float(
+            0.0 if yaw_eval is None else yaw_eval["count"]
+        )
         log["command_curriculum/segments_recorded"] = float(self._curriculum_recorded_segments)
         log["command_curriculum/standing_prob"] = float(self._standing_command_probability())
+        straight_prob, yaw_only_prob = self._command_mix_probabilities()
+        log["command_curriculum/straight_command_prob"] = float(straight_prob)
+        log["command_curriculum/yaw_only_command_prob"] = float(yaw_only_prob)
+        log["command_curriculum/combo_command_prob"] = float(
+            max(0.0, 1.0 - straight_prob - yaw_only_prob)
+        )
         standing_eval = self._standing_bootstrap_eval()
         if standing_eval is None:
             standing_eval = self._last_standing_bootstrap_eval
@@ -1378,6 +1687,8 @@ class Real68BalanceEnv(Real68BaseEnv):
                 self._finalize_command_segments(env_ids)
                 sampled_commands = self.sample_velocity_commands(num_resample)
                 commands[resample_mask] = sampled_commands
+                if self._last_command_clip_scale.shape[0] == num_resample:
+                    self._command_clip_scale[env_ids] = self._last_command_clip_scale
                 height_commands[resample_mask] = self.sample_height_commands(
                     num_resample,
                     commands=sampled_commands,
@@ -1400,6 +1711,54 @@ class Real68BalanceEnv(Real68BaseEnv):
             return np.full((num_obs,), HOME_BASE_HEIGHT, dtype=self._np_dtype)
         self._base_height[:] = base_pos[:, 2]
         return self._base_height.copy()
+
+    def _balance_gate_cfg(self) -> RewardConfig.BalanceGateConfig:
+        raw_cfg = self._reward_cfg.balance_gate
+        if isinstance(raw_cfg, RewardConfig.BalanceGateConfig):
+            return raw_cfg
+        if isinstance(raw_cfg, dict):
+            return RewardConfig.BalanceGateConfig(**raw_cfg)
+        raise TypeError(f"Unsupported balance_gate config type: {type(raw_cfg)!r}")
+
+    def _excess_tilt_cfg(self) -> RewardConfig.ExcessTiltConfig:
+        raw_cfg = self._reward_cfg.excess_tilt
+        if isinstance(raw_cfg, RewardConfig.ExcessTiltConfig):
+            return raw_cfg
+        if isinstance(raw_cfg, dict):
+            return RewardConfig.ExcessTiltConfig(**raw_cfg)
+        raise TypeError(f"Unsupported excess_tilt config type: {type(raw_cfg)!r}")
+
+    def _upright_gate(self) -> np.ndarray:
+        gate_cfg = self._balance_gate_cfg()
+        if not gate_cfg.enabled:
+            return np.ones((self._num_envs,), dtype=self._np_dtype)
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
+        min_cos = float(gate_cfg.upright_cos_min)
+        full_cos = float(gate_cfg.upright_cos_full)
+        span = max(full_cos - min_cos, 1.0e-6)
+        gate = np.clip((gravity[:, 2] - min_cos) / span, 0.0, 1.0)
+        return np.asarray(gate, dtype=self._np_dtype)
+
+    def _compute_heading_error(self) -> np.ndarray:
+        base_quat = np.asarray(self._backend.get_base_quat(), dtype=self._np_dtype)
+        if base_quat.shape[0] != self._num_envs:
+            self._heading_error.fill(0.0)
+            return self._heading_error
+        yaw = np_yaw_from_quat(base_quat)
+        self._heading_error[:] = np_wrap_to_pi(yaw - self._segment_start_yaw)
+        return self._heading_error
+
+    def _compute_lateral_drift(self) -> np.ndarray:
+        base_pos = np.asarray(self._backend.get_base_pos(), dtype=self._np_dtype)
+        if base_pos.shape[0] != self._num_envs:
+            self._lateral_drift.fill(0.0)
+            return self._lateral_drift
+        delta = base_pos[:, :2] - self._segment_start_pos_xy
+        start_yaw = self._segment_start_yaw
+        self._lateral_drift[:] = -np.sin(start_yaw) * delta[:, 0] + np.cos(start_yaw) * delta[:, 1]
+        return self._lateral_drift
 
     def _reward_torques_l2(self, ctx: RewardContext) -> np.ndarray:
         torques = np.asarray(
@@ -1450,6 +1809,29 @@ class Real68BalanceEnv(Real68BaseEnv):
         target[:, 3] = -calf
         return target
 
+    def _standing_mask(self, ctx: RewardContext) -> np.ndarray:
+        commands = np.asarray(
+            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        return np.asarray(
+            (np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND)
+            & (np.abs(commands[:, 2]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND),
+            dtype=bool,
+        )
+
+    def _posture_anchor(self, standing: np.ndarray | None = None) -> np.ndarray:
+        anchor = np.asarray(DEFAULT_ACTIVE_ANGLES, dtype=self._np_dtype).copy()
+        if standing is None:
+            return anchor
+        standing = np.asarray(standing, dtype=bool)
+        if standing.ndim != 1:
+            raise ValueError(f"standing mask must be 1-D, got shape={standing.shape}")
+        tiled = np.broadcast_to(anchor, (standing.shape[0], anchor.shape[0])).copy()
+        if np.any(standing):
+            tiled[standing] = np.asarray(SYMMETRIC_STANDING_ACTIVE_ANGLES, dtype=self._np_dtype)
+        return tiled
+
     def _reward_orientation(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.gravity is not None
         commands = np.asarray(
@@ -1461,9 +1843,29 @@ class Real68BalanceEnv(Real68BaseEnv):
         gravity_y_error = np.square(ctx.gravity[:, 1] - target_gy)
         return np.asarray(gravity_x_error + gravity_y_error, dtype=self._np_dtype)
 
+    def _reward_excess_tilt(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        tilt_cfg = self._excess_tilt_cfg()
+        tilt_deg = np.rad2deg(np.arccos(np.clip(ctx.gravity[:, 2], -1.0, 1.0)))
+        excess = np.maximum(tilt_deg - float(tilt_cfg.limit_deg), 0.0)
+        scale = max(float(tilt_cfg.scale_deg), 1.0e-6)
+        return np.asarray(np.square(excess / scale), dtype=self._np_dtype)
+
     def _reward_tilt_termination(self, ctx: RewardContext) -> np.ndarray:
         return np.asarray(
             ctx.info.get("termination_tilt", np.zeros((ctx.num_envs,), dtype=bool)),
+            dtype=self._np_dtype,
+        )
+
+    def _straight_motion_mask(self, ctx: RewardContext) -> np.ndarray:
+        gate_cfg = self._balance_gate_cfg()
+        commands = np.asarray(
+            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        return np.asarray(
+            (np.abs(commands[:, 0]) > float(gate_cfg.moving_command_vx_threshold))
+            & (np.abs(commands[:, 2]) < float(gate_cfg.straight_command_yaw_threshold)),
             dtype=self._np_dtype,
         )
 
@@ -1479,9 +1881,10 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         posture_target = self._command_target_posture(commands[:, 0])
+        posture_anchor = self._posture_anchor(self._standing_mask(ctx))
         posture = (
             ctx.dof_pos[:, POSTURE_INDICES]
-            - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
+            - posture_anchor[:, POSTURE_INDICES]
             - posture_target
         )
         return np.asarray(np.sum(np.square(posture), axis=1), dtype=self._np_dtype)
@@ -1497,6 +1900,62 @@ class Real68BalanceEnv(Real68BaseEnv):
             np.exp(-(forward_error + lateral_error) / ctx.tracking_sigma),
             dtype=self._np_dtype,
         )
+
+    def _reward_balanced_tracking_forward_vel(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            self._reward_tracking_forward_vel(ctx) * self._upright_gate(),
+            dtype=self._np_dtype,
+        )
+
+    def _reward_balanced_tracking_ang_vel(self, ctx: RewardContext) -> np.ndarray:
+        gate_cfg = self._balance_gate_cfg()
+        commands = np.asarray(
+            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        sigma = max(float(gate_cfg.yaw_tracking_sigma), 1.0e-6)
+        yaw_error = np.square(commands[:, 2] - ctx.gyro[:, 2])
+        return np.asarray(
+            np.exp(-yaw_error / sigma) * self._upright_gate(),
+            dtype=self._np_dtype,
+        )
+
+    def _reward_balanced_speed_match(self, ctx: RewardContext) -> np.ndarray:
+        commands = np.asarray(
+            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
+        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        signed_speed = self._forward_linvel(ctx.linvel) * np.sign(cmd_x)
+        signed_ratio = signed_speed / np.maximum(np.abs(cmd_x), 1.0e-6)
+        ratio_error = np.square(signed_ratio - 1.0)
+        match = np.exp(-ratio_error / max(float(self._reward_cfg.tracking_sigma), 1.0e-6))
+        return np.asarray(np.where(active, match, 0.0) * self._upright_gate(), dtype=self._np_dtype)
+
+    def _reward_balanced_forward_progress(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            self._reward_forward_progress(ctx) * self._upright_gate(), dtype=self._np_dtype
+        )
+
+    def _reward_balanced_net_progress(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            self._reward_net_progress(ctx) * self._upright_gate(), dtype=self._np_dtype
+        )
+
+    def _reward_heading_stability(self, ctx: RewardContext) -> np.ndarray:
+        gate_cfg = self._balance_gate_cfg()
+        mask = self._straight_motion_mask(ctx)
+        limit = max(float(gate_cfg.heading_error_limit), 1.0e-6)
+        error = np.abs(self._compute_heading_error()) / limit
+        return np.asarray(np.square(error) * mask, dtype=self._np_dtype)
+
+    def _reward_lateral_drift(self, ctx: RewardContext) -> np.ndarray:
+        gate_cfg = self._balance_gate_cfg()
+        mask = self._straight_motion_mask(ctx)
+        limit = max(float(gate_cfg.lateral_drift_limit), 1.0e-6)
+        drift = np.abs(self._compute_lateral_drift()) / limit
+        return np.asarray(np.square(drift) * mask, dtype=self._np_dtype)
 
     def _reward_forward_progress(self, ctx: RewardContext) -> np.ndarray:
         commands = np.asarray(
@@ -1522,8 +1981,29 @@ class Real68BalanceEnv(Real68BaseEnv):
         gap = np.maximum(cmd_abs - signed_speed, 0.0)
         return np.asarray(np.where(active, gap / cmd_abs, 0.0), dtype=self._np_dtype)
 
+    def _reward_balanced_under_speed(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            self._reward_under_speed(ctx) * self._upright_gate(), dtype=self._np_dtype
+        )
+
+    def _reward_drive_wheel_command(self, ctx: RewardContext) -> np.ndarray:
+        commands = np.asarray(
+            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
+            dtype=self._np_dtype,
+        )
+        actions = np.asarray(
+            ctx.info.get("current_actions", np.zeros((ctx.num_envs, self._num_action))),
+            dtype=self._np_dtype,
+        )
+        cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
+        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        drive = -np.mean(actions[:, WHEEL_INDICES], axis=1) * np.sign(cmd_x)
+        drive = np.clip(drive, 0.0, 1.0)
+        return np.asarray(np.where(active, drive, 0.0) * self._upright_gate(), dtype=self._np_dtype)
+
     def _reward_leg_symmetry(self, ctx: RewardContext) -> np.ndarray:
-        posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
+        posture_anchor = self._posture_anchor(self._standing_mask(ctx))
+        posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES]
         left = posture_diff[:, _REAL68_LEFT_POSTURE]
         right = posture_diff[:, _REAL68_RIGHT_POSTURE]
         mirrored_right = right * _REAL68_MIRROR_SIGNS
@@ -1570,11 +2050,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
 
     def _reward_standing_lin_vel(self, ctx: RewardContext) -> np.ndarray:
-        commands = np.asarray(
-            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
-            dtype=self._np_dtype,
-        )
-        standing = np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        standing = self._standing_mask(ctx)
         drift = np.abs(self._forward_linvel(ctx.linvel)) + np.abs(self._lateral_linvel(ctx.linvel))
         return np.asarray(np.where(standing, drift, 0.0), dtype=self._np_dtype)
 
@@ -1583,36 +2059,24 @@ class Real68BalanceEnv(Real68BaseEnv):
             ctx.info.get("current_actions", np.zeros((ctx.num_envs, self._num_action))),
             dtype=self._np_dtype,
         )
-        commands = np.asarray(
-            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
-            dtype=self._np_dtype,
-        )
-        standing = np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        standing = self._standing_mask(ctx)
         wheel_action = np.mean(np.square(actions[:, WHEEL_INDICES]), axis=1)
         return np.asarray(np.where(standing, wheel_action, 0.0), dtype=self._np_dtype)
 
     def _reward_standing_under_height(self, ctx: RewardContext) -> np.ndarray:
-        commands = np.asarray(
-            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
-            dtype=self._np_dtype,
-        )
         targets = np.asarray(
             ctx.info.get(
                 "height_commands", np.full((ctx.num_envs,), self._reward_cfg.base_height_target)
             ),
             dtype=self._np_dtype,
         )
-        standing = np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        standing = self._standing_mask(ctx)
         margin = max(float(self._reward_cfg.height_safety_margin), 1.0e-6)
         under_height = np.maximum(targets - np.asarray(ctx.base_height, dtype=self._np_dtype), 0.0)
         return np.asarray(np.where(standing, under_height / margin, 0.0), dtype=self._np_dtype)
 
     def _reward_standing_liangan5_contact(self, ctx: RewardContext) -> np.ndarray:
-        commands = np.asarray(
-            ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
-            dtype=self._np_dtype,
-        )
-        standing = np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        standing = self._standing_mask(ctx)
         liangan5_contact = np.asarray(
             np.mean(
                 self._nonwheel_contacts[
@@ -1629,15 +2093,43 @@ class Real68BalanceEnv(Real68BaseEnv):
         upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
         return np.asarray(np.where(standing, liangan5_contact * upright, 0.0), dtype=self._np_dtype)
 
+    def _reward_standing_orientation(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        standing = self._standing_mask(ctx)
+        gate_cfg = self._balance_gate_cfg()
+        sigma = max(float(gate_cfg.standing_roll_pitch_sigma), 1.0e-6)
+        roll_pitch_error = np.square(ctx.gravity[:, 0]) + np.square(ctx.gravity[:, 1])
+        return np.asarray(np.where(standing, roll_pitch_error / sigma, 0.0), dtype=self._np_dtype)
+
+    def _reward_standing_posture(self, ctx: RewardContext) -> np.ndarray:
+        standing = self._standing_mask(ctx)
+        posture_anchor = self._posture_anchor(standing)
+        posture = ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES]
+        return np.asarray(
+            np.where(standing, np.sum(np.square(posture), axis=1), 0.0),
+            dtype=self._np_dtype,
+        )
+
+    def _reward_standing_leg_symmetry(self, ctx: RewardContext) -> np.ndarray:
+        standing = self._standing_mask(ctx)
+        posture_anchor = self._posture_anchor(standing)
+        posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES]
+        left = posture_diff[:, _REAL68_LEFT_POSTURE]
+        right = posture_diff[:, _REAL68_RIGHT_POSTURE]
+        mirrored_right = right * _REAL68_MIRROR_SIGNS
+        symmetry = np.sum(np.square(left - mirrored_right), axis=1)
+        return np.asarray(np.where(standing, symmetry, 0.0), dtype=self._np_dtype)
+
     def _reward_joint_pos_penalty(self, ctx: RewardContext) -> np.ndarray:
         commands = np.asarray(
             ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
             dtype=self._np_dtype,
         )
         posture_target = self._command_target_posture(commands[:, 0])
+        posture_anchor = self._posture_anchor(self._standing_mask(ctx))
         posture = (
             ctx.dof_pos[:, POSTURE_INDICES]
-            - DEFAULT_ACTIVE_ANGLES[POSTURE_INDICES]
+            - posture_anchor[:, POSTURE_INDICES]
             - posture_target
         )
         return np.asarray(np.linalg.norm(posture, axis=1), dtype=self._np_dtype)

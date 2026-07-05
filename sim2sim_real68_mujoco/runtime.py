@@ -194,12 +194,10 @@ class GamepadCommander(CommanderBase):
 
         self._pygame = pygame
         self._deadzone = float(np.clip(deadzone, 0.0, 0.95))
-        self._vx_limit = max(float(vx_scale), 0.0)
-        self._wz_limit = max(float(wz_scale), 0.0)
-        self._vx_step = np.clip(self._vx_limit * 0.1, 0.05, 0.20)
-        self._wz_step = np.clip(self._wz_limit * 0.1, 0.10, 0.50)
-        self._vx_command_magnitude = min(max(self._vx_step, 0.2), self._vx_limit)
-        self._wz_command_magnitude = min(max(self._wz_step, 0.2), self._wz_limit)
+        self._vx_step = np.clip(max(float(vx_scale), 0.0) * 0.1, 0.05, 0.20)
+        self._wz_step = np.clip(max(float(wz_scale), 0.0) * 0.1, 0.10, 0.50)
+        self._vx_command_magnitude = max(self._vx_step, 0.2)
+        self._wz_command_magnitude = max(self._wz_step, 0.2)
         self._axis_exponent = max(float(axis_exponent), 1.0)
         self._report_threshold = 1.0e-3
 
@@ -247,16 +245,14 @@ class GamepadCommander(CommanderBase):
             return -1.0
         return 0.0
 
-    def _adjust_magnitude(self, current: float, delta: float, limit: float) -> float:
-        if limit <= 0.0:
-            return 0.0
-        return float(np.clip(current + delta, 0.0, limit))
+    def _adjust_magnitude(self, current: float, delta: float) -> float:
+        return float(max(current + delta, 0.0))
 
     def _print_command_profile(self) -> None:
         print(
             "[sim2sim] PS2 command profile: "
-            f"|vx|={self._vx_command_magnitude:.2f}/{self._vx_limit:.2f}, "
-            f"|wz|={self._wz_command_magnitude:.2f}/{self._wz_limit:.2f}"
+            f"|vx|={self._vx_command_magnitude:.2f} step={self._vx_step:.2f}, "
+            f"|wz|={self._wz_command_magnitude:.2f} step={self._wz_step:.2f}"
         )
 
     def _report_command_if_changed(self) -> None:
@@ -303,23 +299,23 @@ class GamepadCommander(CommanderBase):
             if hat != self._hat_prev:
                 if hat[1] == 1 and self._hat_prev[1] != 1:
                     self._vx_command_magnitude = self._adjust_magnitude(
-                        self._vx_command_magnitude, self._vx_step, self._vx_limit
+                        self._vx_command_magnitude, self._vx_step
                     )
                     self._print_command_profile()
                 elif hat[1] == -1 and self._hat_prev[1] != -1:
                     self._vx_command_magnitude = self._adjust_magnitude(
-                        self._vx_command_magnitude, -self._vx_step, self._vx_limit
+                        self._vx_command_magnitude, -self._vx_step
                     )
                     self._print_command_profile()
 
                 if hat[0] == 1 and self._hat_prev[0] != 1:
                     self._wz_command_magnitude = self._adjust_magnitude(
-                        self._wz_command_magnitude, self._wz_step, self._wz_limit
+                        self._wz_command_magnitude, self._wz_step
                     )
                     self._print_command_profile()
                 elif hat[0] == -1 and self._hat_prev[0] != -1:
                     self._wz_command_magnitude = self._adjust_magnitude(
-                        self._wz_command_magnitude, -self._wz_step, self._wz_limit
+                        self._wz_command_magnitude, -self._wz_step
                     )
                     self._print_command_profile()
                 self._hat_prev = hat
