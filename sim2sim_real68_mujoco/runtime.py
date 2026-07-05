@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,52 +79,198 @@ class HfieldSampler:
         return max(self.sample(point) for point in points)
 
 
-class KeyboardCommander:
-    def __init__(self, command_limits: np.ndarray):
+class CommanderBase:
+    def __init__(self) -> None:
         self.command = np.zeros((3,), dtype=np.float64)
-        self._limits = command_limits.astype(np.float64)
         self.paused = False
         self.single_step = False
         self.reset_requested = False
         self.next_terrain_requested = False
         self.follow_camera = True
 
-    def _clip(self) -> None:
-        self.command[:] = np.clip(self.command, self._limits[0], self._limits[1])
+    def poll(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def _normalize_command(self) -> None:
         self.command[1] = 0.0
 
-    def handle(self, keycode: int) -> None:
-        if keycode in (ord("w"), ord("W")):
-            self.command[0] += 0.05
-        elif keycode in (ord("s"), ord("S")):
-            self.command[0] -= 0.05
-        elif keycode in (ord("a"), ord("A")):
-            self.command[2] += 0.05
-        elif keycode in (ord("d"), ord("D")):
-            self.command[2] -= 0.05
-        elif keycode in (ord(" "),):
+    def _print_command(self) -> None:
+        print(f"[sim2sim] command = vx={self.command[0]:+.2f}, wz={self.command[2]:+.2f}")
+
+    def _handle_common_key(self, keycode: int) -> bool:
+        if keycode in (ord(" "),):
             self.command[:] = 0.0
-        elif keycode in (ord("p"), ord("P")):
+            self._normalize_command()
+            self._print_command()
+            return True
+        if keycode in (ord("p"), ord("P")):
             self.paused = not self.paused
             print(f"[sim2sim] {'paused' if self.paused else 'resumed'}")
-        elif keycode in (ord("n"), ord("N")):
+            return True
+        if keycode in (ord("n"), ord("N")):
             self.single_step = True
-        elif keycode in (ord("r"), ord("R")):
+            return True
+        if keycode in (ord("r"), ord("R")):
             self.reset_requested = True
-        elif keycode in (ord("t"), ord("T")):
+            return True
+        if keycode in (ord("t"), ord("T")):
             self.next_terrain_requested = True
-        elif keycode in (ord("f"), ord("F")):
+            return True
+        if keycode in (ord("f"), ord("F")):
             self.follow_camera = not self.follow_camera
             print(f"[sim2sim] follow_camera={self.follow_camera}")
+            return True
+        return False
+
+    def handle(self, keycode: int) -> None:
+        self._handle_common_key(keycode)
+
+
+class KeyboardCommander(CommanderBase):
+    def __init__(self, *, step_size: float = 0.05) -> None:
+        super().__init__()
+        self._step_size = float(step_size)
+
+    def handle(self, keycode: int) -> None:
+        if self._handle_common_key(keycode):
+            return
+        updated = False
+        if keycode in (ord("w"), ord("W")):
+            self.command[0] += self._step_size
+            updated = True
+        elif keycode in (ord("s"), ord("S")):
+            self.command[0] -= self._step_size
+            updated = True
+        elif keycode in (ord("a"), ord("A")):
+            self.command[2] += self._step_size
+            updated = True
+        elif keycode in (ord("d"), ord("D")):
+            self.command[2] -= self._step_size
+            updated = True
         elif keycode in (ord("1"),):
             self.command[:] = np.asarray([0.2, 0.0, 0.0], dtype=np.float64)
+            updated = True
         elif keycode in (ord("2"),):
             self.command[:] = np.asarray([0.5, 0.0, 0.0], dtype=np.float64)
+            updated = True
         elif keycode in (ord("3"),):
             self.command[:] = np.asarray([0.8, 0.0, 0.0], dtype=np.float64)
-        self._clip()
-        if keycode not in (ord("p"), ord("P"), ord("n"), ord("N"), ord("f"), ord("F")):
-            print(f"[sim2sim] command = vx={self.command[0]:+.2f}, wz={self.command[2]:+.2f}")
+            updated = True
+        if updated:
+            self._normalize_command()
+            self._print_command()
+
+
+class GamepadCommander(CommanderBase):
+    _BUTTONS = {
+        "triangle": 0,
+        "circle": 1,
+        "cross": 2,
+        "square": 3,
+        "select": 8,
+        "start": 9,
+    }
+
+    def __init__(
+        self,
+        *,
+        joystick_index: int = 0,
+        deadzone: float = 0.12,
+        vx_scale: float = 0.8,
+        wz_scale: float = 0.4,
+        axis_exponent: float = 1.5,
+    ) -> None:
+        super().__init__()
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        try:
+            import pygame
+        except ImportError as exc:
+            raise RuntimeError(
+                "pygame is required for PS2 gamepad control. Install it in the uv environment first."
+            ) from exc
+
+        self._pygame = pygame
+        self._deadzone = float(np.clip(deadzone, 0.0, 0.95))
+        self._vx_scale = float(vx_scale)
+        self._wz_scale = float(wz_scale)
+        self._axis_exponent = max(float(axis_exponent), 1.0)
+        self._report_threshold = 1.0e-3
+
+        pygame.display.init()
+        pygame.joystick.init()
+        count = pygame.joystick.get_count()
+        if count <= joystick_index:
+            raise RuntimeError(f"PS2 gamepad not found at joystick index {joystick_index}; detected {count}")
+        self._joystick = pygame.joystick.Joystick(joystick_index)
+        self._joystick.init()
+        self._button_prev = np.zeros((self._joystick.get_numbuttons(),), dtype=bool)
+        self._hat_prev = self._joystick.get_hat(0) if self._joystick.get_numhats() > 0 else (0, 0)
+        self._last_reported_command = self.command.copy()
+        print(
+            "[sim2sim] PS2 gamepad connected: "
+            f"{self._joystick.get_name()} axes={self._joystick.get_numaxes()} buttons={self._joystick.get_numbuttons()}"
+        )
+
+    def close(self) -> None:
+        self._joystick.quit()
+        self._pygame.joystick.quit()
+        self._pygame.display.quit()
+
+    def _shape_axis(self, raw: float, *, invert: bool = False) -> float:
+        value = -float(raw) if invert else float(raw)
+        magnitude = abs(value)
+        if magnitude <= self._deadzone:
+            return 0.0
+        scaled = (magnitude - self._deadzone) / (1.0 - self._deadzone)
+        shaped = scaled**self._axis_exponent
+        return float(np.sign(value) * shaped)
+
+    def _button_edge(self, name: str, pressed: np.ndarray) -> bool:
+        index = self._BUTTONS[name]
+        return bool(index < pressed.shape[0] and pressed[index] and not self._button_prev[index])
+
+    def _report_command_if_changed(self) -> None:
+        if np.allclose(self.command, self._last_reported_command, atol=self._report_threshold):
+            return
+        self._last_reported_command[:] = self.command
+        self._print_command()
+
+    def poll(self) -> None:
+        self._pygame.event.pump()
+        pressed = np.asarray(
+            [bool(self._joystick.get_button(i)) for i in range(self._joystick.get_numbuttons())],
+            dtype=bool,
+        )
+
+        vx = self._shape_axis(self._joystick.get_axis(1), invert=True) * self._vx_scale
+        wz = self._shape_axis(self._joystick.get_axis(2)) * self._wz_scale
+        self.command[:] = np.asarray([vx, 0.0, wz], dtype=np.float64)
+
+        if self._button_edge("cross", pressed):
+            self.command[:] = 0.0
+        if self._button_edge("start", pressed):
+            self.reset_requested = True
+        if self._button_edge("select", pressed):
+            self.paused = not self.paused
+            print(f"[sim2sim] {'paused' if self.paused else 'resumed'}")
+        if self._button_edge("circle", pressed):
+            self.next_terrain_requested = True
+        if self._button_edge("triangle", pressed):
+            self.follow_camera = not self.follow_camera
+            print(f"[sim2sim] follow_camera={self.follow_camera}")
+        if self._button_edge("square", pressed):
+            self.single_step = True
+
+        if self._joystick.get_numhats() > 0:
+            hat = self._joystick.get_hat(0)
+            if hat != self._hat_prev:
+                self._hat_prev = hat
+
+        self._report_command_if_changed()
+        self._button_prev = pressed
 
 
 class Real68Sim2Sim:
@@ -171,7 +318,6 @@ class Real68Sim2Sim:
             else np.zeros((3,), dtype=np.float64)
         )
         self.command[1] = 0.0
-        self.command[:] = np.clip(self.command, self.command_limits[0], self.command_limits[1])
         self.height_command = float(self.cfg["base_height_target"])
         self.last_action = np.zeros((6,), dtype=np.float64)
         self.last_torque = np.zeros((6,), dtype=np.float64)
@@ -395,7 +541,6 @@ class Real68Sim2Sim:
     def update_command(self, command: np.ndarray) -> None:
         self.command[:] = np.asarray(command, dtype=np.float64)
         self.command[1] = 0.0
-        self.command[:] = np.clip(self.command, self.command_limits[0], self.command_limits[1])
 
     def status_line(self) -> str:
         linvel = self.sensors.read(self.data, self.cfg["sensor_names"]["local_linvel"])

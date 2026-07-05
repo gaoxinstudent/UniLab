@@ -1,8 +1,9 @@
 # Real68 MuJoCo Sim2Sim
 
 This directory is a standalone Real68 rough-terrain sim2sim player. Runtime
-depends on `mujoco`, `numpy`, and `onnxruntime`. It does not import UniLab env
-or training code when running the policy.
+depends on `mujoco`, `numpy`, and `onnxruntime`. PS2 gamepad control also
+requires `pygame`. It does not import UniLab env or training code when running
+the policy.
 
 ## Prepare a bundle
 
@@ -37,6 +38,27 @@ Controls:
 - `N`: single-step when paused
 - `F`: toggle follow-camera
 - `1/2/3`: forward command presets
+
+## Interactive run with PS2 gamepad
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m sim2sim_real68_mujoco.main \
+  --input-device ps2
+```
+
+Controls:
+
+- left stick `Y`: forward/backward command
+- right stick `X`: yaw-rate command
+- `CROSS`: zero current command
+- `START`: reset
+- `SELECT`: pause/resume
+- `CIRCLE`: switch to the next terrain cell and reset
+- `TRIANGLE`: toggle follow-camera
+- `SQUARE`: single-step when paused
+
+PS2 control is absolute, not incremental: stick deflection maps directly to
+`vx` / `wz`, and releasing the stick returns the command to zero.
 
 Default behavior is manual-reset only. The runtime will not automatically jump
 between terrain cells unless you press `R` / `T` or pass `--auto-reset`.
