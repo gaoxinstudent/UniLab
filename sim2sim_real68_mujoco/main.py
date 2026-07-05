@@ -107,8 +107,9 @@ def _interactive_run(
         )
     else:
         print(
-            "[sim2sim] PS2 controls: left stick Y forward/back, right stick X yaw, "
-            "CROSS zero, START reset, SELECT pause, CIRCLE next terrain, "
+            "[sim2sim] PS2 controls: left stick Y choose forward/back direction, "
+            "right stick X choose yaw direction, D-pad up/down adjust |vx|, "
+            "D-pad left/right adjust |wz|, CROSS zero, START reset, SELECT pause, CIRCLE next terrain, "
             "TRIANGLE follow-camera, SQUARE single-step."
         )
     try:
@@ -155,18 +156,30 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true", help="Run without launching the viewer.")
     parser.add_argument("--steps", type=int, default=4000, help="Headless simulation steps.")
     parser.add_argument("--random-yaw", action="store_true", help="Use randomized yaw on reset.")
-    parser.add_argument("--auto-reset", action="store_true", help="Automatically reset on fall/contact failure.")
-    parser.add_argument("--terrain-cell", type=int, default=None, help="Initial terrain cell index.")
+    parser.add_argument(
+        "--auto-reset", action="store_true", help="Automatically reset on fall/contact failure."
+    )
+    parser.add_argument(
+        "--terrain-cell", type=int, default=None, help="Initial terrain cell index."
+    )
     parser.add_argument(
         "--input-device",
         choices=("keyboard", "ps2"),
         default="keyboard",
         help="Interactive control source.",
     )
-    parser.add_argument("--joystick-index", type=int, default=0, help="pygame joystick index for PS2 mode.")
-    parser.add_argument("--deadzone", type=float, default=0.12, help="Joystick deadzone for PS2 mode.")
-    parser.add_argument("--vx-scale", type=float, default=None, help="Max forward speed mapped from stick.")
-    parser.add_argument("--wz-scale", type=float, default=None, help="Max yaw rate mapped from stick.")
+    parser.add_argument(
+        "--joystick-index", type=int, default=0, help="pygame joystick index for PS2 mode."
+    )
+    parser.add_argument(
+        "--deadzone", type=float, default=0.12, help="Joystick deadzone for PS2 mode."
+    )
+    parser.add_argument(
+        "--vx-scale", type=float, default=None, help="Max forward speed mapped from stick."
+    )
+    parser.add_argument(
+        "--wz-scale", type=float, default=None, help="Max yaw rate mapped from stick."
+    )
     args = parser.parse_args()
 
     bundle_dir = args.bundle_dir.resolve() if args.bundle_dir is not None else _default_bundle_dir()

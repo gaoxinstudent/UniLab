@@ -48,8 +48,10 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python -m sim2sim_real68_mujoco.main \
 
 Controls:
 
-- left stick `Y`: forward/backward command
-- right stick `X`: yaw-rate command
+- left stick `Y`: choose forward/backward direction only
+- right stick `X`: choose yaw direction only
+- D-pad `up/down`: increase/decrease `|vx|`
+- D-pad `left/right`: increase/decrease `|wz|`
 - `CROSS`: zero current command
 - `START`: reset
 - `SELECT`: pause/resume
@@ -57,8 +59,11 @@ Controls:
 - `TRIANGLE`: toggle follow-camera
 - `SQUARE`: single-step when paused
 
-PS2 control is absolute, not incremental: stick deflection maps directly to
-`vx` / `wz`, and releasing the stick returns the command to zero.
+PS2 control uses direction + magnitude split:
+
+- stick deflection only selects the sign of `vx` / `wz`
+- D-pad adjusts the command magnitudes
+- releasing the stick returns that axis command to zero
 
 Default behavior is manual-reset only. The runtime will not automatically jump
 between terrain cells unless you press `R` / `T` or pass `--auto-reset`.

@@ -52,9 +52,9 @@ class HfieldSampler:
         adr = int(model.hfield_adr[hfield_id])
         nrow = int(model.hfield_nrow[hfield_id])
         ncol = int(model.hfield_ncol[hfield_id])
-        self._data = np.asarray(model.hfield_data[adr : adr + nrow * ncol], dtype=np.float64).reshape(
-            nrow, ncol
-        )
+        self._data = np.asarray(
+            model.hfield_data[adr : adr + nrow * ncol], dtype=np.float64
+        ).reshape(nrow, ncol)
         self._half_x = float(model.hfield_size[hfield_id, 0])
         self._half_y = float(model.hfield_size[hfield_id, 1])
         self._z_top = float(model.hfield_size[hfield_id, 2])
@@ -194,8 +194,12 @@ class GamepadCommander(CommanderBase):
 
         self._pygame = pygame
         self._deadzone = float(np.clip(deadzone, 0.0, 0.95))
-        self._vx_scale = float(vx_scale)
-        self._wz_scale = float(wz_scale)
+        self._vx_limit = max(float(vx_scale), 0.0)
+        self._wz_limit = max(float(wz_scale), 0.0)
+        self._vx_step = np.clip(self._vx_limit * 0.1, 0.05, 0.20)
+        self._wz_step = np.clip(self._wz_limit * 0.1, 0.10, 0.50)
+        self._vx_command_magnitude = min(max(self._vx_step, 0.2), self._vx_limit)
+        self._wz_command_magnitude = min(max(self._wz_step, 0.2), self._wz_limit)
         self._axis_exponent = max(float(axis_exponent), 1.0)
         self._report_threshold = 1.0e-3
 
@@ -203,7 +207,9 @@ class GamepadCommander(CommanderBase):
         pygame.joystick.init()
         count = pygame.joystick.get_count()
         if count <= joystick_index:
-            raise RuntimeError(f"PS2 gamepad not found at joystick index {joystick_index}; detected {count}")
+            raise RuntimeError(
+                f"PS2 gamepad not found at joystick index {joystick_index}; detected {count}"
+            )
         self._joystick = pygame.joystick.Joystick(joystick_index)
         self._joystick.init()
         self._button_prev = np.zeros((self._joystick.get_numbuttons(),), dtype=bool)
@@ -213,6 +219,7 @@ class GamepadCommander(CommanderBase):
             "[sim2sim] PS2 gamepad connected: "
             f"{self._joystick.get_name()} axes={self._joystick.get_numaxes()} buttons={self._joystick.get_numbuttons()}"
         )
+        self._print_command_profile()
 
     def close(self) -> None:
         self._joystick.quit()
@@ -232,6 +239,26 @@ class GamepadCommander(CommanderBase):
         index = self._BUTTONS[name]
         return bool(index < pressed.shape[0] and pressed[index] and not self._button_prev[index])
 
+    def _axis_direction(self, raw: float, *, invert: bool = False) -> float:
+        shaped = self._shape_axis(raw, invert=invert)
+        if shaped > 0.0:
+            return 1.0
+        if shaped < 0.0:
+            return -1.0
+        return 0.0
+
+    def _adjust_magnitude(self, current: float, delta: float, limit: float) -> float:
+        if limit <= 0.0:
+            return 0.0
+        return float(np.clip(current + delta, 0.0, limit))
+
+    def _print_command_profile(self) -> None:
+        print(
+            "[sim2sim] PS2 command profile: "
+            f"|vx|={self._vx_command_magnitude:.2f}/{self._vx_limit:.2f}, "
+            f"|wz|={self._wz_command_magnitude:.2f}/{self._wz_limit:.2f}"
+        )
+
     def _report_command_if_changed(self) -> None:
         if np.allclose(self.command, self._last_reported_command, atol=self._report_threshold):
             return
@@ -245,9 +272,16 @@ class GamepadCommander(CommanderBase):
             dtype=bool,
         )
 
-        vx = self._shape_axis(self._joystick.get_axis(1), invert=True) * self._vx_scale
-        wz = self._shape_axis(self._joystick.get_axis(2)) * self._wz_scale
-        self.command[:] = np.asarray([vx, 0.0, wz], dtype=np.float64)
+        vx_dir = self._axis_direction(self._joystick.get_axis(1), invert=True)
+        wz_dir = self._axis_direction(self._joystick.get_axis(2))
+        self.command[:] = np.asarray(
+            [
+                vx_dir * self._vx_command_magnitude,
+                0.0,
+                wz_dir * self._wz_command_magnitude,
+            ],
+            dtype=np.float64,
+        )
 
         if self._button_edge("cross", pressed):
             self.command[:] = 0.0
@@ -267,6 +301,27 @@ class GamepadCommander(CommanderBase):
         if self._joystick.get_numhats() > 0:
             hat = self._joystick.get_hat(0)
             if hat != self._hat_prev:
+                if hat[1] == 1 and self._hat_prev[1] != 1:
+                    self._vx_command_magnitude = self._adjust_magnitude(
+                        self._vx_command_magnitude, self._vx_step, self._vx_limit
+                    )
+                    self._print_command_profile()
+                elif hat[1] == -1 and self._hat_prev[1] != -1:
+                    self._vx_command_magnitude = self._adjust_magnitude(
+                        self._vx_command_magnitude, -self._vx_step, self._vx_limit
+                    )
+                    self._print_command_profile()
+
+                if hat[0] == 1 and self._hat_prev[0] != 1:
+                    self._wz_command_magnitude = self._adjust_magnitude(
+                        self._wz_command_magnitude, self._wz_step, self._wz_limit
+                    )
+                    self._print_command_profile()
+                elif hat[0] == -1 and self._hat_prev[0] != -1:
+                    self._wz_command_magnitude = self._adjust_magnitude(
+                        self._wz_command_magnitude, -self._wz_step, self._wz_limit
+                    )
+                    self._print_command_profile()
                 self._hat_prev = hat
 
         self._report_command_if_changed()
@@ -310,7 +365,9 @@ class Real68Sim2Sim:
         self.ctrl_upper = np.asarray(self.model.actuator_ctrlrange[:, 1], dtype=np.float64)
         self.command_limits = np.asarray(self.cfg["command_limits"], dtype=np.float64)
         self.forward_axis = int(self.cfg.raw.get("forward_axis", 0))
-        self.lateral_axis = int(self.cfg.raw.get("lateral_axis", 1 if self.forward_axis == 0 else 0))
+        self.lateral_axis = int(
+            self.cfg.raw.get("lateral_axis", 1 if self.forward_axis == 0 else 0)
+        )
         self.forward_sign = float(self.cfg.raw.get("forward_sign", 1.0))
         self.command = (
             np.asarray(command_override, dtype=np.float64).copy()
@@ -333,8 +390,12 @@ class Real68Sim2Sim:
         self._home_key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "home")
         if self._home_key_id < 0:
             raise ValueError("Keyframe 'home' not found in scene.xml")
-        key_qpos = np.asarray(self.model.key_qpos, dtype=np.float64).reshape(self.model.nkey, self.model.nq)
-        key_qvel = np.asarray(self.model.key_qvel, dtype=np.float64).reshape(self.model.nkey, self.model.nv)
+        key_qpos = np.asarray(self.model.key_qpos, dtype=np.float64).reshape(
+            self.model.nkey, self.model.nq
+        )
+        key_qvel = np.asarray(self.model.key_qvel, dtype=np.float64).reshape(
+            self.model.nkey, self.model.nv
+        )
         self._home_qpos = key_qpos[self._home_key_id].copy()
         self._home_qvel = key_qvel[self._home_key_id].copy()
         self._spawn_footprint_offsets = np.asarray(
@@ -356,7 +417,9 @@ class Real68Sim2Sim:
         self.reset()
 
     def read_vector(self, names: list[str]) -> np.ndarray:
-        return np.asarray([self.sensors.read(self.data, name)[0] for name in names], dtype=np.float64)
+        return np.asarray(
+            [self.sensors.read(self.data, name)[0] for name in names], dtype=np.float64
+        )
 
     def active_dof_pos(self) -> np.ndarray:
         return self.read_vector(self.cfg["active_joint_pos_sensors"])
@@ -409,8 +472,8 @@ class Real68Sim2Sim:
         targets = np.zeros_like(action)
         targets[self.hip] = action[self.hip] * float(self.control_cfg["hip_velocity_scale"])
         targets[self.wheel] = action[self.wheel] * float(self.control_cfg["wheel_velocity_scale"])
-        targets[self.calf] = (
-            self.default_angles[self.calf] + action[self.calf] * float(self.control_cfg["calf_action_scale"])
+        targets[self.calf] = self.default_angles[self.calf] + action[self.calf] * float(
+            self.control_cfg["calf_action_scale"]
         )
         torque = np.zeros_like(action)
         torque[self.hip] = float(self.control_cfg["hip_kd"]) * (
@@ -419,9 +482,10 @@ class Real68Sim2Sim:
         torque[self.wheel] = float(self.control_cfg["wheel_kd"]) * (
             targets[self.wheel] - dof_vel[self.wheel]
         )
-        torque[self.calf] = float(self.control_cfg["calf_kp"]) * (
-            targets[self.calf] - dof_pos[self.calf]
-        ) - float(self.control_cfg["calf_kd"]) * dof_vel[self.calf]
+        torque[self.calf] = (
+            float(self.control_cfg["calf_kp"]) * (targets[self.calf] - dof_pos[self.calf])
+            - float(self.control_cfg["calf_kd"]) * dof_vel[self.calf]
+        )
         return np.clip(torque, self.ctrl_lower, self.ctrl_upper)
 
     def _update_policy_action(self) -> None:
@@ -451,7 +515,9 @@ class Real68Sim2Sim:
 
     def _should_reset(self) -> bool:
         failed, nonwheel_max = self._failure_state()
-        if failed and nonwheel_max > float(self.cfg["termination_config"]["nonwheel_contact_threshold"]):
+        if failed and nonwheel_max > float(
+            self.cfg["termination_config"]["nonwheel_contact_threshold"]
+        ):
             self.nonwheel_contact_steps += 1
         else:
             self.nonwheel_contact_steps = 0
@@ -460,10 +526,9 @@ class Real68Sim2Sim:
         ):
             return True
         gravity = self.sensors.read(self.data, self.cfg["sensor_names"]["gravity"])
-        return (
-            gravity[2] <= float(self.cfg["termination_config"]["min_up_proj"])
-            or self._base_height() <= float(self.cfg["termination_config"]["min_base_height"])
-        )
+        return gravity[2] <= float(
+            self.cfg["termination_config"]["min_up_proj"]
+        ) or self._base_height() <= float(self.cfg["termination_config"]["min_base_height"])
 
     def _origin_for_current_cell(self) -> np.ndarray:
         flat = self.terrain_origins.reshape(-1, 3)
@@ -473,7 +538,9 @@ class Real68Sim2Sim:
         cos_yaw = float(np.cos(yaw))
         sin_yaw = float(np.sin(yaw))
         rot = np.asarray([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]], dtype=np.float64)
-        footprint_xy = np.asarray(xy, dtype=np.float64)[None, :] + self._spawn_footprint_offsets @ rot.T
+        footprint_xy = (
+            np.asarray(xy, dtype=np.float64)[None, :] + self._spawn_footprint_offsets @ rot.T
+        )
         return self.hfield.sample_many_max(footprint_xy)
 
     def _clear_spawn_penetration(self) -> None:
@@ -502,13 +569,13 @@ class Real68Sim2Sim:
         qpos[1] = origin[1] + np.random.uniform(-xy_jitter, xy_jitter)
         roll = 0.0
         pitch = 0.0
-        yaw = (
-            np.random.uniform(*reset_cfg["yaw_range"])
-            if self.random_yaw
-            else 0.0
-        )
+        yaw = np.random.uniform(*reset_cfg["yaw_range"]) if self.random_yaw else 0.0
         terrain_z = self._spawn_surface_height(qpos[:2], yaw)
-        qpos[2] = terrain_z + float(self.cfg["home_base_height"]) + float(reset_cfg["spawn_height_margin"])
+        qpos[2] = (
+            terrain_z
+            + float(self.cfg["home_base_height"])
+            + float(reset_cfg["spawn_height_margin"])
+        )
         qpos[3:7] = quat_mul(qpos[3:7], quat_from_euler_xyz(roll, pitch, yaw))
         qvel[:6] = 0.0
         self.data.qpos[:] = qpos
