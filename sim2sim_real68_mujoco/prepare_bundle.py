@@ -90,7 +90,35 @@ def _sim2sim_config(
     domain_rand = env_cfg["domain_rand"]
     termination = env_cfg["termination_config"]
     commands = env_cfg["commands"]
+    height_command = env_cfg.get("height_command", {})
+    recovery = env_cfg.get("recovery", {})
     sensor_cfg = Real68Sensor()
+    configured_sensor = env_cfg.get("sensor", {})
+    use_wheel_odometry = bool(
+        configured_sensor.get("use_wheel_odometry", sensor_cfg.use_wheel_odometry)
+    )
+    if terrain_type == "hfield":
+        reset_config = {
+            "xy_jitter": float(abs(domain_rand.get("reset_pos_xy_range", [-0.5, 0.5])[1])),
+            "z_offset_range": domain_rand.get("reset_height_offset_range", [0.0, 0.08]),
+            "roll_range": domain_rand.get("reset_roll_range", [-0.1, 0.1]),
+            "pitch_range": domain_rand.get("reset_pitch_range", [-0.1, 0.1]),
+            "yaw_range": domain_rand.get(
+                "reset_yaw_range", [-3.141592653589793, 3.141592653589793]
+            ),
+            "reset_qvel_limit": float(domain_rand.get("reset_qvel_limit", 0.15)),
+            "spawn_height_margin": 0.05,
+        }
+    else:
+        reset_config = {
+            "xy_jitter": 0.25,
+            "z_offset_range": [0.0, 0.0],
+            "roll_range": [0.0, 0.0],
+            "pitch_range": [0.0, 0.0],
+            "yaw_range": domain_rand.get("init_yaw_range", [-3.141592653589793, 3.141592653589793]),
+            "reset_qvel_limit": float(domain_rand.get("reset_qvel_limit", 0.0)),
+            "spawn_height_margin": 0.0,
+        }
     return {
         "scene_file": "scene.xml",
         "policy_file": "policy.onnx",
@@ -101,8 +129,11 @@ def _sim2sim_config(
         "sim_dt": 0.001,
         "ctrl_dt": 0.02,
         "steps_per_control": int(round(0.02 / 0.001)),
-        "home_base_height": HOME_BASE_HEIGHT,
+        "home_base_height": float(recovery.get("initial_base_height", HOME_BASE_HEIGHT)),
         "base_height_target": float(reward_cfg["base_height_target"]),
+        "height_command_reference": float(
+            height_command.get("observation_reference_height", reward_cfg["base_height_target"])
+        ),
         "forward_axis": 1,
         "lateral_axis": 0,
         "forward_sign": 1.0,
@@ -118,6 +149,7 @@ def _sim2sim_config(
             "accel": sensor_cfg.accel,
             "quat": sensor_cfg.quat,
         },
+        "use_wheel_odometry": use_wheel_odometry,
         "indices": {
             "hip": HIP_INDICES.tolist(),
             "wheel": WHEEL_INDICES.tolist(),
@@ -141,17 +173,25 @@ def _sim2sim_config(
             "calf_kd": float(control_cfg.get("calf_kd", control_defaults.calf_kd)),
         },
         "command_limits": commands["vel_limit"],
-        "reset_config": {
-            "xy_jitter": float(abs(domain_rand.get("reset_pos_xy_range", [-0.5, 0.5])[1])),
-            "z_offset_range": domain_rand.get("reset_height_offset_range", [0.0, 0.08]),
-            "roll_range": domain_rand.get("reset_roll_range", [-0.1, 0.1]),
-            "pitch_range": domain_rand.get("reset_pitch_range", [-0.1, 0.1]),
-            "yaw_range": domain_rand.get("reset_yaw_range", [-3.141592653589793, 3.141592653589793]),
-            "reset_qvel_limit": float(domain_rand.get("reset_qvel_limit", 0.15)),
-            "spawn_height_margin": 0.05,
+        "recovery_config": {
+            "enabled": bool(recovery.get("enabled", False)),
+            # Normal standalone reset stays upright. Recovery poses are
+            # explicitly requested with the player's --recovery-reset flag.
+            "initial_recovery_probability": 0.0,
+            "initial_roll_range": recovery.get("initial_roll_range", [-3.14159, 3.14159]),
+            "initial_pitch_range": recovery.get("initial_pitch_range", [-3.14159, 3.14159]),
+            "fall_detect_cos": float(recovery.get("fall_detect_cos", 0.9)),
+            "upright_cos": float(recovery.get("upright_cos", 0.96)),
+            "upright_hold_seconds": float(recovery.get("upright_hold_seconds", 0.4)),
+            "timeout_seconds": float(
+                recovery.get("final_timeout_seconds", recovery.get("timeout_seconds", 5.0))
+            ),
         },
+        "reset_config": reset_config,
         "termination_config": {
-            "min_up_proj": float(termination.get("min_up_proj", reward_cfg.get("max_tilt_cos", 0.45))),
+            "min_up_proj": float(
+                termination.get("min_up_proj", reward_cfg.get("max_tilt_cos", 0.45))
+            ),
             "min_base_height": float(
                 termination.get("min_base_height", reward_cfg.get("min_base_height", 0.16))
             ),

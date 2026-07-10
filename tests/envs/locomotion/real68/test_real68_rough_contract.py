@@ -82,6 +82,80 @@ def test_real68_rough_curriculum_logs_appear_after_done():
         env.close()
 
 
+def test_real68_rough_uses_rough_termination_thresholds():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceRough",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "termination_config": {
+                "fall_termination": True,
+                "min_up_proj": 0.2,
+                "min_base_height": 0.0,
+                "nonwheel_contact_termination": False,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+                "max_tilt_cos": 0.9,
+            },
+        },
+    )
+    try:
+        env._nonwheel_contacts.fill(0.0)
+        upright_enough = env._compute_termination_causes(
+            np.asarray([[0.0, 0.0, 0.25], [0.0, 0.0, 0.25]], dtype=np.float32)
+        )
+        assert not np.any(upright_enough["terminated"])
+
+        tilted = env._compute_termination_causes(
+            np.asarray([[0.0, 0.0, 0.15], [0.0, 0.0, 0.15]], dtype=np.float32)
+        )
+        assert np.all(tilted["terminated"])
+    finally:
+        env.close()
+
+
+def test_real68_rough_recovery_protects_fallen_contact_and_low_height():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceRough",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "recovery": {"enabled": True, "fall_detect_cos": 0.9, "timeout_seconds": 1.0},
+            "termination_config": {
+                "fall_termination": True,
+                "min_up_proj": 0.2,
+                "min_base_height": 10.0,
+                "nonwheel_contact_termination": True,
+                "nonwheel_contact_max_steps": 1,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        gravity = np.asarray([[0.0, 0.0, -1.0]], dtype=np.float32)
+        info = {
+            "commands": np.asarray([[0.5, 0.0, 1.0]], dtype=np.float32),
+            "tracking_commands": np.asarray([[0.5, 0.0, 1.0]], dtype=np.float32),
+        }
+        env._nonwheel_contacts.fill(1.0)
+        env._recovery_eligible[:] = True
+        env._update_recovery_state(info, gravity)
+        causes = env._compute_termination_causes(gravity)
+
+        assert env._recovery_active[0]
+        assert not causes["terminated"][0]
+        np.testing.assert_allclose(info["commands"], np.zeros((1, 3)))
+    finally:
+        env.close()
+
+
 def test_real68_command_curriculum_starts_small_and_expands():
     ensure_registries()
     env = registry.make(
@@ -119,10 +193,14 @@ def test_real68_command_curriculum_starts_small_and_expands():
             cmd_x=0.3,
             cmd_yaw=0.0,
             mean_abs_vx=0.18,
+            mean_signed_vx=0.18,
             mean_abs_wz=0.7,
             vx_error=0.2,
             wz_error=0.7,
             mean_nonwheel_contact=0.0,
+            mean_tilt=0.0,
+            mean_tilt_angle_deg=0.0,
+            mean_height_violation=0.0,
             segment_steps=100,
         )
         env._update_command_curriculum()
@@ -139,10 +217,14 @@ def test_real68_command_curriculum_starts_small_and_expands():
             cmd_x=1.5,
             cmd_yaw=1.5,
             mean_abs_vx=0.9,
+            mean_signed_vx=0.9,
             mean_abs_wz=0.7,
             vx_error=0.2,
             wz_error=0.7,
             mean_nonwheel_contact=0.0,
+            mean_tilt=0.0,
+            mean_tilt_angle_deg=0.0,
+            mean_height_violation=0.0,
             segment_steps=100,
         )
         env._update_command_curriculum()

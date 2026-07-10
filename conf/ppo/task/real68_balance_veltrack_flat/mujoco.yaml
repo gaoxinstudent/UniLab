@@ -11,19 +11,19 @@ play_profile:
   env:
     commands:
       vel_limit:
-        - [0.3, 0.0, 0.0]
-        - [0.3, 0.0, 0.0]
-      resampling_time: 1000.0
+        - [-0.8, 0.0, -2.5]
+        - [1.2, 0.0, 2.5]
+      resampling_time: 1.5
       rel_standing_envs: 0.0
     command_curriculum:
       enabled: false
     domain_rand:
-      randomize_init_yaw: false
-      reset_qvel_limit: 0.0
+      randomize_init_yaw: true
+      reset_qvel_limit: 0.10
 
 algo:
   num_envs: 8192
-  max_iterations: 30
+  max_iterations: 800
   empirical_normalization: true
   obs_groups:
     actor:
@@ -42,7 +42,7 @@ env:
     wheel_velocity_scale: 28.0
     calf_action_scale: 0.40
     hip_kd: 2.0
-    wheel_kd: 0.9
+    wheel_kd: 0.45
     calf_kp: 50.0
     calf_kd: 4.0
   commands:
@@ -57,8 +57,8 @@ env:
       - [-0.8, 0.0, -1.5]
       - [1.32, 0.0, 1.5]
     final_vel_limit:
-      - [-1.6, 0.0, -7.5]
-      - [1.6, 0.0, 7.5]
+      - [-1.2, 0.0, -3.0]
+      - [1.4, 0.0, 3.0]
     vx_step: 0.05
     vx_step_down: 0.10
     yaw_step: 0.02
@@ -69,8 +69,8 @@ env:
     min_speed_ratio_down: 0.25
     vx_error_range: [0.35, 0.55, 0.90]
     max_vx_error: 0.70
-    max_wz_error: 0.60
-    max_wz_error_high: 1.20
+    max_wz_error: 0.75
+    max_wz_error_high: 1.50
     max_tilt_rate: 0.015
     max_tilt_rate_high: 0.05
     max_tilt_angle_deg: 6.0
@@ -90,14 +90,37 @@ env:
     high_speed_command_prob: 0.35
     high_speed_min_abs_vx: 0.9
   height_command:
-    range: [0.257282, 0.285]
-    speed_lift_gain: 0.012
-    max_speed_lift: 0.025
+    # Height is command-relative because the physical robot has no height sensor.
+    # Start with a conservative subset of the mechanical 0.20-0.32 m envelope.
+    range: [0.22, 0.26]
+    speed_lift_gain: 0.0
+    max_speed_lift: 0.0
+    observation_reference_height: 0.23
   domain_rand:
-    randomize_ground_friction: false
-    randomize_base_mass: false
-    random_com: false
-    reset_qvel_limit: 0.0
+    randomize_ground_friction: true
+    ground_friction_multiplier_range: [0.85, 1.15]
+    randomize_base_mass: true
+    added_mass_range: [-0.15, 0.15]
+    random_com: true
+    com_offset_x: [-0.01, 0.01]
+    reset_qvel_limit: 0.10
+  sensor:
+    use_wheel_odometry: true
+  recovery:
+    enabled: true
+    initial_base_height: 0.23
+    initial_recovery_probability: 0.05
+    final_recovery_probability: 0.20
+    initial_roll_range: [-3.141592653589793, 3.141592653589793]
+    initial_pitch_range: [-3.141592653589793, 3.141592653589793]
+    orientation_curriculum: true
+    initial_orientation_scale: 0.15
+    in_episode_fall_recovery_progress: 0.75
+    fall_detect_cos: 0.90
+    upright_cos: 0.96
+    upright_hold_seconds: 0.40
+    timeout_seconds: 2.5
+    final_timeout_seconds: 5.0
   termination_config:
     fall_termination: true
     nonwheel_contact_termination: true
@@ -142,11 +165,14 @@ reward:
     nonwheel_contact: -3.0
     liangan5_contact: -3.0
     liangan5_contact_asymmetry: -4.0
+    recovery_progress: 20.0
+    recovery_upright: 4.0
+    recovery_complete: 50.0
     alive: 0.10
-  tracking_sigma: 0.10
+  tracking_sigma: 0.30
   height_tracking_sigma: 0.03
   height_safety_margin: 0.025
-  base_height_target: 0.257282
+  base_height_target: 0.23
   min_base_height: 0.16
   max_base_height: 0.40
   max_tilt_cos: 0.90
@@ -166,5 +192,5 @@ reward:
     moving_command_vx_threshold: 0.10
     heading_error_limit: 0.30
     lateral_drift_limit: 0.30
-    yaw_tracking_sigma: 0.3
+    yaw_tracking_sigma: 0.75
     standing_roll_pitch_sigma: 0.03

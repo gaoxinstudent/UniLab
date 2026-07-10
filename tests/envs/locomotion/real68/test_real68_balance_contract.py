@@ -125,6 +125,166 @@ def test_real68_joint_penalties_ignore_wheel_positions_and_power():
         env.close()
 
 
+def test_real68_deployment_observation_uses_wheel_odometry_when_enabled():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "sensor": {"use_wheel_odometry": True},
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        dof_pos = np.broadcast_to(env.default_angles, (1, env._num_action)).copy()
+        dof_vel = np.zeros_like(dof_pos)
+        dof_vel[:, WHEEL_INDICES] = -10.0
+        obs = env._compute_obs(
+            {"commands": np.zeros((1, 3), dtype=np.float32)},
+            np.zeros((1, 3), dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            dof_pos,
+            dof_vel,
+        )
+        np.testing.assert_allclose(obs["obs"][:, :3], [[0.0, 0.6, 0.0]])
+    finally:
+        env.close()
+
+
+def test_real68_actor_height_command_does_not_require_measured_base_height():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "height_command": {"observation_reference_height": 0.23},
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+                "base_height_target": 0.23,
+            },
+        },
+    )
+    try:
+        dof_pos = np.broadcast_to(env.default_angles, (1, env._num_action)).copy()
+        obs = env._compute_obs(
+            {
+                "commands": np.zeros((1, 3), dtype=np.float32),
+                "height_commands": np.asarray([0.25], dtype=np.float32),
+            },
+            np.zeros((1, 3), dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
+            np.zeros((1, 3), dtype=np.float32),
+            dof_pos,
+            np.zeros_like(dof_pos),
+        )
+        assert obs["obs"][0, -1] == pytest.approx(0.02)
+        assert obs["critic"][0, 28] != pytest.approx(obs["obs"][0, -1])
+    finally:
+        env.close()
+
+
+def test_real68_recovery_zeros_commands_and_suppresses_fall_termination():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {
+                "enabled": True,
+                "fall_detect_cos": 0.9,
+                "upright_cos": 0.96,
+                "upright_hold_seconds": 0.04,
+                "timeout_seconds": 1.0,
+            },
+            "termination_config": {
+                "fall_termination": True,
+                "nonwheel_contact_termination": True,
+                "nonwheel_contact_max_steps": 1,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+                "max_tilt_cos": 0.9,
+            },
+        },
+    )
+    try:
+        tracking = np.asarray([[0.8, 0.0, 1.2]], dtype=np.float32)
+        info = {"commands": tracking.copy(), "tracking_commands": tracking.copy()}
+        fallen_gravity = np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32)
+        env._nonwheel_contacts.fill(1.0)
+        env._recovery_eligible[:] = True
+
+        env._update_recovery_state(info, fallen_gravity)
+        assert env._recovery_active[0]
+        np.testing.assert_allclose(info["commands"], np.zeros((1, 3)))
+        causes = env._compute_termination_causes(fallen_gravity)
+        assert not causes["terminated"][0]
+
+        upright_gravity = np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32)
+        env._nonwheel_contacts.fill(0.0)
+        env._update_recovery_state(info, upright_gravity)
+        assert env._recovery_active[0]
+        env._update_recovery_state(info, upright_gravity)
+        assert not env._recovery_active[0]
+        assert info["recovery_completed"][0]
+        np.testing.assert_allclose(info["commands"], tracking)
+
+        env._recovery_eligible[:] = False
+        env._update_recovery_state(info, fallen_gravity)
+        assert not env._recovery_active[0]
+        assert env._compute_termination_causes(fallen_gravity)["terminated"][0]
+    finally:
+        env.close()
+
+
+def test_real68_recovery_reset_uses_configured_height_and_arbitrary_orientation():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=4,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {
+                "enabled": True,
+                "initial_base_height": 0.23,
+                "initial_recovery_probability": 1.0,
+                "initial_roll_range": [1.0, 1.0],
+                "initial_pitch_range": [0.5, 0.5],
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        state = env.init_state()
+        base_pos = np.asarray(env._backend.get_base_pos())
+        np.testing.assert_allclose(base_pos[:, 2], np.full((4,), 0.23), atol=1.0e-6)
+        assert np.all(np.asarray(state.info["recovery_active"], dtype=bool))
+        np.testing.assert_allclose(state.info["commands"], np.zeros((4, 3)))
+        assert not np.allclose(np.asarray(env._backend.get_base_quat())[:, 1:3], np.zeros((4, 2)))
+    finally:
+        env.close()
+
+
 def test_real68_command_lean_targets_reduce_orientation_and_posture_penalties():
     ensure_registries()
     env = registry.make(
@@ -229,7 +389,9 @@ def test_real68_standing_rewards_prefer_symmetric_upright_anchor():
     )
     try:
         commands = np.zeros((1, 3), dtype=np.float32)
-        symmetric_dof = np.broadcast_to(SYMMETRIC_STANDING_ACTIVE_ANGLES, (1, env._num_action)).copy()
+        symmetric_dof = np.broadcast_to(
+            SYMMETRIC_STANDING_ACTIVE_ANGLES, (1, env._num_action)
+        ).copy()
         asymmetric_dof = symmetric_dof.copy()
         asymmetric_dof[:, POSTURE_INDICES] += np.asarray([[0.025, 0.04, -0.03, -0.05]])
         upright_ctx = RewardContext(
@@ -262,7 +424,9 @@ def test_real68_standing_rewards_prefer_symmetric_upright_anchor():
         assert float(env._reward_standing_leg_symmetry(upright_ctx)[0]) < float(
             env._reward_standing_leg_symmetry(tilted_ctx)[0]
         )
-        assert float(env._reward_posture(upright_ctx)[0]) < float(env._reward_posture(tilted_ctx)[0])
+        assert float(env._reward_posture(upright_ctx)[0]) < float(
+            env._reward_posture(tilted_ctx)[0]
+        )
     finally:
         env.close()
 
@@ -312,7 +476,9 @@ def test_real68_home_keyframe_is_geometrically_level_left_to_right():
 
     assert left_wheel >= 0 and right_wheel >= 0
     assert left_liangan5 >= 0 and right_liangan5 >= 0
-    assert float(data.xpos[left_wheel, 2] - data.xpos[right_wheel, 2]) == pytest.approx(0.0, abs=1e-6)
+    assert float(data.xpos[left_wheel, 2] - data.xpos[right_wheel, 2]) == pytest.approx(
+        0.0, abs=1e-6
+    )
     assert float(data.xpos[left_liangan5, 2] - data.xpos[right_liangan5, 2]) == pytest.approx(
         0.0, abs=1e-6
     )

@@ -432,7 +432,7 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.reward.scales.joint_pos_penalty == pytest.approx(-0.4)
     assert cfg.reward.scales.ang_vel_xy == pytest.approx(-1.2)
     assert cfg.reward.scales.orientation == pytest.approx(-24.0)
-    assert cfg.reward.tracking_sigma == pytest.approx(0.10)
+    assert cfg.reward.tracking_sigma == pytest.approx(0.30)
     assert cfg.reward.max_tilt_cos == pytest.approx(0.90)
     assert cfg.reward.min_base_height == pytest.approx(0.16)
     assert cfg.reward.command_lean.enabled is True
@@ -440,11 +440,19 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.reward.command_lean.hip_gain == pytest.approx(0.03)
     assert cfg.reward.command_lean.calf_gain == pytest.approx(0.03)
     assert cfg.reward.balance_gate.enabled is True
-    assert cfg.env.height_command.range == pytest.approx([0.257282, 0.285])
+    assert cfg.env.height_command.range == pytest.approx([0.22, 0.26])
+    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.23)
+    assert cfg.reward.base_height_target == pytest.approx(0.23)
+    assert cfg.env.recovery.enabled is True
+    assert cfg.env.recovery.initial_base_height == pytest.approx(0.23)
+    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.05)
+    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.20)
+    assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
+    assert cfg.reward.scales.recovery_complete == pytest.approx(50.0)
     ccfg = cfg.env.command_curriculum
     assert ccfg.enabled is True
     assert ccfg.initial_vel_limit == [[-0.8, 0.0, -1.5], [1.32, 0.0, 1.5]]
-    assert ccfg.final_vel_limit == [[-1.6, 0.0, -7.5], [1.6, 0.0, 7.5]]
+    assert ccfg.final_vel_limit == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
     assert ccfg.yaw_unlock_vx_progress == pytest.approx(0.0)
     assert ccfg.reverse_unlock_vx_progress == pytest.approx(0.25)
     assert ccfg.standing_bootstrap_enabled is False
@@ -459,6 +467,21 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.reward.scales.standing_posture == pytest.approx(-1.0)
     assert cfg.reward.scales.standing_leg_symmetry == pytest.approx(-1.5)
     assert cfg.reward.balance_gate.standing_roll_pitch_sigma == pytest.approx(0.03)
+
+
+def test_ppo_real68_rough_inherits_deployment_and_recovery_contract():
+    cfg = _compose("ppo", overrides=["task=real68_balance_rough/mujoco"])
+
+    assert cfg.env.control_config.wheel_velocity_scale == pytest.approx(28.0)
+    assert cfg.env.control_config.wheel_kd == pytest.approx(0.45)
+    assert cfg.env.control_config.calf_action_scale == pytest.approx(0.4)
+    assert cfg.env.control_config.calf_kp == pytest.approx(50.0)
+    assert cfg.env.height_command.range == pytest.approx([0.22, 0.26])
+    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.23)
+    assert cfg.env.recovery.enabled is True
+    assert cfg.env.recovery.initial_base_height == pytest.approx(0.23)
+    assert cfg.reward.base_height_target == pytest.approx(0.23)
+    assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
 
 
 def test_ppo_go2w_motrix_uses_motor_owner_dr_path():

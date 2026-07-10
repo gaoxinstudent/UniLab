@@ -20,12 +20,14 @@ from unilab.dr.dr_utils import (
 )
 from unilab.dtype_config import get_global_dtype
 from unilab.envs.common.rotation import (
+    np_quat_from_euler_xyz,
     np_quat_mul,
     np_wrap_to_pi,
     np_yaw_from_quat,
     np_yaw_to_quat,
 )
 from unilab.envs.locomotion.common import rewards
+from unilab.envs.locomotion.common.base import Sensor as LocomotionSensor
 from unilab.envs.locomotion.common.commands import Commands, zero_small_xy_commands
 from unilab.envs.locomotion.common.domain_rand import DomainRandConfig
 from unilab.envs.locomotion.common.dr_provider import LocomotionDRProvider
@@ -124,6 +126,9 @@ class HeightCommandConfig:
     range: list[float] = field(default_factory=lambda: [0.25, 0.32])
     speed_lift_gain: float = 0.0
     max_speed_lift: float = 0.0
+    # Hardware has no base-height sensor. The actor observes this fixed-frame
+    # command offset, while the critic can still use simulated base height.
+    observation_reference_height: float = HOME_BASE_HEIGHT
 
 
 @dataclass
@@ -184,12 +189,13 @@ class RewardConfig:
 
 
 @dataclass
-class Real68Sensor:
+class Real68Sensor(LocomotionSensor):
     local_linvel = "local_linvel"
     gyro = "gyro"
     gravity = "upvector"
     accel = "imu_accel"
     quat = "imu_quat"
+    use_wheel_odometry: bool = False
 
 
 @dataclass
@@ -197,6 +203,26 @@ class Real68DomainRandConfig(DomainRandConfig):
     randomize_init_yaw: bool = True
     init_yaw_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     reset_qvel_limit: float = 0.2
+
+
+@dataclass
+class RecoveryConfig:
+    """Self-righting curriculum and runtime state machine settings."""
+
+    enabled: bool = False
+    initial_base_height: float = HOME_BASE_HEIGHT
+    initial_recovery_probability: float = 0.0
+    final_recovery_probability: float = 0.0
+    initial_roll_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
+    initial_pitch_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
+    orientation_curriculum: bool = True
+    initial_orientation_scale: float = 0.25
+    in_episode_fall_recovery_progress: float = 0.50
+    fall_detect_cos: float = 0.90
+    upright_cos: float = 0.96
+    upright_hold_seconds: float = 0.40
+    timeout_seconds: float = 5.0
+    final_timeout_seconds: float = 5.0
 
 
 @dataclass
@@ -226,6 +252,7 @@ class Real68BalanceCfg(Real68BaseCfg):
     sensor: Real68Sensor = field(default_factory=Real68Sensor)
     domain_rand: Real68DomainRandConfig = field(default_factory=Real68DomainRandConfig)
     termination_config: FlatTerminationConfig = field(default_factory=FlatTerminationConfig)
+    recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
 
 
 class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
@@ -247,10 +274,35 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
         qvel = np.tile(env._init_qvel, (num_reset, 1))
         qpos[:, 0:2] += np.random.uniform(-0.25, 0.25, (num_reset, 2))
         qpos[:, 0:3] += env._spawn.origins_for(env_ids)
-        if env.cfg.domain_rand.randomize_init_yaw:
+        recovery_cfg = env.cfg.recovery
+        origins = env._spawn.origins_for(env_ids)
+        # The keyframe is a geometric anchor, not a reset contract.  Explicitly
+        # set z so task YAML controls the initial/base reference height.
+        qpos[:, 2] = origins[:, 2] + float(recovery_cfg.initial_base_height)
+        recovering = np.zeros((num_reset,), dtype=bool)
+        recovery_probability = env._recovery_reset_probability()
+        if recovery_cfg.enabled and recovery_probability > 0.0:
+            recovering = np.random.uniform(size=(num_reset,)) < recovery_probability
+        if np.any(recovering):
+            orientation_scale = env._recovery_orientation_scale()
+            roll_range = env._scaled_recovery_orientation_range(
+                recovery_cfg.initial_roll_range, orientation_scale
+            )
+            pitch_range = env._scaled_recovery_orientation_range(
+                recovery_cfg.initial_pitch_range, orientation_scale
+            )
+            roll = np.random.uniform(*roll_range, size=num_reset)
+            pitch = np.random.uniform(*pitch_range, size=num_reset)
+            yaw = np.random.uniform(-np.pi, np.pi, size=num_reset)
+            qpos[recovering, 3:7] = np_quat_from_euler_xyz(
+                roll[recovering], pitch[recovering], yaw[recovering]
+            )
+        if env.cfg.domain_rand.randomize_init_yaw and np.any(~recovering):
             low, high = env.cfg.domain_rand.init_yaw_range
             yaw = np.random.uniform(low, high, size=(num_reset,))
-            qpos[:, 3:7] = np_quat_mul(qpos[:, 3:7], np_yaw_to_quat(yaw))
+            qpos[~recovering, 3:7] = np_quat_mul(
+                qpos[~recovering, 3:7], np_yaw_to_quat(yaw[~recovering])
+            )
         limit = float(env.cfg.domain_rand.reset_qvel_limit)
         qvel[:, 0:6] = np.asarray(
             np.random.uniform(-limit, limit, size=(num_reset, 6)),
@@ -263,9 +315,15 @@ class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
         ):
             env._command_clip_scale[env_ids] = env._last_command_clip_scale
         height_commands = env.sample_height_commands(num_reset, commands=commands)
+        effective_commands = commands.copy()
+        effective_commands[recovering] = 0.0
         info_updates = {
-            "commands": commands,
+            "commands": effective_commands,
+            "tracking_commands": commands,
             "height_commands": height_commands,
+            "recovery_active": recovering,
+            "recovery_eligible": recovering,
+            "recovery_completed": np.zeros((num_reset,), dtype=bool),
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
             "torques": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
@@ -427,6 +485,12 @@ class Real68BalanceEnv(Real68BaseEnv):
             (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._nonwheel_contact_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._recovery_active = np.zeros((num_envs,), dtype=bool)
+        self._recovery_eligible = np.zeros((num_envs,), dtype=bool)
+        self._recovery_elapsed_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._recovery_upright_steps = np.zeros((num_envs,), dtype=np.int32)
+        self._last_recovery_completed = np.zeros((num_envs,), dtype=bool)
+        self._previous_upright_cos = np.ones((num_envs,), dtype=self._np_dtype)
         self._standing_segment_count = 0
         self._standing_segment_steps_sum = 0.0
         self._standing_segment_abs_vx_sum = 0.0
@@ -474,6 +538,20 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         self._nonwheel_contact_steps[env_ids] = 0
+        recovery_active = np.asarray(
+            info.get("recovery_active", np.zeros((len(env_ids),), dtype=bool)), dtype=bool
+        )
+        self._recovery_active[env_ids] = recovery_active
+        self._recovery_eligible[env_ids] = np.asarray(
+            info.get("recovery_eligible", recovery_active), dtype=bool
+        )
+        self._recovery_elapsed_steps[env_ids] = 0
+        self._recovery_upright_steps[env_ids] = 0
+        self._last_recovery_completed[env_ids] = False
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
+        self._previous_upright_cos[env_ids] = gravity[env_ids, 2]
         self._reset_command_segments(env_ids, commands)
         return obs, info
 
@@ -485,6 +563,38 @@ class Real68BalanceEnv(Real68BaseEnv):
             return np.zeros_like(cmd_x, dtype=self._np_dtype)
         lift = np.abs(np.asarray(cmd_x, dtype=self._np_dtype)) * gain
         return np.asarray(np.clip(lift, 0.0, max_lift), dtype=self._np_dtype)
+
+    def _recovery_orientation_scale(self) -> float:
+        cfg = self._cfg.recovery
+        if not cfg.orientation_curriculum:
+            return 1.0
+        initial = float(np.clip(cfg.initial_orientation_scale, 0.0, 1.0))
+        progress = float(np.clip(self._command_curriculum_vx_progress, 0.0, 1.0))
+        return initial + (1.0 - initial) * progress
+
+    def _recovery_reset_probability(self) -> float:
+        cfg = self._cfg.recovery
+        initial = float(np.clip(cfg.initial_recovery_probability, 0.0, 1.0))
+        final = float(np.clip(cfg.final_recovery_probability, 0.0, 1.0))
+        progress = float(np.clip(self._command_curriculum_vx_progress, 0.0, 1.0))
+        return initial + (final - initial) * progress
+
+    def _recovery_timeout_seconds(self) -> float:
+        cfg = self._cfg.recovery
+        progress = float(np.clip(self._command_curriculum_vx_progress, 0.0, 1.0))
+        return (
+            float(cfg.timeout_seconds)
+            + (float(cfg.final_timeout_seconds) - float(cfg.timeout_seconds)) * progress
+        )
+
+    @staticmethod
+    def _scaled_recovery_orientation_range(
+        angle_range: list[float], scale: float
+    ) -> tuple[float, float]:
+        low, high = (float(angle_range[0]), float(angle_range[1]))
+        center = 0.5 * (low + high)
+        half_span = 0.5 * (high - low) * float(np.clip(scale, 0.0, 1.0))
+        return center - half_span, center + half_span
 
     def sample_height_commands(
         self,
@@ -849,8 +959,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             "yaw_rate_when_uncommanded": rewards.yaw_rate_when_uncommanded,
             "heading_stability": self._reward_heading_stability,
             "lateral_drift": self._reward_lateral_drift,
-            "lin_vel_z": rewards.lin_vel_z,
-            "ang_vel_xy": rewards.ang_vel_xy,
+            "lin_vel_z": self._reward_phase_lin_vel_z,
+            "ang_vel_xy": self._reward_phase_ang_vel_xy,
             "orientation": self._reward_orientation,
             "excess_tilt": self._reward_excess_tilt,
             "tilt_termination": self._reward_tilt_termination,
@@ -878,6 +988,9 @@ class Real68BalanceEnv(Real68BaseEnv):
             "nonwheel_contact": self._reward_nonwheel_contact,
             "liangan5_contact": self._reward_liangan5_contact,
             "liangan5_contact_asymmetry": self._reward_liangan5_contact_asymmetry,
+            "recovery_progress": self._reward_recovery_progress,
+            "recovery_upright": self._reward_recovery_upright,
+            "recovery_complete": self._reward_recovery_complete,
         }
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
@@ -896,6 +1009,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._nonwheel_contacts[:] = scalarize_contacts(
             self._backend, NONWHEEL_CONTACT_SENSORS, dtype=self._np_dtype
         )
+        self._update_recovery_state(state.info, gravity)
         state.info["torques"] = self._last_motor_ctrl.copy()
         state.info["qacc"] = self._estimate_dof_acc(dof_vel)
         state.info["wheel_contacts"] = self._wheel_contacts.copy()
@@ -906,8 +1020,10 @@ class Real68BalanceEnv(Real68BaseEnv):
         state.info["height_low_violation"] = termination_causes["height_low"]
         state.info["height_high_violation"] = termination_causes["height_high"]
         state.info["termination_nonwheel_contact"] = termination_causes["nonwheel_contact"]
+        state.info["termination_recovery_timeout"] = termination_causes["recovery_timeout"]
         terminated = np.asarray(termination_causes["terminated"], dtype=bool)
         reward = self._compute_reward(state.info, linvel, gyro, gravity, dof_pos, dof_vel)
+        self._previous_upright_cos[:] = gravity[:, 2]
         obs = self._compute_obs(
             state.info,
             linvel,
@@ -933,12 +1049,32 @@ class Real68BalanceEnv(Real68BaseEnv):
             return
         self._write_motion_metrics(log, state.info, linvel, gyro)
         self._write_termination_metrics(log, state.info, state.terminated)
+        self._write_recovery_metrics(log, state.info)
         self._update_command_curriculum()
         self._write_command_curriculum_metrics(log)
 
     def _before_autoreset(self, done: np.ndarray) -> None:
         done_ids = np.flatnonzero(done).astype(np.int32)
         self._finalize_command_segments(done_ids)
+
+    def _write_recovery_metrics(self, log: dict[str, float], info: dict[str, Any]) -> None:
+        active = np.asarray(
+            info.get("recovery_active", np.zeros((self._num_envs,), dtype=bool)), dtype=bool
+        )
+        completed = np.asarray(
+            info.get("recovery_completed", np.zeros((self._num_envs,), dtype=bool)), dtype=bool
+        )
+        timeout = np.asarray(
+            info.get("termination_recovery_timeout", np.zeros((self._num_envs,), dtype=bool)),
+            dtype=bool,
+        )
+        log["recovery/active_frac"] = float(np.mean(active))
+        log["recovery/eligible_frac"] = float(np.mean(self._recovery_eligible))
+        log["recovery/completed_count"] = float(np.count_nonzero(completed))
+        log["recovery/timeout_count"] = float(np.count_nonzero(timeout))
+        log["recovery/orientation_scale"] = self._recovery_orientation_scale()
+        log["recovery/reset_probability"] = self._recovery_reset_probability()
+        log["recovery/timeout_seconds"] = self._recovery_timeout_seconds()
 
     def _accumulate_command_segments(
         self,
@@ -1515,6 +1651,18 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _compute_termination_causes(self, gravity: np.ndarray) -> dict[str, np.ndarray]:
         base_z = self._reward_base_height_values(gravity.shape[0])
         cfg = self._cfg.termination_config
+        recovery_cfg = self._cfg.recovery
+        recovery_completed = np.asarray(
+            self._last_recovery_completed
+            if recovery_cfg.enabled
+            else np.zeros_like(self._recovery_active),
+            dtype=bool,
+        )
+        recovering = (
+            self._recovery_active | recovery_completed
+            if recovery_cfg.enabled
+            else np.zeros_like(self._recovery_active)
+        )
         tilt = np.zeros((self._num_envs,), dtype=bool)
         if cfg.fall_termination:
             tilt = np.asarray(gravity[:, 2] <= self._reward_cfg.max_tilt_cos, dtype=bool)
@@ -1535,13 +1683,23 @@ class Real68BalanceEnv(Real68BaseEnv):
             self._nonwheel_contact_steps >= max(int(cfg.nonwheel_contact_max_steps), 1),
             dtype=bool,
         )
-        terminated = np.asarray(tilt | nonwheel_contact, dtype=bool)
+        # A fall starts recovery instead of immediately ending the episode.
+        # Only an unsuccessful recovery gets reset by its bounded timeout.
+        if recovery_cfg.enabled:
+            tilt &= ~recovering
+            nonwheel_contact &= ~recovering
+            timeout_steps = max(int(round(self._recovery_timeout_seconds() / self._cfg.ctrl_dt)), 1)
+            recovery_timeout = recovering & (self._recovery_elapsed_steps >= timeout_steps)
+        else:
+            recovery_timeout = np.zeros((self._num_envs,), dtype=bool)
+        terminated = np.asarray(tilt | nonwheel_contact | recovery_timeout, dtype=bool)
         return {
             "tilt": tilt,
             "height": height,
             "height_low": height_low,
             "height_high": height_high,
             "nonwheel_contact": nonwheel_contact,
+            "recovery_timeout": recovery_timeout,
             "terminated": terminated,
         }
 
@@ -1565,7 +1723,14 @@ class Real68BalanceEnv(Real68BaseEnv):
         noisy_gyro = self._obs_noise(gyro, noise_cfg.scale_gyro)
         noisy_gravity = self._obs_noise(gravity, noise_cfg.scale_gravity)
         noisy_accel = self._obs_noise(accel, noise_cfg.scale_accel)
-        noisy_linvel = self._obs_noise(linvel, noise_cfg.scale_linvel)
+        obs_linvel = np.asarray(linvel, dtype=self._np_dtype)
+        if self._cfg.sensor.use_wheel_odometry:
+            obs_linvel = np.zeros_like(linvel, dtype=self._np_dtype)
+            # The active wheel joint convention is opposite the forward body axis.
+            obs_linvel[:, _REAL68_FORWARD_AXIS] = -_REAL68_WHEEL_RADIUS * np.mean(
+                dof_vel[:, WHEEL_INDICES], axis=1
+            )
+        noisy_linvel = self._obs_noise(obs_linvel, noise_cfg.scale_linvel)
         noisy_posture_diff = self._obs_noise(posture_diff, noise_cfg.scale_joint_angle)
         noisy_posture_vel = self._obs_noise(posture_vel, noise_cfg.scale_joint_vel)
         noisy_wheel_vel = self._obs_noise(wheel_vel, noise_cfg.scale_joint_vel)
@@ -1576,7 +1741,10 @@ class Real68BalanceEnv(Real68BaseEnv):
             ),
             dtype=self._np_dtype,
         )
-        height_error = (height_commands - base_height)[:, None]
+        actor_height_command = (
+            height_commands - float(self._cfg.height_command.observation_reference_height)
+        )[:, None]
+        critic_height_error = (height_commands - base_height)[:, None]
         num_obs = gyro.shape[0]
         last_actions = np.asarray(
             info.get("current_actions", np.zeros((num_obs, self._num_action))),
@@ -1612,7 +1780,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 noisy_wheel_vel,
                 last_actions,
                 info["commands"],
-                height_error,
+                actor_height_command,
             ],
             axis=1,
             dtype=self._np_dtype,
@@ -1627,7 +1795,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 wheel_vel,
                 last_actions,
                 info["commands"],
-                height_error,
+                critic_height_error,
                 linvel,
                 motor_torque,
                 wheel_contacts,
@@ -1667,6 +1835,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         commands = np.asarray(
             info.get("commands", np.zeros((self._num_envs, 3))), dtype=self._np_dtype
         )
+        tracking_commands = np.asarray(
+            info.get("tracking_commands", commands.copy()), dtype=self._np_dtype
+        )
         height_commands = np.asarray(
             info.get(
                 "height_commands",
@@ -1686,7 +1857,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 env_ids = np.flatnonzero(resample_mask).astype(np.int32)
                 self._finalize_command_segments(env_ids)
                 sampled_commands = self.sample_velocity_commands(num_resample)
-                commands[resample_mask] = sampled_commands
+                tracking_commands[resample_mask] = sampled_commands
                 if self._last_command_clip_scale.shape[0] == num_resample:
                     self._command_clip_scale[env_ids] = self._last_command_clip_scale
                 height_commands[resample_mask] = self.sample_height_commands(
@@ -1694,9 +1865,52 @@ class Real68BalanceEnv(Real68BaseEnv):
                     commands=sampled_commands,
                 )
                 self._reset_command_segments(env_ids, sampled_commands)
-        commands[:, 1] = 0.0
+        tracking_commands[:, 1] = 0.0
+        commands[:] = tracking_commands
+        if self._cfg.recovery.enabled:
+            commands[self._recovery_active] = 0.0
         info["commands"] = commands
+        info["tracking_commands"] = tracking_commands
         info["height_commands"] = height_commands
+
+    def _update_recovery_state(self, info: dict, gravity: np.ndarray) -> None:
+        cfg = self._cfg.recovery
+        if not cfg.enabled:
+            return
+
+        upright_cos = np.asarray(gravity[:, 2], dtype=self._np_dtype)
+        fell = upright_cos < float(cfg.fall_detect_cos)
+        runtime_recovery_unlocked = self._command_curriculum_vx_progress >= float(
+            cfg.in_episode_fall_recovery_progress
+        )
+        can_enter_recovery = self._recovery_eligible | runtime_recovery_unlocked
+        newly_fallen = ~self._recovery_active & fell & can_enter_recovery
+        self._recovery_active[newly_fallen] = True
+        self._recovery_elapsed_steps[newly_fallen] = 0
+        self._recovery_upright_steps[newly_fallen] = 0
+
+        active_before_completion = self._recovery_active.copy()
+        self._recovery_elapsed_steps[active_before_completion] += 1
+        upright = upright_cos >= float(cfg.upright_cos)
+        self._recovery_upright_steps[active_before_completion & upright] += 1
+        self._recovery_upright_steps[active_before_completion & ~upright] = 0
+        hold_steps = max(int(round(cfg.upright_hold_seconds / self._cfg.ctrl_dt)), 1)
+        completed = active_before_completion & (self._recovery_upright_steps >= hold_steps)
+        self._last_recovery_completed[:] = completed
+        self._recovery_active[completed] = False
+        self._recovery_elapsed_steps[completed] = 0
+        self._recovery_upright_steps[completed] = 0
+
+        tracking_commands = np.asarray(
+            info.get("tracking_commands", info["commands"]), dtype=self._np_dtype
+        )
+        commands = tracking_commands.copy()
+        commands[self._recovery_active] = 0.0
+        info["commands"] = commands
+        info["tracking_commands"] = tracking_commands
+        info["recovery_active"] = self._recovery_active.copy()
+        info["recovery_completed"] = completed
+        info["recovery_elapsed_steps"] = self._recovery_elapsed_steps.copy()
 
     def _estimate_dof_acc(self, dof_vel: np.ndarray) -> np.ndarray:
         qacc = np.asarray(
@@ -1767,6 +1981,47 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
         return np.asarray(np.sum(np.square(torques), axis=1), dtype=self._np_dtype)
 
+    def _recovery_mask(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            ctx.info.get("recovery_active", np.zeros((ctx.num_envs,), dtype=bool)), dtype=bool
+        )
+
+    def _recovery_penalty_factor(
+        self, ctx: RewardContext, *, recovery_factor: float = 0.1
+    ) -> np.ndarray:
+        return np.where(self._recovery_mask(ctx), recovery_factor, 1.0).astype(self._np_dtype)
+
+    def _reward_phase_lin_vel_z(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            rewards.lin_vel_z(ctx) * self._recovery_penalty_factor(ctx), dtype=self._np_dtype
+        )
+
+    def _reward_phase_ang_vel_xy(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            rewards.ang_vel_xy(ctx) * self._recovery_penalty_factor(ctx), dtype=self._np_dtype
+        )
+
+    def _reward_recovery_progress(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        delta = np.maximum(
+            np.asarray(ctx.gravity[:, 2], dtype=self._np_dtype) - self._previous_upright_cos,
+            0.0,
+        )
+        return np.asarray(delta * self._recovery_mask(ctx), dtype=self._np_dtype)
+
+    def _reward_recovery_upright(self, ctx: RewardContext) -> np.ndarray:
+        assert ctx.gravity is not None
+        cfg = self._cfg.recovery
+        span = max(float(cfg.upright_cos) + 1.0, 1.0e-6)
+        upright = np.clip((ctx.gravity[:, 2] + 1.0) / span, 0.0, 1.0)
+        return np.asarray(upright * self._recovery_mask(ctx), dtype=self._np_dtype)
+
+    def _reward_recovery_complete(self, ctx: RewardContext) -> np.ndarray:
+        return np.asarray(
+            ctx.info.get("recovery_completed", np.zeros((ctx.num_envs,), dtype=bool)),
+            dtype=self._np_dtype,
+        )
+
     def _command_lean_cfg(self) -> RewardConfig.CommandLeanConfig:
         raw_cfg = self._reward_cfg.command_lean
         if isinstance(raw_cfg, RewardConfig.CommandLeanConfig):
@@ -1814,11 +2069,12 @@ class Real68BalanceEnv(Real68BaseEnv):
             ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
             dtype=self._np_dtype,
         )
-        return np.asarray(
+        standing = np.asarray(
             (np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND)
             & (np.abs(commands[:, 2]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND),
             dtype=bool,
         )
+        return standing & ~self._recovery_mask(ctx)
 
     def _posture_anchor(self, standing: np.ndarray | None = None) -> np.ndarray:
         anchor = np.asarray(DEFAULT_ACTIVE_ANGLES, dtype=self._np_dtype).copy()
@@ -1883,11 +2139,13 @@ class Real68BalanceEnv(Real68BaseEnv):
         posture_target = self._command_target_posture(commands[:, 0])
         posture_anchor = self._posture_anchor(self._standing_mask(ctx))
         posture = (
-            ctx.dof_pos[:, POSTURE_INDICES]
-            - posture_anchor[:, POSTURE_INDICES]
-            - posture_target
+            ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES] - posture_target
         )
-        return np.asarray(np.sum(np.square(posture), axis=1), dtype=self._np_dtype)
+        penalty = np.sum(np.square(posture), axis=1)
+        return np.asarray(
+            penalty * self._recovery_penalty_factor(ctx, recovery_factor=0.2),
+            dtype=self._np_dtype,
+        )
 
     def _reward_tracking_forward_vel(self, ctx: RewardContext) -> np.ndarray:
         commands = np.asarray(
@@ -2128,11 +2386,13 @@ class Real68BalanceEnv(Real68BaseEnv):
         posture_target = self._command_target_posture(commands[:, 0])
         posture_anchor = self._posture_anchor(self._standing_mask(ctx))
         posture = (
-            ctx.dof_pos[:, POSTURE_INDICES]
-            - posture_anchor[:, POSTURE_INDICES]
-            - posture_target
+            ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES] - posture_target
         )
-        return np.asarray(np.linalg.norm(posture, axis=1), dtype=self._np_dtype)
+        penalty = np.linalg.norm(posture, axis=1)
+        return np.asarray(
+            penalty * self._recovery_penalty_factor(ctx, recovery_factor=0.2),
+            dtype=self._np_dtype,
+        )
 
     def _reward_joint_power(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.dof_vel is not None
@@ -2213,7 +2473,10 @@ class Real68BalanceEnv(Real68BaseEnv):
         high_band = float(self._reward_cfg.max_base_height) - margin
         low_penalty = np.maximum(low_band - base_height, 0.0) / margin
         high_penalty = np.maximum(base_height - high_band, 0.0) / margin
-        return np.asarray(low_penalty + high_penalty, dtype=self._np_dtype)
+        return np.asarray(
+            (low_penalty + high_penalty) * self._recovery_penalty_factor(ctx, recovery_factor=0.1),
+            dtype=self._np_dtype,
+        )
 
     def _reward_under_height(self, ctx: RewardContext) -> np.ndarray:
         targets = np.asarray(
@@ -2228,7 +2491,10 @@ class Real68BalanceEnv(Real68BaseEnv):
 
     def _reward_nonwheel_contact(self, ctx: RewardContext) -> np.ndarray:
         contact = np.asarray(np.max(self._nonwheel_contacts, axis=1), dtype=self._np_dtype)
-        return contact
+        return np.asarray(
+            contact * self._recovery_penalty_factor(ctx, recovery_factor=0.1),
+            dtype=self._np_dtype,
+        )
 
     def _reward_liangan5_contact(self, ctx: RewardContext) -> np.ndarray:
         liangan5_contact = np.asarray(

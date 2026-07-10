@@ -79,3 +79,6 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python -m sim2sim_real68_mujoco.main \
 ```
 
 This prints periodic status and a final distance / mean-velocity summary.
+
+Use `--recovery-reset` to explicitly start from a random roll/pitch pose. Normal
+reset remains upright so recovery evaluation cannot be triggered accidentally.

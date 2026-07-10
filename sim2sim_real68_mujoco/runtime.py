@@ -332,6 +332,7 @@ class Real68Sim2Sim:
         command_override: np.ndarray | None = None,
         random_yaw: bool = False,
         auto_reset: bool = False,
+        recovery_reset: bool = False,
     ) -> None:
         self.bundle_dir = Path(bundle_dir).resolve()
         self.cfg = Sim2SimConfig.load(self.bundle_dir / "sim2sim_config.json")
@@ -365,13 +366,21 @@ class Real68Sim2Sim:
             self.cfg.raw.get("lateral_axis", 1 if self.forward_axis == 0 else 0)
         )
         self.forward_sign = float(self.cfg.raw.get("forward_sign", 1.0))
-        self.command = (
+        self.requested_command = (
             np.asarray(command_override, dtype=np.float64).copy()
             if command_override is not None
             else np.zeros((3,), dtype=np.float64)
         )
-        self.command[1] = 0.0
+        self.requested_command[1] = 0.0
+        self.command = self.requested_command.copy()
         self.height_command = float(self.cfg["base_height_target"])
+        self.height_command_reference = float(
+            self.cfg.raw.get("height_command_reference", self.height_command)
+        )
+        self.recovery_cfg = dict(self.cfg.raw.get("recovery_config", {}))
+        self.recovery_active = False
+        self.recovery_elapsed_steps = 0
+        self.recovery_upright_steps = 0
         self.last_action = np.zeros((6,), dtype=np.float64)
         self.last_torque = np.zeros((6,), dtype=np.float64)
         self._policy_action_target = np.zeros((6,), dtype=np.float64)
@@ -380,6 +389,7 @@ class Real68Sim2Sim:
         self.reset_count = 0
         self.random_yaw = random_yaw
         self.auto_reset = auto_reset
+        self.recovery_reset = recovery_reset
         flat_terrain = self.terrain_origins.reshape(-1, 3)
         self._terrain_cell = min(2, flat_terrain.shape[0] - 1)
         self._status_deadline = time.perf_counter()
@@ -437,7 +447,12 @@ class Real68Sim2Sim:
         posture_diff = dof_pos[self.posture] - self.default_angles[self.posture]
         posture_vel = dof_vel[self.posture]
         wheel_vel = dof_vel[self.wheel]
-        height_error = np.asarray([self.height_command - self._base_height()], dtype=np.float64)
+        if bool(self.cfg.raw.get("use_wheel_odometry", False)):
+            linvel = np.zeros((3,), dtype=np.float64)
+            linvel[self.forward_axis] = -0.06 * float(np.mean(wheel_vel))
+        height_command = np.asarray(
+            [self.height_command - self.height_command_reference], dtype=np.float64
+        )
         parts = [
             gyro,
             -gravity,
@@ -447,7 +462,7 @@ class Real68Sim2Sim:
             wheel_vel,
             self.last_action,
             self.command,
-            height_error,
+            height_command,
         ]
         if self.obs_dim == 32:
             parts.insert(0, linvel)
@@ -485,6 +500,7 @@ class Real68Sim2Sim:
         return np.clip(torque, self.ctrl_lower, self.ctrl_upper)
 
     def _update_policy_action(self) -> None:
+        self._update_recovery_state()
         obs = self._compute_obs()
         action = self._policy_action(obs)
         self.last_action[:] = action
@@ -510,6 +526,17 @@ class Real68Sim2Sim:
         return failed, nonwheel_max
 
     def _should_reset(self) -> bool:
+        if bool(self.recovery_cfg.get("enabled", False)) and self.recovery_active:
+            timeout_steps = max(
+                int(
+                    round(
+                        float(self.recovery_cfg.get("timeout_seconds", 5.0))
+                        / float(self.cfg["ctrl_dt"])
+                    )
+                ),
+                1,
+            )
+            return self.recovery_elapsed_steps >= timeout_steps
         failed, nonwheel_max = self._failure_state()
         if failed and nonwheel_max > float(
             self.cfg["termination_config"]["nonwheel_contact_threshold"]
@@ -525,6 +552,38 @@ class Real68Sim2Sim:
         return gravity[2] <= float(
             self.cfg["termination_config"]["min_up_proj"]
         ) or self._base_height() <= float(self.cfg["termination_config"]["min_base_height"])
+
+    def _update_recovery_state(self) -> None:
+        if not bool(self.recovery_cfg.get("enabled", False)):
+            self.command[:] = self.requested_command
+            return
+        gravity = self.sensors.read(self.data, self.cfg["sensor_names"]["gravity"])
+        if not self.recovery_active and gravity[2] < float(
+            self.recovery_cfg.get("fall_detect_cos", 0.9)
+        ):
+            self.recovery_active = True
+            self.recovery_elapsed_steps = 0
+            self.recovery_upright_steps = 0
+        if self.recovery_active:
+            self.recovery_elapsed_steps += 1
+            if gravity[2] >= float(self.recovery_cfg.get("upright_cos", 0.96)):
+                self.recovery_upright_steps += 1
+            else:
+                self.recovery_upright_steps = 0
+            hold_steps = max(
+                int(
+                    round(
+                        float(self.recovery_cfg.get("upright_hold_seconds", 0.4))
+                        / float(self.cfg["ctrl_dt"])
+                    )
+                ),
+                1,
+            )
+            if self.recovery_upright_steps >= hold_steps:
+                self.recovery_active = False
+                self.recovery_elapsed_steps = 0
+                self.recovery_upright_steps = 0
+        self.command[:] = 0.0 if self.recovery_active else self.requested_command
 
     def _origin_for_current_cell(self) -> np.ndarray:
         flat = self.terrain_origins.reshape(-1, 3)
@@ -566,6 +625,14 @@ class Real68Sim2Sim:
         roll = 0.0
         pitch = 0.0
         yaw = np.random.uniform(*reset_cfg["yaw_range"]) if self.random_yaw else 0.0
+        recovering = bool(self.recovery_cfg.get("enabled", False)) and (
+            self.recovery_reset
+            or np.random.uniform()
+            < float(self.recovery_cfg.get("initial_recovery_probability", 0.0))
+        )
+        if recovering:
+            roll = np.random.uniform(*self.recovery_cfg["initial_roll_range"])
+            pitch = np.random.uniform(*self.recovery_cfg["initial_pitch_range"])
         terrain_z = self._spawn_surface_height(qpos[:2], yaw)
         qpos[2] = (
             terrain_z
@@ -581,6 +648,9 @@ class Real68Sim2Sim:
         self.last_torque[:] = 0.0
         self._policy_action_target[:] = 0.0
         self.nonwheel_contact_steps = 0
+        self.recovery_active = recovering
+        self.recovery_elapsed_steps = 0
+        self.recovery_upright_steps = 0
         self.control_tick = 0
         self.reset_count += 1
         mujoco.mj_forward(self.model, self.data)
@@ -602,8 +672,9 @@ class Real68Sim2Sim:
         self._terrain_cell = int(np.clip(cell, 0, flat.shape[0] - 1))
 
     def update_command(self, command: np.ndarray) -> None:
-        self.command[:] = np.asarray(command, dtype=np.float64)
-        self.command[1] = 0.0
+        self.requested_command[:] = np.asarray(command, dtype=np.float64)
+        self.requested_command[1] = 0.0
+        self.command[:] = 0.0 if self.recovery_active else self.requested_command
 
     def status_line(self) -> str:
         linvel = self.sensors.read(self.data, self.cfg["sensor_names"]["local_linvel"])
@@ -616,6 +687,7 @@ class Real68Sim2Sim:
             f"base_h={self._base_height():.3f} "
             f"nonwheel={nonwheel_max:.2f} "
             f"failed={failed} "
+            f"recovery={self.recovery_active} "
             f"cell={self._terrain_cell} "
             f"resets={self.reset_count}"
         )

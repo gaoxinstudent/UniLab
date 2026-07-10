@@ -152,6 +152,11 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=4000, help="Headless simulation steps.")
     parser.add_argument("--random-yaw", action="store_true", help="Use randomized yaw on reset.")
     parser.add_argument(
+        "--recovery-reset",
+        action="store_true",
+        help="Reset from a random roll/pitch pose to test self-righting.",
+    )
+    parser.add_argument(
         "--auto-reset", action="store_true", help="Automatically reset on fall/contact failure."
     )
     parser.add_argument(
@@ -190,6 +195,7 @@ def main() -> None:
         command_override=command,
         random_yaw=bool(args.random_yaw),
         auto_reset=bool(args.auto_reset),
+        recovery_reset=bool(args.recovery_reset),
     )
     if args.terrain_cell is not None:
         sim.set_terrain_cell(int(args.terrain_cell))

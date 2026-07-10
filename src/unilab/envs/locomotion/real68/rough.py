@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -28,6 +28,7 @@ from unilab.envs.locomotion.common.terrain_spawn import (
 from unilab.envs.locomotion.real68.balance import (
     NONWHEEL_CONTACT_SENSORS,
     WHEEL_CONTACT_SENSORS,
+    FlatTerminationConfig,
     Real68BalanceCfg,
     Real68BalanceDomainRandomizationProvider,
     Real68BalanceEnv,
@@ -81,7 +82,7 @@ class Real68CommandCurriculumCfg(BaseReal68CommandCurriculumCfg):
 
 
 @dataclass
-class RoughTerminationConfig:
+class RoughTerminationConfig(FlatTerminationConfig):
     terrain_out_of_bounds: bool = True
     terrain_distance_buffer: float = 3.0
     fall_termination: bool = True
@@ -105,39 +106,39 @@ class Real68RoughTerrainCfg(TerrainGeneratorCfg):
         default_factory=lambda: {
             "pyramid_stairs": pyramid_stairs(
                 proportion=0.2,
-                step_height_range=(0.025, 0.20),
+                step_height_range=(0.01, 0.08),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "pyramid_stairs_inv": pyramid_stairs_inv(
                 proportion=0.2,
-                step_height_range=(0.025, 0.20),
+                step_height_range=(0.01, 0.08),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope": hf_pyramid_slope(
                 proportion=0.2,
-                slope_range=(0.0, 0.3),
+                slope_range=(0.0, 0.18),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
                 proportion=0.2,
-                slope_range=(0.0, 0.3),
+                slope_range=(0.0, 0.18),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "random_rough": random_rough(
                 proportion=0.1,
-                noise_range=(0.01, 0.06),
+                noise_range=(0.005, 0.03),
                 noise_step=0.01,
                 border_width=0.2,
             ),
             "wave_terrain": wave_terrain(
                 proportion=0.1,
-                amplitude_range=(0.0, 0.12),
+                amplitude_range=(0.0, 0.06),
                 num_waves=4,
                 border_width=0.2,
             ),
@@ -180,7 +181,9 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         xy_low, xy_high = env.cfg.domain_rand.reset_pos_xy_range
         qpos[:, 0:2] += np.random.uniform(xy_low, xy_high, (num_reset, 2))
         z_low, z_high = env.cfg.domain_rand.reset_height_offset_range
-        qpos[:, 2] += np.random.uniform(z_low, z_high, (num_reset,))
+        qpos[:, 2] = float(env.cfg.recovery.initial_base_height) + np.random.uniform(
+            z_low, z_high, (num_reset,)
+        )
 
         roll_low, roll_high = env.cfg.domain_rand.reset_roll_range
         pitch_low, pitch_high = env.cfg.domain_rand.reset_pitch_range
@@ -188,6 +191,23 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         roll = np.random.uniform(roll_low, roll_high, (num_reset,))
         pitch = np.random.uniform(pitch_low, pitch_high, (num_reset,))
         yaw = np.random.uniform(yaw_low, yaw_high, (num_reset,))
+        recovering = np.zeros((num_reset,), dtype=bool)
+        recovery_cfg = env.cfg.recovery
+        recovery_probability = env._recovery_reset_probability()
+        if recovery_cfg.enabled and recovery_probability > 0.0:
+            recovering = np.random.uniform(size=(num_reset,)) < recovery_probability
+            if np.any(recovering):
+                orientation_scale = env._recovery_orientation_scale()
+                roll_range = env._scaled_recovery_orientation_range(
+                    recovery_cfg.initial_roll_range, orientation_scale
+                )
+                pitch_range = env._scaled_recovery_orientation_range(
+                    recovery_cfg.initial_pitch_range, orientation_scale
+                )
+                roll[recovering] = np.random.uniform(*roll_range, size=np.count_nonzero(recovering))
+                pitch[recovering] = np.random.uniform(
+                    *pitch_range, size=np.count_nonzero(recovering)
+                )
         qpos[:, 0:3] = env._spawn.apply_spawn(env_ids, qpos[:, 0:3], yaw=yaw)
         qpos[:, 3:7] = np_quat_mul(qpos[:, 3:7], np_quat_from_euler_xyz(roll, pitch, yaw))
         env._spawn.record_episode_start(env_ids, qpos[:, 0:3])
@@ -199,10 +219,16 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         )
 
         commands = env.sample_velocity_commands(num_reset)
-        height_commands = env.sample_height_commands(num_reset)
+        height_commands = env.sample_height_commands(num_reset, commands=commands)
+        effective_commands = commands.copy()
+        effective_commands[recovering] = 0.0
         info_updates = {
-            "commands": commands,
+            "commands": effective_commands,
+            "tracking_commands": commands,
             "height_commands": height_commands,
+            "recovery_active": recovering,
+            "recovery_eligible": recovering,
+            "recovery_completed": np.zeros((num_reset,), dtype=bool),
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
             "torques": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
@@ -293,10 +319,14 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             return rewards.alive(ctx) * self._upright_scale(ctx.gravity)
 
         self._reward_fns = {
-            "tracking_lin_vel": gated(rewards.tracking_lin_vel),
-            "tracking_ang_vel": gated(rewards.tracking_ang_vel),
-            "forward_progress": gated(rewards.forward_progress),
-            "under_speed": gated(rewards.under_speed),
+            "tracking_lin_vel": self._reward_tracking_forward_vel,
+            "tracking_ang_vel": rewards.tracking_ang_vel,
+            "balanced_tracking_lin_vel": self._reward_balanced_tracking_forward_vel,
+            "balanced_tracking_ang_vel": self._reward_balanced_tracking_ang_vel,
+            "forward_progress": self._reward_forward_progress,
+            "net_progress": self._reward_net_progress,
+            "under_speed": self._reward_under_speed,
+            "drive_wheel_command": self._reward_drive_wheel_command,
             "yaw_rate_when_uncommanded": gated(rewards.yaw_rate_when_uncommanded),
             "lin_vel_z": gated(rewards.lin_vel_z),
             "ang_vel_xy": gated(rewards.ang_vel_xy),
@@ -362,9 +392,10 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         log["command_curriculum/high_vx"] = float(self._command_curriculum_high[0])
         log["command_curriculum/low_wz"] = float(self._command_curriculum_low[2])
         log["command_curriculum/high_wz"] = float(self._command_curriculum_high[2])
-        log["terrain_curriculum/mean_level"] = float(self._spawn.levels.mean())
-        log["terrain_curriculum/max_level"] = float(self._spawn.levels.max())
-        log["terrain_curriculum/min_level"] = float(self._spawn.levels.min())
+        spawn = cast(TerrainSpawnManager, self._spawn)
+        log["terrain_curriculum/mean_level"] = float(spawn.levels.mean())
+        log["terrain_curriculum/max_level"] = float(spawn.levels.max())
+        log["terrain_curriculum/min_level"] = float(spawn.levels.min())
 
     def _clear_height_scan_cache(self) -> None:
         self._rough_scan_raw = None
@@ -451,29 +482,48 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             )
         return self._rough_scan_base_height
 
-    def _compute_terminated(self, gravity: np.ndarray) -> np.ndarray:
-        terminated = np.zeros((self._num_envs,), dtype=bool)
+    def _compute_termination_causes(self, gravity: np.ndarray) -> dict[str, np.ndarray]:
+        cfg = self._cfg.termination_config
+        recovery_cfg = self._cfg.recovery
+        protected = (
+            self._recovery_active | self._last_recovery_completed
+            if recovery_cfg.enabled
+            else np.zeros((self._num_envs,), dtype=bool)
+        )
+        nonwheel_contact = np.zeros((self._num_envs,), dtype=bool)
         if self._cfg.termination_config.nonwheel_contact_termination:
-            threshold = float(self._cfg.termination_config.nonwheel_contact_threshold)
-            max_steps = max(int(self._cfg.termination_config.nonwheel_contact_max_steps), 1)
+            threshold = float(cfg.nonwheel_contact_threshold)
+            max_steps = max(int(cfg.nonwheel_contact_max_steps), 1)
             contact_active = np.max(self._nonwheel_contacts, axis=1) > threshold
             self._nonwheel_contact_steps[contact_active] += 1
             self._nonwheel_contact_steps[~contact_active] = 0
-            np.logical_or(
-                terminated,
-                self._nonwheel_contact_steps >= max_steps,
-                out=terminated,
-            )
-        if not self._cfg.termination_config.fall_termination:
-            return terminated
+            nonwheel_contact = self._nonwheel_contact_steps >= max_steps
         base_height = self._reward_base_height_values(gravity.shape[0])
-        np.logical_or(
-            terminated,
-            (gravity[:, 2] <= float(self._cfg.termination_config.min_up_proj))
-            | (base_height <= float(self._cfg.termination_config.min_base_height)),
-            out=terminated,
-        )
-        return terminated
+        tilt = np.zeros((self._num_envs,), dtype=bool)
+        height_low = np.zeros((self._num_envs,), dtype=bool)
+        if cfg.fall_termination:
+            tilt = gravity[:, 2] <= float(cfg.min_up_proj)
+            height_low = base_height <= float(cfg.min_base_height)
+        if recovery_cfg.enabled:
+            tilt &= ~protected
+            height_low &= ~protected
+            nonwheel_contact &= ~protected
+            timeout_steps = max(int(round(self._recovery_timeout_seconds() / self._cfg.ctrl_dt)), 1)
+            recovery_timeout = self._recovery_active & (
+                self._recovery_elapsed_steps >= timeout_steps
+            )
+        else:
+            recovery_timeout = np.zeros((self._num_envs,), dtype=bool)
+        terminated = tilt | height_low | nonwheel_contact | recovery_timeout
+        return {
+            "tilt": np.asarray(tilt, dtype=bool),
+            "height": np.asarray(height_low, dtype=bool),
+            "height_low": np.asarray(height_low, dtype=bool),
+            "height_high": np.zeros((self._num_envs,), dtype=bool),
+            "nonwheel_contact": np.asarray(nonwheel_contact, dtype=bool),
+            "recovery_timeout": np.asarray(recovery_timeout, dtype=bool),
+            "terminated": np.asarray(terminated, dtype=bool),
+        }
 
     def _compute_truncated(self, state: NpEnvState) -> np.ndarray:
         truncated = super()._compute_truncated(state)
