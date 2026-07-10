@@ -445,9 +445,20 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.reward.base_height_target == pytest.approx(0.23)
     assert cfg.env.recovery.enabled is True
     assert cfg.env.recovery.initial_base_height == pytest.approx(0.23)
-    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.05)
-    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.20)
+    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.45)
+    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.45)
+    assert [pose["name"] for pose in cfg.env.recovery.initial_pose_bank] == [
+        "prone",
+        "supine",
+        "left_side",
+        "right_side",
+    ]
+    assert cfg.env.recovery.post_recovery_stability_seconds == pytest.approx(1.0)
+    assert cfg.env.recovery.in_episode_fall_recovery_progress == pytest.approx(0.0)
+    assert cfg.env.recovery.timeout_seconds == pytest.approx(8.0)
+    assert cfg.env.recovery.final_timeout_seconds == pytest.approx(8.0)
     assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
+    assert cfg.reward.scales.recovery_orientation == pytest.approx(-8.0)
     assert cfg.reward.scales.recovery_complete == pytest.approx(50.0)
     ccfg = cfg.env.command_curriculum
     assert ccfg.enabled is True

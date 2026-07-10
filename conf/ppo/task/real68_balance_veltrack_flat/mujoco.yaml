@@ -20,6 +20,25 @@ play_profile:
     domain_rand:
       randomize_init_yaw: true
       reset_qvel_limit: 0.10
+    # Start every play env from a full canonical fallen pose. This is play-only:
+    # training retains its recovery probability and curriculum below.
+    recovery:
+      enabled: true
+      initial_base_height: 0.23
+      initial_recovery_probability: 1.0
+      final_recovery_probability: 1.0
+      initial_pose_bank:
+        - {name: prone, roll: 0.0, pitch: 1.5707963267948966, base_height: 0.14, min_orientation_scale: 0.25}
+        - {name: supine, roll: 0.0, pitch: -1.5707963267948966, base_height: 0.14, min_orientation_scale: 0.25}
+        - {name: left_side, roll: 1.5707963267948966, pitch: 0.0, base_height: 0.12, min_orientation_scale: 0.75}
+        - {name: right_side, roll: -1.5707963267948966, pitch: 0.0, base_height: 0.12, min_orientation_scale: 0.75}
+      orientation_curriculum: false
+      fall_detect_cos: 0.90
+      upright_cos: 0.96
+      upright_hold_seconds: 0.40
+      post_recovery_stability_seconds: 1.0
+      timeout_seconds: 8.0
+      final_timeout_seconds: 8.0
 
 algo:
   num_envs: 8192
@@ -104,23 +123,41 @@ env:
     random_com: true
     com_offset_x: [-0.01, 0.01]
     reset_qvel_limit: 0.10
+    push_robots: true
+    push_interval: 250
+    max_force: [1.2, 1.2, 0.6]
   sensor:
     use_wheel_odometry: true
   recovery:
     enabled: true
     initial_base_height: 0.23
-    initial_recovery_probability: 0.05
-    final_recovery_probability: 0.20
+    initial_recovery_probability: 0.45
+    final_recovery_probability: 0.45
     initial_roll_range: [-3.141592653589793, 3.141592653589793]
     initial_pitch_range: [-3.141592653589793, 3.141592653589793]
     orientation_curriculum: true
     initial_orientation_scale: 0.15
-    in_episode_fall_recovery_progress: 0.75
+    # Interpolate from standing height to the canonical pose's task-owned
+    # contact height; reset remains numeric and does not inspect XML/assets.
+    initial_pose_bank:
+      - {name: prone, roll: 0.0, pitch: 1.5707963267948966, base_height: 0.14, min_orientation_scale: 0.25}
+      - {name: supine, roll: 0.0, pitch: -1.5707963267948966, base_height: 0.14, min_orientation_scale: 0.25}
+      - {name: left_side, roll: 1.5707963267948966, pitch: 0.0, base_height: 0.12, min_orientation_scale: 0.75}
+      - {name: right_side, roll: -1.5707963267948966, pitch: 0.0, base_height: 0.12, min_orientation_scale: 0.75}
+    orientation_stages: [0.25, 0.50, 0.75, 1.00]
+    orientation_success_threshold: 0.60
+    orientation_backoff_threshold: 0.25
+    orientation_min_outcomes: 128
+    orientation_update_interval_logs: 10
+    # This is a recovery-focused continuation. Push-induced falls enter the
+    # recovery state machine immediately rather than waiting for locomotion.
+    in_episode_fall_recovery_progress: 0.0
     fall_detect_cos: 0.90
     upright_cos: 0.96
     upright_hold_seconds: 0.40
-    timeout_seconds: 2.5
-    final_timeout_seconds: 5.0
+    post_recovery_stability_seconds: 1.0
+    timeout_seconds: 8.0
+    final_timeout_seconds: 8.0
   termination_config:
     fall_termination: true
     nonwheel_contact_termination: true
@@ -167,6 +204,8 @@ reward:
     liangan5_contact_asymmetry: -4.0
     recovery_progress: 20.0
     recovery_upright: 4.0
+    recovery_orientation: -8.0
+    recovery_support: 0.5
     recovery_complete: 50.0
     alive: 0.10
   tracking_sigma: 0.30

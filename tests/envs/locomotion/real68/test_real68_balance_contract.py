@@ -210,6 +210,7 @@ def test_real68_recovery_zeros_commands_and_suppresses_fall_termination():
                 "fall_detect_cos": 0.9,
                 "upright_cos": 0.96,
                 "upright_hold_seconds": 0.04,
+                "post_recovery_stability_seconds": 0.04,
                 "timeout_seconds": 1.0,
             },
             "termination_config": {
@@ -243,6 +244,10 @@ def test_real68_recovery_zeros_commands_and_suppresses_fall_termination():
         assert env._recovery_active[0]
         env._update_recovery_state(info, upright_gravity)
         assert not env._recovery_active[0]
+        assert env._recovery_stabilizing[0]
+        assert not info["recovery_completed"][0]
+        env._update_recovery_state(info, upright_gravity)
+        assert not env._recovery_stabilizing[0]
         assert info["recovery_completed"][0]
         np.testing.assert_allclose(info["commands"], tracking)
 
@@ -281,6 +286,105 @@ def test_real68_recovery_reset_uses_configured_height_and_arbitrary_orientation(
         assert np.all(np.asarray(state.info["recovery_active"], dtype=bool))
         np.testing.assert_allclose(state.info["commands"], np.zeros((4, 3)))
         assert not np.allclose(np.asarray(env._backend.get_base_quat())[:, 1:3], np.zeros((4, 2)))
+    finally:
+        env.close()
+
+
+def test_real68_recovery_reset_uses_canonical_pose_bank():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {
+                "enabled": True,
+                "initial_base_height": 0.23,
+                "initial_recovery_probability": 1.0,
+                "orientation_curriculum": False,
+                "initial_pose_bank": [
+                    {"name": "prone", "roll": 0.0, "pitch": 1.0, "base_height": 0.14}
+                ],
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        state = env.init_state()
+        np.testing.assert_allclose(env._backend.get_base_pos()[:, 2], np.full((2,), 0.14))
+        assert np.all(np.asarray(state.info["recovery_active"], dtype=bool))
+        assert np.all(np.asarray(state.info["recovery_pose_ids"], dtype=np.int32) == 0)
+        assert not np.allclose(np.asarray(env._backend.get_base_quat())[:, 2], 0.0)
+    finally:
+        env.close()
+
+
+def test_real68_recovery_segment_does_not_update_command_curriculum(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        env._segment_steps[0] = 4
+        env._segment_recovery_seen[0] = True
+        recorded: list[dict] = []
+        monkeypatch.setattr(
+            env,
+            "_record_command_segment_stats",
+            lambda **kwargs: recorded.append(kwargs),
+        )
+
+        env._finalize_command_segments(np.asarray([0], dtype=np.int32))
+
+        assert recorded == []
+    finally:
+        env.close()
+
+
+def test_real68_recovery_orientation_curriculum_advances_and_backs_off_from_outcomes():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {
+                "enabled": True,
+                "orientation_stages": [0.15, 0.50, 1.0],
+                "orientation_min_outcomes": 2,
+                "orientation_update_interval_logs": 1,
+                "orientation_success_threshold": 0.75,
+                "orientation_backoff_threshold": 0.25,
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        completed = np.asarray([True, True])
+        timeout = np.asarray([False, False])
+        env._update_recovery_orientation_curriculum(completed, timeout)
+        assert env._recovery_orientation_stage == 1
+        assert env._recovery_orientation_scale() == pytest.approx(0.50)
+
+        env._recovery_orientation_stage_for_env[:] = 1
+        env._update_recovery_orientation_curriculum(~completed, completed)
+        assert env._recovery_orientation_stage == 0
     finally:
         env.close()
 

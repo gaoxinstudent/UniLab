@@ -976,6 +976,30 @@ def test_build_ppo_play_env_cfg_override_applies_g1_motion_tracking_play_profile
     assert env_cfg_override["reward_config"]["scales"]["motion_body_pos"] == pytest.approx(1.0)
 
 
+def test_real68_velocity_tracking_play_profile_forces_canonical_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mod = _train_rsl_rl(monkeypatch)
+    cfg = _ppo_cfg(["task=real68_balance_veltrack_flat/mujoco", "training.play_only=true"])
+
+    env_cfg_override = mod.build_ppo_play_env_cfg_override(cfg)
+
+    recovery = env_cfg_override["recovery"]
+    assert recovery["initial_recovery_probability"] == pytest.approx(1.0)
+    assert recovery["final_recovery_probability"] == pytest.approx(1.0)
+    assert recovery["orientation_curriculum"] is False
+    assert [pose["name"] for pose in recovery["initial_pose_bank"]] == [
+        "prone",
+        "supine",
+        "left_side",
+        "right_side",
+    ]
+
+    train_cfg = _ppo_cfg(["task=real68_balance_veltrack_flat/mujoco"])
+    assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.45)
+    assert train_cfg.env.recovery.orientation_curriculum is True
+
+
 def test_build_ppo_play_env_cfg_override_respects_cli_play_env_override(
     monkeypatch: pytest.MonkeyPatch,
 ):
