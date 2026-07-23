@@ -1,0 +1,321 @@
+# @package _global_
+# Single Sim2Real owner: self-righting, balance, velocity tracking, and
+# flat/rough terrain share one actor and one checkpoint lineage.
+training:
+  task_name: Real68Balance
+  sim_backend: mujoco
+  play_env_num: 16
+  play_steps: 200
+  render_spacing: 0.60
+  cam_distance: 3.6
+  cam_elevation: -18.0
+  cam_azimuth: 110.0
+  cam_tracking: true
+  cam_tracking_env_idx: 12
+  cam_tracking_extra_envs: 24
+
+play_profile:
+  enabled: true
+  env:
+    commands:
+      vel_limit:
+        - [-0.8, 0.0, -2.5]
+        - [1.2, 0.0, 2.5]
+      resampling_time: 1.5
+      rel_standing_envs: 0.0
+    command_curriculum:
+      enabled: false
+    domain_rand:
+      randomize_init_yaw: true
+      reset_qvel_limit: 0.10
+    # Play and evaluation always reset upright. Runtime falls can still enter
+    # the recovery state machine.
+    recovery:
+      enabled: true
+      initial_base_height: 0.25623
+      initial_recovery_probability: 0.0
+      final_recovery_probability: 0.0
+      orientation_curriculum: false
+      fall_detect_cos: 0.90
+      upright_cos: 0.96
+      upright_hold_seconds: 0.40
+      post_recovery_stability_seconds: 2.0
+      timeout_seconds: 8.0
+      final_timeout_seconds: 8.0
+
+algo:
+  # Keep the original 78.6M-step budget while using a larger batch for higher
+  # MuJoCo throughput. Eight mini-batches preserve the previous 24,576-sample
+  # mini-batch size and total optimizer update count across 400 iterations.
+  num_envs: 8192
+  max_iterations: 400
+  runner_class_name: unilab.algos.torch.him_ppo.runner:HIMOnPolicyRunner
+  num_one_step_obs: 28
+  num_actor_history: 5
+  num_critic_history: 1
+  empirical_normalization: true
+  obs_groups:
+    actor:
+      - actor
+    critic:
+      - critic
+  policy:
+    # Direct wheel velocity control amplifies sampled action noise by 28. Keep
+    # the initial policy near the zero-action physical baseline so PPO can
+    # discover balance feedback before exploring high wheel speeds.
+    init_noise_std: 0.08
+    # Preserve enough exploration to adapt after command/terrain promotion.
+    min_noise_std: 0.06
+    actor_output_gain: 0.01
+    actor_hidden_dims: [256, 128, 64]
+    critic_hidden_dims: [256, 128, 64]
+    activation: elu
+  estimator:
+    enc_hidden_dims: [128, 64]
+    tar_hidden_dims: [64]
+    latent_dim: 0
+    learning_rate: 1.0e-3
+    velocity_target_start: 0
+    target_obs_start: 3
+  algorithm:
+    learning_rate: 1.0e-4
+    entropy_coef: 3.0e-3
+    num_mini_batches: 8
+
+env:
+  # Benchmarked on the 48-core/96-thread EPYC training host.
+  mujoco_num_threads: 64
+  adaptive_chunk_size: false
+  chunk_size: 12
+  scene:
+    terrain:
+      hfield_name: terrain_hfield
+      geom_name: floor
+      generator:
+        seed: 42
+        curriculum: true
+        size: [8.0, 8.0]
+        num_rows: 6
+        num_cols: 8
+        border_width: 20.0
+  observation_schema: real68_balance_v2
+  action_schema: real68_direct_mixed_v1
+  history:
+    num_actor_history: 5
+    num_critic_history: 1
+  control_config:
+    hip_velocity_scale: 5.0
+    wheel_velocity_scale: 28.0
+    calf_action_scale: 0.40
+    hip_kd: 2.0
+    wheel_kd: 0.45
+    calf_kp: 50.0
+    calf_kd: 4.0
+  commands:
+    vel_limit:
+      - [-0.8, 0.0, -1.5]
+      - [1.32, 0.0, 1.5]
+    # Keep each command long enough for the direct controller to settle and
+    # for curriculum evaluation to observe sustained tracking.
+    resampling_time: 4.0
+    rel_standing_envs: 0.05
+  command_curriculum:
+    enabled: true
+    initial_vel_limit:
+      - [0.0, 0.0, -0.4]
+      - [0.35, 0.0, 0.4]
+    final_vel_limit:
+      - [-1.2, 0.0, -3.0]
+      - [1.4, 0.0, 3.0]
+    # Separate forward-speed, yaw, reverse, and terrain difficulty transitions.
+    vx_step: 0.025
+    vx_step_down: 0.025
+    yaw_step: 0.01
+    yaw_step_down: 0.025
+    yaw_unlock_vx_progress: 0.40
+    reverse_unlock_vx_progress: 0.55
+    terrain_unlock_vx_progress: 0.90
+    min_speed_ratio: 0.50
+    min_speed_ratio_down: 0.25
+    vx_error_range: [0.35, 0.55, 0.90]
+    max_vx_error: 0.70
+    max_wz_error: 0.75
+    max_wz_error_high: 1.50
+    max_tilt_rate: 0.015
+    max_tilt_rate_high: 0.05
+    max_tilt_angle_deg: 6.0
+    max_tilt_angle_deg_high: 10.0
+    max_height_violation_rate: 0.01
+    max_height_violation_rate_high: 0.03
+    max_nonwheel_contact_rate: 0.01
+    max_nonwheel_contact_rate_high: 0.03
+    min_segment_count: 96
+    update_interval_logs: 24
+    standing_bootstrap_enabled: true
+    # Do not unlock motion from a low squat: first hold physical clearance
+    # near the sampled height command without any nonwheel contact.
+    standing_bootstrap_min_segments: 128
+    standing_bootstrap_min_segment_steps: 100
+    standing_bootstrap_max_abs_vx: 0.08
+    standing_bootstrap_max_wz_error: 0.25
+    standing_bootstrap_max_nonwheel_contact: 0.01
+    standing_bootstrap_min_base_height: 0.225
+    standing_bootstrap_max_height_error: 0.025
+    standing_prob_initial: 0.10
+    standing_prob_final: 0.10
+    standing_decay_vx_progress: 0.8
+    straight_command_prob: 0.35
+    yaw_only_command_prob: 0.20
+    yaw_only_max_abs_vx: 0.08
+    high_speed_command_prob: 0.10
+    high_speed_min_abs_vx: 0.9
+    high_speed_unlock_vx_progress: 0.90
+  height_command:
+    # Height is command-relative because the physical robot has no height sensor.
+    # Do not ask the bootstrap policy to trade clearance against a random
+    # height. Learn one mechanically safe standing geometry first.
+    range: [0.24, 0.24]
+    speed_lift_gain: 0.0
+    max_speed_lift: 0.0
+    observation_reference_height: 0.24
+  terrain_scan:
+    enabled: true
+    hfield_name: terrain_hfield
+    geom_name: floor
+  terrain_curriculum:
+    enabled: true
+    bootstrap_type: flat
+    promote_frac: 0.20
+    demote_frac: 0.25
+    performance_gating: true
+    max_vx_error: 0.45
+    max_tilt_rate: 0.05
+    max_nonwheel_contact_rate: 0.03
+  domain_rand:
+    reset_roll_range: [0.0, 0.0]
+    reset_pitch_range: [0.0, 0.0]
+    randomize_ground_friction: true
+    ground_friction_multiplier_range: [0.85, 1.15]
+    randomize_base_mass: true
+    added_mass_range: [-0.15, 0.15]
+    random_com: true
+    com_offset_x: [-0.01, 0.01]
+    com_offset_y: [-0.01, 0.01]
+    com_offset_z: [-0.01, 0.01]
+    randomize_control_kp: true
+    kp_multiplier_range: [0.9, 1.1]
+    randomize_control_kd: true
+    kd_multiplier_range: [0.9, 1.1]
+    randomize_motor_strength: true
+    motor_strength_range: [0.9, 1.1]
+    randomize_action_delay: true
+    action_delay_steps: [0, 1]
+    reset_qvel_limit: 0.10
+    push_robots: true
+    push_interval: 250
+    max_force: [1.2, 1.2, 0.6]
+  domain_rand_curriculum:
+    enabled: true
+    stages: [0.0, 0.35, 0.70, 1.0]
+  sensor:
+    use_wheel_odometry: true
+  recovery:
+    enabled: true
+    initial_base_height: 0.25623
+    initial_recovery_probability: 0.0
+    final_recovery_probability: 0.0
+    orientation_curriculum: false
+    # Runtime falls enter recovery after the standing bootstrap completes.
+    in_episode_fall_recovery_progress: 0.0
+    # Bootstrap must measure true standing survival, not recovery occupancy.
+    allow_during_standing_bootstrap: false
+    fall_detect_cos: 0.90
+    upright_cos: 0.96
+    upright_hold_seconds: 0.40
+    post_recovery_stability_seconds: 2.0
+    timeout_seconds: 8.0
+    final_timeout_seconds: 8.0
+  termination_config:
+    terrain_out_of_bounds: true
+    terrain_distance_buffer: 3.0
+    fall_termination: true
+    min_up_proj: 0.20
+    min_base_height: 0.12
+    nonwheel_contact_termination: true
+    nonwheel_contact_threshold: 0.5
+    # Give the policy 1 s to regain balance after transient base contact while
+    # continuous contact penalties still discourage sustained contact.
+    nonwheel_contact_max_steps: 50
+
+reward:
+  scales:
+    tracking_lin_vel: 0.8
+    tracking_ang_vel: 0.5
+    balanced_tracking_lin_vel: 2.6
+    balanced_tracking_ang_vel: 1.8
+    forward_progress: 1.1
+    net_progress: 6.0
+    under_speed: -3.0
+    drive_wheel_command: 0.8
+    reverse_motion: -2.5
+    yaw_rate_when_uncommanded: -2.0
+    heading_stability: -1.5
+    lateral_drift: -1.2
+    height_tracking: 1.0
+    height_safety: -6.0
+    under_height: -8.0
+    orientation: -24.0
+    tilt_termination: -25.0
+    lin_vel_z: -2.0
+    ang_vel_xy: -1.2
+    posture: -1.0
+    leg_symmetry: -3.0
+    drive_action_symmetry: -0.5
+    calf_action_symmetry: -3.0
+    standing_lin_vel: -5.0
+    standing_wheel_action: -1.0
+    standing_under_height: -8.0
+    standing_liangan5_contact: -8.0
+    standing_orientation: -8.0
+    standing_posture: -4.0
+    standing_leg_symmetry: -6.0
+    action_rate: -0.004
+    joint_pos_penalty: -0.4
+    nonwheel_contact: -8.0
+    nonwheel_contact_termination: -50.0
+    liangan5_contact: -3.0
+    liangan5_contact_asymmetry: -4.0
+    recovery_progress: 20.0
+    recovery_upright: 0.0
+    recovery_orientation: -8.0
+    recovery_support: 0.0
+    recovery_sweep: 0.0
+    recovery_pull: 30.0
+    recovery_rise: 0.0
+    recovery_complete: 50.0
+    alive: 0.10
+  tracking_sigma: 0.30
+  height_tracking_sigma: 0.02
+  height_safety_margin: 0.02
+  base_height_target: 0.24
+  min_base_height: 0.22
+  max_base_height: 0.40
+  max_tilt_cos: 0.90
+  command_lean:
+    enabled: true
+    gravity_x_gain: -0.06
+    gravity_x_limit: 0.08
+    hip_gain: 0.03
+    hip_limit: 0.04
+    calf_gain: 0.03
+    calf_limit: 0.05
+  balance_gate:
+    enabled: true
+    upright_cos_min: 0.80
+    upright_cos_full: 0.96
+    straight_command_yaw_threshold: 0.25
+    moving_command_vx_threshold: 0.10
+    heading_error_limit: 0.30
+    lateral_drift_limit: 0.30
+    yaw_tracking_sigma: 0.75
+    standing_roll_pitch_sigma: 0.03

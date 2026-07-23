@@ -63,6 +63,15 @@ class NpEnv(ABEnv):
     def state(self) -> Optional[NpEnvState]:
         return self._state
 
+    def training_state_dict(self) -> dict[str, Any]:
+        return {"version": 1, "step_counter": int(self.step_counter)}
+
+    def load_training_state_dict(self, state: dict[str, Any]) -> None:
+        version = int(state.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported NpEnv training state version: {version}")
+        self.step_counter = int(state["step_counter"])
+
     @property
     def obs_groups_spec(self) -> dict[str, int]:
         """Return observation group dimensions, e.g. {"obs": 98, "critic": 101}.

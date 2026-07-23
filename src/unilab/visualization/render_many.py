@@ -7,71 +7,22 @@ for Motrix-only workflows.
 
 import math
 import os
-import subprocess
 import sys
-import textwrap
 from collections.abc import Sequence
 from typing import Any
 
 import imageio
 
-_USER_MUJOCO_GL = os.environ.get("MUJOCO_GL")
-
-# Backend-agnostic probe: build a tiny off-screen scene and render one frame.
-# Used to verify that a given MUJOCO_GL backend (egl / osmesa / glfw / ...) can
-# actually create a rendering context on this host before we commit to it.
-_GL_PROBE_SCRIPT = textwrap.dedent(
-    '''
-    import mujoco
-
-    xml = """
-    <mujoco>
-      <worldbody>
-        <geom type="box" size="0.1 0.1 0.1" rgba="0 1 0 1"/>
-      </worldbody>
-    </mujoco>
-    """
-
-    model = mujoco.MjModel.from_xml_string(xml)
-    data = mujoco.MjData(model)
-    renderer = mujoco.Renderer(model, height=8, width=8)
-    mujoco.mj_forward(model, data)
-    renderer.update_scene(data)
-    renderer.render()
-    renderer.close()
-    '''
+from unilab.base.backend.mujoco.gl import (
+    gl_backend_runtime_usable as _shared_gl_backend_runtime_usable,
+)
+from unilab.base.backend.mujoco.gl import (
+    resolve_mujoco_gl_backend,
 )
 
 
 def _gl_backend_runtime_usable(backend: str) -> bool:
-    """Return True if *backend* can create and render an off-screen MuJoCo scene.
-
-    The probe runs in a clean subprocess so a broken / half-initialized GL driver
-    cannot corrupt or crash this process.
-    """
-    if not backend:
-        return False
-
-    env = os.environ.copy()
-    env["MUJOCO_GL"] = backend
-    if backend == "egl":
-        env.setdefault("MUJOCO_EGL_DEVICE_ID", "0")
-
-    try:
-        subprocess.run(
-            [sys.executable, "-c", _GL_PROBE_SCRIPT],
-            env=env,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-    if backend == "egl":
-        os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", env["MUJOCO_EGL_DEVICE_ID"])
-    return True
+    return _shared_gl_backend_runtime_usable(backend)
 
 
 def _egl_runtime_usable() -> bool:
@@ -83,39 +34,14 @@ def _resolve_gl_backend() -> str:
     """Pick a valid MUJOCO_GL backend for the current platform.
 
     Respects an explicit user setting unless it's provably invalid for the
-    platform. Prefers GPU-backed EGL, then software OSMesa on Linux headless
-    hosts. ``glfw`` is only gated on ``DISPLAY`` for Linux because Windows and
-    macOS do not use that X11 signal.
+    platform. Prefers GPU-backed EGL, then software OSMesa for Linux off-screen
+    rendering. GLFW is only used on Linux when explicitly requested; otherwise
+    flaky X11/SSH displays can abort the process with fatal BadWindow errors.
     """
-    current = os.environ.get("MUJOCO_GL", "")
-
-    if sys.platform == "darwin":
-        # macOS has no EGL/OSMesa support in the mujoco Python package.
-        return current if current in {"glfw", "disabled"} else "glfw"
-
-    if sys.platform == "win32":
-        # Windows has no DISPLAY and the mujoco Python package rejects egl and
-        # osmesa here. GLFW can still create an off-screen renderer.
-        return current if current in {"glfw", "disabled"} else "glfw"
-
-    # Linux / other: honour explicit non-egl choices supplied before import.
-    if current in {"glfw", "osmesa", "disabled"} and current == _USER_MUJOCO_GL:
-        return current
-
-    # Probe EGL by creating a tiny MuJoCo renderer in a clean subprocess.
-    if _egl_runtime_usable():
-        return "egl"
-
-    # No EGL. On a headless host glfw cannot work (it needs an X11 display), so
-    # prefer software rendering. We return "osmesa" even when its presence is
-    # unverified here: it is the only headless-capable backend, and the playback
-    # pre-flight check (render_backend_usable) turns an unusable backend into a
-    # single clear warning instead of a GLFW failure that respawns workers.
-    if not os.environ.get("DISPLAY"):
-        return "osmesa"
-
-    # A display is available; glfw can create an off-screen context.
-    return "glfw"
+    return resolve_mujoco_gl_backend(
+        platform=sys.platform,
+        egl_runtime_usable_fn=_egl_runtime_usable,
+    )
 
 
 # Must be set *before* importing mujoco (it reads the var at import time)

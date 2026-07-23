@@ -46,8 +46,8 @@ def test_resolve_gl_backend_uses_osmesa_when_headless_and_egl_unavailable(monkey
     assert render_many._resolve_gl_backend() == "osmesa"
 
 
-def test_resolve_gl_backend_uses_glfw_when_display_present_and_egl_unavailable(monkeypatch) -> None:
-    # A display is available: glfw can create an off-screen context.
+def test_resolve_gl_backend_uses_osmesa_when_display_present_and_egl_unavailable(monkeypatch) -> None:
+    # Offline video rendering should not depend on X11/GLFW unless explicitly requested.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("MUJOCO_GL", raising=False)
     monkeypatch.setenv("DISPLAY", ":0")
@@ -55,17 +55,18 @@ def test_resolve_gl_backend_uses_glfw_when_display_present_and_egl_unavailable(m
     render_many = _reload_render_many(monkeypatch)
     monkeypatch.setattr(render_many, "_egl_runtime_usable", lambda: False)
 
-    assert render_many._resolve_gl_backend() == "glfw"
+    assert render_many._resolve_gl_backend() == "osmesa"
 
 
-def test_resolve_gl_backend_preserves_explicit_safe_value(monkeypatch) -> None:
+@pytest.mark.parametrize("backend", ["osmesa", "glfw"])
+def test_resolve_gl_backend_preserves_explicit_linux_backend(monkeypatch, backend) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("MUJOCO_GL", "osmesa")
+    monkeypatch.setenv("MUJOCO_GL", backend)
 
     render_many = _reload_render_many(monkeypatch)
     monkeypatch.setattr(render_many, "_egl_runtime_usable", lambda: False)
 
-    assert render_many._resolve_gl_backend() == "osmesa"
+    assert render_many._resolve_gl_backend() == backend
 
 
 def test_resolve_gl_backend_uses_glfw_on_windows_without_display(monkeypatch) -> None:
@@ -90,6 +91,8 @@ def test_resolve_gl_backend_rejects_linux_only_backend_on_windows(monkeypatch) -
 
 def test_egl_runtime_usable_sets_default_device_id(monkeypatch) -> None:
     render_many = _reload_render_many(monkeypatch)
+    from unilab.base.backend.mujoco import gl as mujoco_gl
+
     monkeypatch.delenv("MUJOCO_EGL_DEVICE_ID", raising=False)
 
     def _fake_run(cmd, env, check, stdout, stderr, timeout):
@@ -102,7 +105,7 @@ def test_egl_runtime_usable_sets_default_device_id(monkeypatch) -> None:
         assert timeout == 10
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setattr(render_many.subprocess, "run", _fake_run)
+    monkeypatch.setattr(mujoco_gl.subprocess, "run", _fake_run)
 
     assert render_many._egl_runtime_usable() is True
     assert os.environ["MUJOCO_EGL_DEVICE_ID"] == "0"
@@ -110,11 +113,12 @@ def test_egl_runtime_usable_sets_default_device_id(monkeypatch) -> None:
 
 def test_egl_runtime_usable_returns_false_on_probe_failure(monkeypatch) -> None:
     render_many = _reload_render_many(monkeypatch)
+    from unilab.base.backend.mujoco import gl as mujoco_gl
 
     def _fake_run(*args, **kwargs):
         raise subprocess.CalledProcessError(1, args[0])
 
-    monkeypatch.setattr(render_many.subprocess, "run", _fake_run)
+    monkeypatch.setattr(mujoco_gl.subprocess, "run", _fake_run)
 
     assert render_many._egl_runtime_usable() is False
 

@@ -131,6 +131,9 @@ env:
   # (cache-backed). chunk_size (int) manually overrides and wins; null => use default.
   adaptive_chunk_size: true
   chunk_size: null
+  # Optional MuJoCo BatchEnvPool worker count. On large NUMA CPUs benchmark
+  # 32/48/64/96 instead of relying on the backend's automatic choice.
+  mujoco_num_threads: null
 
 hydra:
   run:

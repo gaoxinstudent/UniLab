@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from collections import deque
 from typing import Any, Callable, cast
 
@@ -68,6 +69,13 @@ class HIMOnPolicyRunner:
             critic_hidden_dims=list(policy_cfg.get("critic_hidden_dims", [512, 256, 128])),
             activation=str(policy_cfg.get("activation", "elu")),
             init_noise_std=float(policy_cfg.get("init_noise_std", 1.0)),
+            min_noise_std=float(policy_cfg.get("min_noise_std", 0.0)),
+            actor_output_gain=(
+                None
+                if policy_cfg.get("actor_output_gain") is None
+                else float(policy_cfg["actor_output_gain"])
+            ),
+            empirical_normalization=bool(cfg.get("empirical_normalization", False)),
             estimator=estimator_cfg,
         ).to(device)
 
@@ -124,6 +132,7 @@ class HIMOnPolicyRunner:
 
         for it in range(start_iter, tot_iter):
             infos: dict[str, Any] = {}
+            collection_start = time.time()
             # ── Rollout collection ───────────────────────────────────────────
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -149,9 +158,12 @@ class HIMOnPolicyRunner:
                     critic_obs = next_critic_obs
 
                 self.alg.compute_returns(critic_obs)
+            collection_time = time.time() - collection_start
 
             # ── Update ───────────────────────────────────────────────────────
+            learning_start = time.time()
             value_loss, surrogate_loss, estimation_loss, swap_loss = self.alg.update()
+            learning_time = time.time() - learning_start
 
             self.current_learning_iteration = it + 1
             self.logger.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -166,6 +178,8 @@ class HIMOnPolicyRunner:
                 estimation_loss,
                 swap_loss,
                 elapsed,
+                collection_time,
+                learning_time,
                 infos,
             )
             if self._writer is not None:
@@ -174,6 +188,11 @@ class HIMOnPolicyRunner:
                 self._writer.add_scalar("train/surrogate_loss", surrogate_loss, global_step)
                 self._writer.add_scalar("train/estimation_loss", estimation_loss, global_step)
                 self._writer.add_scalar("train/swap_loss", swap_loss, global_step)
+                self._writer.add_scalar(
+                    "train/action_std",
+                    float(self.actor_critic.std.detach().mean().item()),
+                    global_step,
+                )
                 for k, v in (infos.get("log") or {}).items():
                     self._writer.add_scalar(k, v, global_step)
 
@@ -195,17 +214,75 @@ class HIMOnPolicyRunner:
                 "actor_state_dict": self.actor_critic.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
                 "iteration": self.current_learning_iteration,
+                "runner_state": {
+                    "version": 1,
+                    "tot_timesteps": int(self.logger.tot_timesteps),
+                    "reward_buffer": list(self.logger.rewbuffer),
+                    "length_buffer": list(self.logger.lenbuffer),
+                },
+                "env_state": self.env.training_state_dict(),
             },
             path,
         )
 
-    def load(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device, weights_only=True)
-        self.actor_critic.load_state_dict(ckpt["actor_state_dict"])
+    def load(
+        self,
+        path: str,
+        map_location: str | None = None,
+        *,
+        restore_training_state: bool = True,
+    ) -> None:
+        ckpt = torch.load(path, map_location=map_location or self.device, weights_only=True)
+        incompatible = self.actor_critic.load_state_dict(ckpt["actor_state_dict"], strict=False)
+        normalizer_missing = any(
+            key.startswith(("actor_obs_normalizer.", "critic_obs_normalizer."))
+            for key in incompatible.missing_keys
+        )
+        if normalizer_missing:
+            self.actor_critic.disable_empirical_normalization()
+            warnings.warn(
+                "Loaded a legacy HIM checkpoint without observation normalizer state; "
+                "normalization remains disabled to preserve the policy's raw-observation semantics.",
+                stacklevel=2,
+            )
+        missing = [
+            key
+            for key in incompatible.missing_keys
+            if not key.startswith(("actor_obs_normalizer.", "critic_obs_normalizer."))
+        ]
+        if missing or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "Incompatible HIM actor checkpoint: "
+                f"missing_keys={missing}, unexpected_keys={incompatible.unexpected_keys}"
+            )
         if "optimizer_state_dict" in ckpt:
             self.alg.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if "iteration" in ckpt:
             self.current_learning_iteration = int(ckpt["iteration"])
+        self.actor_critic.clamp_action_std_()
+        if restore_training_state:
+            self._load_runner_state(ckpt.get("runner_state"))
+            env_state = ckpt.get("env_state")
+            if env_state is None:
+                warnings.warn(
+                    "Loaded a legacy HIM checkpoint without env_state; training curricula "
+                    "will restart from config defaults.",
+                    stacklevel=2,
+                )
+            else:
+                self.env.load_training_state_dict(env_state)
+
+    def _load_runner_state(self, state: dict[str, Any] | None) -> None:
+        if state is None:
+            return
+        version = int(state.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported HIM runner state version: {version}")
+        self.logger.tot_timesteps = int(state.get("tot_timesteps", 0))
+        self.logger.rewbuffer.clear()
+        self.logger.rewbuffer.extend(float(value) for value in state.get("reward_buffer", ()))
+        self.logger.lenbuffer.clear()
+        self.logger.lenbuffer.extend(float(value) for value in state.get("length_buffer", ()))
 
     def get_inference_policy(self, device: str | None = None) -> Callable[..., Any]:
         self.actor_critic.eval()
@@ -260,12 +337,14 @@ class HIMOnPolicyRunner:
         class _PolicyExport(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
+                self.actor_obs_normalizer = ac.actor_obs_normalizer
                 self.estimator = ac.estimator
                 self.actor_mlp = ac.actor
 
             def forward(self, obs_history: torch.Tensor) -> torch.Tensor:
+                obs_history = self.actor_obs_normalizer(obs_history)
                 vel, latent = self.estimator.get_latent(obs_history)
-                actor_input = torch.cat((obs_history[:, :num_one_step_obs], vel, latent), dim=-1)
+                actor_input = torch.cat((obs_history[:, -num_one_step_obs:], vel, latent), dim=-1)
                 return self.actor_mlp(actor_input)
 
         model = _PolicyExport().eval()
@@ -289,6 +368,8 @@ class HIMOnPolicyRunner:
         estimation_loss: float,
         swap_loss: float,
         elapsed: float,
+        collection_time: float,
+        learning_time: float,
         infos: dict,
     ) -> None:
         sep = "-" * 80
@@ -305,12 +386,20 @@ class HIMOnPolicyRunner:
         time_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
         eta = elapsed / it * (tot - it) if it > 0 else 0.0
         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta))
+        iteration_time = collection_time + learning_time
+        steps_per_second = int(
+            self.num_steps_per_env * self.env.num_envs / max(iteration_time, 1.0e-9)
+        )
         print(sep)
         print(f"{'Iteration':>40}: {it}/{tot}")
+        print(f"{'Steps per second':>40}: {steps_per_second}")
+        print(f"{'Collection time':>40}: {collection_time:.3f}s")
+        print(f"{'Learning time':>40}: {learning_time:.3f}s")
         print(f"{'Mean value loss':>40}: {value_loss:.4f}")
         print(f"{'Mean surrogate loss':>40}: {surrogate_loss:.4f}")
         print(f"{'Mean estimation loss':>40}: {estimation_loss:.4f}")
         print(f"{'Mean swap loss':>40}: {swap_loss:.4f}")
+        print(f"{'Mean action std':>40}: {self.actor_critic.std.mean().item():.4f}")
         if mean_rew:
             print(f"{'Mean episode reward':>40}: {mean_rew:.4f}")
         if mean_len:

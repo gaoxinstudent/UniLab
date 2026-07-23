@@ -24,16 +24,17 @@ def test_real68_rough_env_reset_and_step_contract():
     )
     try:
         state = env.init_state()
-        critic_dim = 45 + env._height_scan_dim
+        critic_dim = 59 + env._height_scan_dim
         assert env._height_scan_dim > 0
+        assert env.get_playback_root_xy_offsets().shape == (2, 2)
         assert set(state.obs) == {"obs", "critic"}
-        assert state.obs["obs"].shape == (2, 32)
+        assert state.obs["obs"].shape == (2, 28)
         assert state.obs["critic"].shape == (2, critic_dim)
         reset_obs, _ = env.reset(np.asarray([0], dtype=np.int32))
-        assert reset_obs["obs"].shape == (1, 32)
+        assert reset_obs["obs"].shape == (1, 28)
         assert reset_obs["critic"].shape == (1, critic_dim)
         step_state = env.step(np.zeros((2, 6), dtype=np.float32))
-        assert step_state.obs["obs"].shape == (2, 32)
+        assert step_state.obs["obs"].shape == (2, 28)
         assert step_state.obs["critic"].shape == (2, critic_dim)
         assert step_state.reward.shape == (2,)
         assert step_state.terminated.shape == (2,)
@@ -45,6 +46,22 @@ def test_real68_rough_env_reset_and_step_contract():
         assert "terrain_curriculum/mean_level" in log
     finally:
         env.close()
+
+
+def test_real68_rough_rejects_unimplemented_nonzero_reward():
+    ensure_registries()
+    with pytest.raises(ValueError, match="no implementation for: missing_reward"):
+        registry.make(
+            "Real68BalanceRough",
+            num_envs=1,
+            sim_backend="mujoco",
+            env_cfg_override={
+                "reward_config": {
+                    "scales": {"missing_reward": 1.0},
+                    "tracking_sigma": 0.25,
+                },
+            },
+        )
 
 
 def test_real68_rough_curriculum_logs_appear_after_done():
@@ -78,6 +95,49 @@ def test_real68_rough_curriculum_logs_appear_after_done():
             "terrain_curriculum/num_skipped",
         ):
             assert key in log
+    finally:
+        env.close()
+
+
+def test_real68_terrain_types_stay_flat_until_unlock_and_switch_on_reset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceRough",
+        num_envs=3,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "terrain_curriculum": {"enabled": True, "bootstrap_type": "flat"},
+            "command_curriculum": {
+                "enabled": True,
+                "terrain_unlock_vx_progress": 0.8,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        assert env._terrain_bootstrap_type_col == 0
+        np.testing.assert_array_equal(env._spawn.type_cols, [0, 0, 0])
+        assert np.all(env._terrain_type_pending_unlock)
+
+        monkeypatch.setattr(
+            env._spawn,
+            "_sample_type_cols",
+            lambda count: np.full((count,), 2, dtype=np.int32),
+        )
+        env._command_curriculum_vx_progress = 0.8
+        env._before_autoreset(np.asarray([True, False, False]))
+        np.testing.assert_array_equal(env._spawn.type_cols, [2, 0, 0])
+        np.testing.assert_array_equal(env._terrain_type_pending_unlock, [False, True, True])
+
+        env._command_curriculum_vx_progress = 0.0
+        env._before_autoreset(np.asarray([True, False, False]))
+        np.testing.assert_array_equal(env._spawn.type_cols, [0, 0, 0])
+        assert np.all(env._terrain_type_pending_unlock)
     finally:
         env.close()
 

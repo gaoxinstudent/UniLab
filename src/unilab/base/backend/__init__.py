@@ -17,6 +17,7 @@ def env_backend_kwargs(cfg: "EnvCfg") -> dict:
         "motrix_max_iterations": cfg.motrix_max_iterations,
         "chunk_size": cfg.chunk_size,
         "adaptive_chunk_size": cfg.adaptive_chunk_size,
+        "num_threads": cfg.mujoco_num_threads,
         "bench_nsteps": cfg.sim_substeps,
     }
 
@@ -88,6 +89,7 @@ def create_backend(
     post_step_forward_sensor = kwargs.pop("post_step_forward_sensor", None)
     chunk_size = kwargs.pop("chunk_size", None)
     adaptive_chunk_size = kwargs.pop("adaptive_chunk_size", False)
+    num_threads = kwargs.pop("num_threads", None)
     bench_nsteps = kwargs.pop("bench_nsteps", 1)
     if backend_type == "mujoco":
         MuJoCoBackend = _load_mujoco_backend()
@@ -97,6 +99,7 @@ def create_backend(
             kwargs["post_step_forward_sensor"] = post_step_forward_sensor
         kwargs["chunk_size"] = chunk_size
         kwargs["adaptive_chunk_size"] = adaptive_chunk_size
+        kwargs["num_threads"] = num_threads
         kwargs["bench_nsteps"] = bench_nsteps
         return cast(SimBackend, MuJoCoBackend(scene, num_envs, sim_dt, **kwargs))
     if backend_type == "motrix":

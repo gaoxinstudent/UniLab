@@ -34,7 +34,15 @@ WARNING_LIST: list[str] = [
 
 DENYLIST: list[str] = [
     "algo.obs_groups",
+    "algo.runner_class_name",
+    "algo.num_one_step_obs",
+    "algo.num_actor_history",
+    "algo.num_critic_history",
+    "algo.estimator",
     "env.control_config",
+    "env.observation_schema",
+    "env.action_schema",
+    "env.history",
     # Kept for legacy run_config.json files written before env.control_config was
     # captured as a whole.
     "env.control_config.action_scale",

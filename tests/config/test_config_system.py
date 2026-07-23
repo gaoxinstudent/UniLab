@@ -410,12 +410,19 @@ def test_ppo_go2w_mujoco_uses_motor_owner_dr_path():
     assert cfg.reward.scales.torques < 0.0
 
 
-def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
-    cfg = _compose("ppo", overrides=["task=real68_balance_veltrack_flat/mujoco"])
+def test_ppo_real68_balance_uses_single_sim2real_owner():
+    cfg = _compose("ppo", overrides=["task=real68_balance/mujoco"])
 
-    assert cfg.training.task_name == "Real68BalanceFlat"
+    assert cfg.training.task_name == "Real68Balance"
     assert cfg.training.sim_backend == "mujoco"
     assert cfg.algo.num_envs == 8192
+    assert cfg.algo.max_iterations == 400
+    assert cfg.algo.algorithm.num_mini_batches == 8
+    assert cfg.env.mujoco_num_threads == 64
+    assert cfg.env.adaptive_chunk_size is False
+    assert cfg.env.chunk_size == 12
+    assert cfg.algo.policy.init_noise_std == pytest.approx(0.08)
+    assert cfg.algo.policy.actor_output_gain == pytest.approx(0.01)
     # Owner YAML deliberately does not bind a resume lineage; load_run/checkpoint
     # fall back to the structured-config defaults ("-1" / -1) and are passed
     # explicitly at train/eval time. See commit da69f9a3.
@@ -432,67 +439,87 @@ def test_ppo_real68_veltrack_flat_mujoco_uses_speed_tracking_owner():
     assert cfg.reward.scales.joint_pos_penalty == pytest.approx(-0.4)
     assert cfg.reward.scales.ang_vel_xy == pytest.approx(-1.2)
     assert cfg.reward.scales.orientation == pytest.approx(-24.0)
+    assert cfg.reward.scales.height_safety == pytest.approx(-6.0)
+    assert cfg.reward.scales.under_height == pytest.approx(-8.0)
+    assert cfg.reward.scales.nonwheel_contact == pytest.approx(-8.0)
+    assert cfg.reward.scales.posture == pytest.approx(-1.0)
+    assert cfg.reward.scales.leg_symmetry == pytest.approx(-3.0)
     assert cfg.reward.tracking_sigma == pytest.approx(0.30)
     assert cfg.reward.max_tilt_cos == pytest.approx(0.90)
-    assert cfg.reward.min_base_height == pytest.approx(0.16)
+    assert cfg.reward.min_base_height == pytest.approx(0.22)
+    assert cfg.reward.height_safety_margin == pytest.approx(0.02)
     assert cfg.reward.command_lean.enabled is True
     assert cfg.reward.command_lean.gravity_x_gain == pytest.approx(-0.06)
     assert cfg.reward.command_lean.hip_gain == pytest.approx(0.03)
     assert cfg.reward.command_lean.calf_gain == pytest.approx(0.03)
     assert cfg.reward.balance_gate.enabled is True
-    assert cfg.env.height_command.range == pytest.approx([0.22, 0.26])
-    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.23)
-    assert cfg.reward.base_height_target == pytest.approx(0.23)
+    assert cfg.env.height_command.range == pytest.approx([0.24, 0.24])
+    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.24)
+    assert cfg.reward.base_height_target == pytest.approx(0.24)
     assert cfg.env.recovery.enabled is True
-    assert cfg.env.recovery.initial_base_height == pytest.approx(0.23)
-    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.45)
-    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.45)
-    assert [pose["name"] for pose in cfg.env.recovery.initial_pose_bank] == [
-        "prone",
-        "supine",
-        "left_side",
-        "right_side",
-    ]
-    assert cfg.env.recovery.post_recovery_stability_seconds == pytest.approx(1.0)
+    assert cfg.env.recovery.initial_base_height == pytest.approx(0.25623)
+    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
+    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
+    assert "initial_pose_bank" not in cfg.env.recovery
+    assert "initial_joint_pose_bank" not in cfg.env.recovery
+    assert cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
+    assert cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
+    assert cfg.env.recovery.post_recovery_stability_seconds == pytest.approx(2.0)
     assert cfg.env.recovery.in_episode_fall_recovery_progress == pytest.approx(0.0)
+    assert cfg.env.recovery.allow_during_standing_bootstrap is False
     assert cfg.env.recovery.timeout_seconds == pytest.approx(8.0)
     assert cfg.env.recovery.final_timeout_seconds == pytest.approx(8.0)
     assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
+    assert cfg.reward.scales.recovery_upright == pytest.approx(0.0)
     assert cfg.reward.scales.recovery_orientation == pytest.approx(-8.0)
+    assert cfg.reward.scales.recovery_support == pytest.approx(0.0)
+    assert cfg.reward.scales.recovery_sweep == pytest.approx(0.0)
+    assert cfg.reward.scales.recovery_rise == pytest.approx(0.0)
     assert cfg.reward.scales.recovery_complete == pytest.approx(50.0)
     ccfg = cfg.env.command_curriculum
     assert ccfg.enabled is True
-    assert ccfg.initial_vel_limit == [[-0.8, 0.0, -1.5], [1.32, 0.0, 1.5]]
+    assert ccfg.initial_vel_limit == [[0.0, 0.0, -0.4], [0.35, 0.0, 0.4]]
     assert ccfg.final_vel_limit == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
-    assert ccfg.yaw_unlock_vx_progress == pytest.approx(0.0)
-    assert ccfg.reverse_unlock_vx_progress == pytest.approx(0.25)
-    assert ccfg.standing_bootstrap_enabled is False
+    assert ccfg.vx_step == pytest.approx(0.025)
+    assert ccfg.vx_step_down == pytest.approx(0.025)
+    assert ccfg.yaw_step == pytest.approx(0.01)
+    assert ccfg.yaw_step_down == pytest.approx(0.025)
+    assert ccfg.yaw_unlock_vx_progress == pytest.approx(0.40)
+    assert ccfg.reverse_unlock_vx_progress == pytest.approx(0.55)
+    assert ccfg.terrain_unlock_vx_progress == pytest.approx(0.90)
+    assert ccfg.standing_bootstrap_enabled is True
+    assert ccfg.standing_bootstrap_min_segments == 128
+    assert ccfg.standing_bootstrap_min_segment_steps == 100
+    assert ccfg.standing_bootstrap_min_base_height == pytest.approx(0.225)
+    assert ccfg.standing_bootstrap_max_height_error == pytest.approx(0.025)
     assert ccfg.standing_prob_initial == pytest.approx(0.10)
-    assert ccfg.standing_prob_final == pytest.approx(0.04)
+    assert ccfg.max_nonwheel_contact_rate == pytest.approx(0.01)
+    assert ccfg.max_nonwheel_contact_rate_high == pytest.approx(0.03)
+    assert ccfg.update_interval_logs == 24
+    assert ccfg.standing_prob_final == pytest.approx(0.10)
     assert ccfg.standing_decay_vx_progress == pytest.approx(0.8)
     assert ccfg.straight_command_prob == pytest.approx(0.35)
     assert ccfg.yaw_only_command_prob == pytest.approx(0.20)
-    assert ccfg.high_speed_command_prob == pytest.approx(0.35)
+    assert ccfg.high_speed_command_prob == pytest.approx(0.10)
+    assert ccfg.high_speed_min_abs_vx == pytest.approx(0.9)
+    assert ccfg.high_speed_unlock_vx_progress == pytest.approx(0.90)
     assert cfg.env.commands.rel_standing_envs == pytest.approx(0.05)
+    assert cfg.env.commands.resampling_time == pytest.approx(4.0)
+    assert cfg.env.termination_config.nonwheel_contact_max_steps == 50
     assert cfg.reward.scales.standing_orientation == pytest.approx(-8.0)
-    assert cfg.reward.scales.standing_posture == pytest.approx(-1.0)
-    assert cfg.reward.scales.standing_leg_symmetry == pytest.approx(-1.5)
+    assert cfg.reward.scales.standing_under_height == pytest.approx(-8.0)
+    assert cfg.reward.scales.standing_posture == pytest.approx(-4.0)
+    assert cfg.reward.scales.standing_leg_symmetry == pytest.approx(-6.0)
     assert cfg.reward.balance_gate.standing_roll_pitch_sigma == pytest.approx(0.03)
-
-
-def test_ppo_real68_rough_inherits_deployment_and_recovery_contract():
-    cfg = _compose("ppo", overrides=["task=real68_balance_rough/mujoco"])
-
-    assert cfg.env.control_config.wheel_velocity_scale == pytest.approx(28.0)
-    assert cfg.env.control_config.wheel_kd == pytest.approx(0.45)
-    assert cfg.env.control_config.calf_action_scale == pytest.approx(0.4)
-    assert cfg.env.control_config.calf_kp == pytest.approx(50.0)
-    assert cfg.env.height_command.range == pytest.approx([0.22, 0.26])
-    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.23)
-    assert cfg.env.recovery.enabled is True
-    assert cfg.env.recovery.initial_base_height == pytest.approx(0.23)
-    assert cfg.reward.base_height_target == pytest.approx(0.23)
-    assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
+    assert cfg.env.terrain_scan.enabled is True
+    assert cfg.env.terrain_curriculum.enabled is True
+    assert cfg.env.terrain_curriculum.bootstrap_type == "flat"
+    assert cfg.env.terrain_curriculum.performance_gating is True
+    assert cfg.env.scene.terrain.generator.num_rows == 6
+    assert cfg.algo.num_one_step_obs == 28
+    assert cfg.algo.num_actor_history == 5
+    assert cfg.algo.policy.min_noise_std == pytest.approx(0.06)
+    assert cfg.algo.algorithm.entropy_coef == pytest.approx(3.0e-3)
 
 
 def test_ppo_go2w_motrix_uses_motor_owner_dr_path():

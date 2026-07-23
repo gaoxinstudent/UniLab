@@ -20,7 +20,6 @@ from unilab.envs.locomotion.common.height_scan import (
     raw_height_scan_obs,
     terrain_out_of_bounds,
 )
-from unilab.envs.locomotion.common.rewards import RewardContext
 from unilab.envs.locomotion.common.terrain_spawn import (
     TerrainCurriculumCfg,
     TerrainSpawnManager,
@@ -41,6 +40,7 @@ from unilab.envs.locomotion.real68.balance import (
 from unilab.terrains import (
     SubTerrainCfg,
     TerrainGeneratorCfg,
+    flat,
     hf_pyramid_slope,
     hf_pyramid_slope_inv,
     pyramid_stairs,
@@ -95,6 +95,7 @@ class RoughTerminationConfig(FlatTerminationConfig):
 
 @dataclass(kw_only=True)
 class Real68RoughTerrainCfg(TerrainGeneratorCfg):
+    curriculum: bool = True
     size: tuple[float, float] = (8.0, 8.0)
     num_rows: int = 6
     num_cols: int = 6
@@ -104,40 +105,41 @@ class Real68RoughTerrainCfg(TerrainGeneratorCfg):
 
     sub_terrains: dict[str, SubTerrainCfg] = field(
         default_factory=lambda: {
+            "flat": flat(proportion=0.25),
             "pyramid_stairs": pyramid_stairs(
-                proportion=0.2,
+                proportion=0.15,
                 step_height_range=(0.01, 0.08),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "pyramid_stairs_inv": pyramid_stairs_inv(
-                proportion=0.2,
+                proportion=0.15,
                 step_height_range=(0.01, 0.08),
                 step_width=0.4,
                 platform_width=3.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope": hf_pyramid_slope(
-                proportion=0.2,
+                proportion=0.15,
                 slope_range=(0.0, 0.18),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
-                proportion=0.2,
+                proportion=0.15,
                 slope_range=(0.0, 0.18),
                 platform_width=2.0,
                 border_width=0.2,
             ),
             "random_rough": random_rough(
-                proportion=0.1,
+                proportion=0.075,
                 noise_range=(0.005, 0.03),
                 noise_step=0.01,
                 border_width=0.2,
             ),
             "wave_terrain": wave_terrain(
-                proportion=0.1,
+                proportion=0.075,
                 amplitude_range=(0.0, 0.06),
                 num_waves=4,
                 border_width=0.2,
@@ -172,6 +174,12 @@ class Real68BalanceRoughCfg(Real68BalanceCfg):
     domain_rand: Real68RoughDomainRandConfig = field(default_factory=Real68RoughDomainRandConfig)
 
 
+@registry.envcfg("Real68Balance")
+@dataclass
+class Real68BalanceUnifiedCfg(Real68BalanceRoughCfg):
+    """Single Sim2Real training owner spanning flat and rough terrain."""
+
+
 class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomizationProvider):
     def build_reset_plan(self, env: Any, env_ids: np.ndarray) -> ResetPlan:
         num_reset = len(env_ids)
@@ -192,22 +200,19 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         pitch = np.random.uniform(pitch_low, pitch_high, (num_reset,))
         yaw = np.random.uniform(yaw_low, yaw_high, (num_reset,))
         recovering = np.zeros((num_reset,), dtype=bool)
+        recovery_pose_ids = np.full((num_reset,), -1, dtype=np.int32)
         recovery_cfg = env.cfg.recovery
         recovery_probability = env._recovery_reset_probability()
         if recovery_cfg.enabled and recovery_probability > 0.0:
             recovering = np.random.uniform(size=(num_reset,)) < recovery_probability
             if np.any(recovering):
-                orientation_scale = env._recovery_orientation_scale()
-                roll_range = env._scaled_recovery_orientation_range(
-                    recovery_cfg.initial_roll_range, orientation_scale
+                recovery_roll, recovery_pitch, recovery_height, recovery_pose_ids = (
+                    env._sample_recovery_reset_poses(num_reset, recovering)
                 )
-                pitch_range = env._scaled_recovery_orientation_range(
-                    recovery_cfg.initial_pitch_range, orientation_scale
-                )
-                roll[recovering] = np.random.uniform(*roll_range, size=np.count_nonzero(recovering))
-                pitch[recovering] = np.random.uniform(
-                    *pitch_range, size=np.count_nonzero(recovering)
-                )
+                roll[recovering] = recovery_roll[recovering]
+                pitch[recovering] = recovery_pitch[recovering]
+                qpos[recovering, 2] = recovery_height[recovering]
+        recovery_joint_pose_ids = env._sample_recovery_joint_poses(qpos, recovering)
         qpos[:, 0:3] = env._spawn.apply_spawn(env_ids, qpos[:, 0:3], yaw=yaw)
         qpos[:, 3:7] = np_quat_mul(qpos[:, 3:7], np_quat_from_euler_xyz(roll, pitch, yaw))
         env._spawn.record_episode_start(env_ids, qpos[:, 0:3])
@@ -219,9 +224,61 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         )
 
         commands = env.sample_velocity_commands(num_reset)
+        if env._last_command_clip_scale.shape[0] == num_reset:
+            env._command_clip_scale[env_ids] = env._last_command_clip_scale
         height_commands = env.sample_height_commands(num_reset, commands=commands)
         effective_commands = commands.copy()
         effective_commands[recovering] = 0.0
+        dr_cfg = env.cfg.domain_rand
+        dr_scale = env._domain_rand_scale()
+        kp_scale = np.ones((num_reset, 1), dtype=get_global_dtype())
+        kd_scale = np.ones((num_reset, 1), dtype=get_global_dtype())
+        motor_strength = np.ones((num_reset, env._num_action), dtype=get_global_dtype())
+        action_delay_steps = np.zeros((num_reset, 1), dtype=get_global_dtype())
+        if dr_cfg.randomize_control_kp:
+            sampled = np.random.uniform(*dr_cfg.kp_multiplier_range, size=(num_reset, 1))
+            kp_scale[:] = 1.0 + dr_scale * (sampled - 1.0)
+        if dr_cfg.randomize_control_kd:
+            sampled = np.random.uniform(*dr_cfg.kd_multiplier_range, size=(num_reset, 1))
+            kd_scale[:] = 1.0 + dr_scale * (sampled - 1.0)
+        if dr_cfg.randomize_motor_strength:
+            sampled = np.random.uniform(
+                *dr_cfg.motor_strength_range, size=(num_reset, env._num_action)
+            )
+            motor_strength[:] = 1.0 + dr_scale * (sampled - 1.0)
+        if dr_cfg.randomize_action_delay:
+            low, high = (int(value) for value in dr_cfg.action_delay_steps)
+            sampled = np.random.randint(low, high + 1, size=(num_reset, 1))
+            action_delay_steps[:] = np.where(
+                np.random.uniform(size=(num_reset, 1)) < dr_scale, sampled, 0
+            )
+
+        randomization = build_common_reset_randomization(
+            env,
+            num_reset,
+            base_geom_friction=env._base_geom_friction,
+            ground_geom_id=env._ground_geom_id,
+        )
+        mass_delta = np.zeros((num_reset, 1), dtype=get_global_dtype())
+        com_offset = np.zeros((num_reset, 3), dtype=get_global_dtype())
+        ground_friction = np.full(
+            (num_reset, 1), env._base_geom_friction[env._ground_geom_id, 0], dtype=get_global_dtype()
+        )
+        if randomization is not None:
+            if randomization.base_mass_delta is not None:
+                randomization.base_mass_delta *= dr_scale
+                mass_delta[:, 0] = randomization.base_mass_delta
+            if randomization.base_com_offset is not None:
+                randomization.base_com_offset *= dr_scale
+                com_offset[:] = randomization.base_com_offset
+            if randomization.geom_friction is not None:
+                baseline = np.broadcast_to(
+                    env._base_geom_friction, randomization.geom_friction.shape
+                )
+                randomization.geom_friction[:] = baseline + dr_scale * (
+                    randomization.geom_friction - baseline
+                )
+                ground_friction[:, 0] = randomization.geom_friction[:, env._ground_geom_id, 0]
         info_updates = {
             "commands": effective_commands,
             "tracking_commands": commands,
@@ -229,10 +286,19 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
             "recovery_active": recovering,
             "recovery_eligible": recovering,
             "recovery_completed": np.zeros((num_reset,), dtype=bool),
+            "recovery_pose_ids": recovery_pose_ids,
+            "recovery_joint_pose_ids": recovery_joint_pose_ids,
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
             "torques": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
             "qacc": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
+            "dr_mass_delta": mass_delta,
+            "dr_com_offset": com_offset,
+            "dr_ground_friction": ground_friction,
+            "dr_kp_scale": kp_scale,
+            "dr_kd_scale": kd_scale,
+            "dr_motor_strength": motor_strength,
+            "dr_action_delay_steps": action_delay_steps,
             "wheel_contacts": np.zeros(
                 (num_reset, len(WHEEL_CONTACT_SENSORS)), dtype=get_global_dtype()
             ),
@@ -245,12 +311,7 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
             qpos=qpos,
             qvel=qvel,
             info_updates=info_updates,
-            randomization=build_common_reset_randomization(
-                env,
-                num_reset,
-                base_geom_friction=getattr(env, "_base_geom_friction", None),
-                ground_geom_id=getattr(env, "_ground_geom_id", None),
-            ),
+            randomization=randomization,
         )
 
 
@@ -268,18 +329,89 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._rough_scan_base_height: np.ndarray | None = None
         terrain_origins = getattr(self._backend, "terrain_origins", None)
         terrain_generator = cfg.scene.terrain.generator if cfg.scene.terrain is not None else None
+        self._terrain_bootstrap_type_col: int | None = None
+        self._terrain_type_pending_unlock = np.zeros((num_envs,), dtype=bool)
         if terrain_origins is not None and terrain_generator is not None:
+            type_names = tuple(terrain_generator.sub_terrains)
+            bootstrap_type = cfg.terrain_curriculum.bootstrap_type
+            if bootstrap_type is not None:
+                if not terrain_generator.curriculum:
+                    raise ValueError(
+                        "terrain_curriculum.bootstrap_type requires "
+                        "scene.terrain.generator.curriculum=true"
+                    )
+                if bootstrap_type not in type_names:
+                    raise ValueError(
+                        f"terrain_curriculum.bootstrap_type={bootstrap_type!r} is not in "
+                        f"scene.terrain.generator.sub_terrains={type_names}"
+                    )
+                self._terrain_bootstrap_type_col = type_names.index(bootstrap_type)
+            terrain_locked = bool(
+                self._terrain_bootstrap_type_col is not None
+                and not self._terrain_curriculum_unlocked()
+            )
             self._spawn = TerrainSpawnManager(
                 num_envs,
                 terrain_origins,
                 cell_size=float(terrain_generator.size[0]),
                 cfg=cfg.terrain_curriculum,
                 terrain_surface_sampler=getattr(self._backend, "terrain_surface_sampler", None),
+                type_probabilities=np.asarray(
+                    [terrain.proportion for terrain in terrain_generator.sub_terrains.values()],
+                    dtype=np.float64,
+                ),
+                initial_type_col=(
+                    self._terrain_bootstrap_type_col if terrain_locked else None
+                ),
             )
+            self._terrain_type_pending_unlock[:] = terrain_locked
         init_height_scan_sensor(self, cfg.terrain_scan, cfg.asset.base_name)
+        self._critic_history = np.zeros(
+            (num_envs, self._critic_one_step_dim), dtype=self._np_dtype
+        )
 
     def _make_dr_provider(self) -> Real68BalanceRoughDomainRandomizationProvider:
         return Real68BalanceRoughDomainRandomizationProvider()
+
+    def training_state_dict(self) -> dict[str, Any]:
+        state = super().training_state_dict()
+        if isinstance(self._spawn, TerrainSpawnManager):
+            state["terrain_curriculum"] = {
+                "version": 1,
+                "spawn": self._spawn.training_state_dict(),
+                "type_pending_unlock": self._terrain_type_pending_unlock.tolist(),
+            }
+        return state
+
+    def load_training_state_dict(self, state: dict[str, Any]) -> None:
+        super().load_training_state_dict(state)
+        terrain = state.get("terrain_curriculum")
+        if terrain is None:
+            if isinstance(self._spawn, TerrainSpawnManager):
+                raise ValueError("Real68 rough training state is missing terrain_curriculum")
+            return
+        if not isinstance(self._spawn, TerrainSpawnManager):
+            raise ValueError("Checkpoint has terrain curriculum state but env has no terrain")
+        terrain_state = cast(dict[str, Any], terrain)
+        version = int(terrain_state.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported Real68 terrain state version: {version}")
+        pending = np.asarray(terrain_state["type_pending_unlock"], dtype=bool)
+        if pending.shape != self._terrain_type_pending_unlock.shape:
+            raise ValueError(
+                "Real68 terrain pending-unlock shape mismatch: "
+                f"{pending.shape} != {self._terrain_type_pending_unlock.shape}"
+            )
+        self._spawn.load_training_state_dict(
+            cast(dict[str, object], terrain_state["spawn"])
+        )
+        self._terrain_type_pending_unlock[:] = pending
+
+    def get_playback_root_xy_offsets(self) -> np.ndarray | None:
+        if not isinstance(self._spawn, TerrainSpawnManager):
+            return None
+        env_ids = np.arange(self._num_envs, dtype=np.int32)
+        return np.asarray(self._spawn.origins_for(env_ids)[:, :2], dtype=self._np_dtype)
 
     def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
         env_ids = np.asarray(env_indices, dtype=np.int32)
@@ -287,68 +419,58 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         self._nonwheel_contact_steps[env_ids] = 0
         return obs, info
 
+    def _before_autoreset(self, done: np.ndarray) -> None:
+        super()._before_autoreset(done)
+        if not isinstance(self._spawn, TerrainSpawnManager):
+            return
+        env_ids = np.flatnonzero(done).astype(np.int32)
+        if self._terrain_curriculum_unlocked():
+            pending = self._terrain_type_pending_unlock[env_ids]
+            unlock_ids = env_ids[pending]
+            if unlock_ids.size:
+                self._spawn.resample_type_cols(unlock_ids)
+                self._terrain_type_pending_unlock[unlock_ids] = False
+            return
+        if self._terrain_bootstrap_type_col is not None:
+            self._spawn.set_type_col(env_ids, self._terrain_bootstrap_type_col)
+            self._terrain_type_pending_unlock[env_ids] = True
+
     def _init_reward_functions(self) -> None:
         def gated(fn):
             return lambda ctx: fn(ctx) * self._upright_scale(ctx.gravity)
 
-        def _height_tracking(ctx: RewardContext) -> np.ndarray:
-            return self._reward_height_tracking(ctx) * self._upright_scale(ctx.gravity)
-
-        def _posture(ctx: RewardContext) -> np.ndarray:
-            return self._reward_posture(ctx) * self._upright_scale(ctx.gravity)
-
-        def _leg_symmetry(ctx: RewardContext) -> np.ndarray:
-            return self._reward_leg_symmetry(ctx) * self._upright_scale(ctx.gravity)
-
-        def _torques(ctx: RewardContext) -> np.ndarray:
-            return self._reward_torques_l2(ctx) * self._upright_scale(ctx.gravity)
-
-        def _wheel_vel(ctx: RewardContext) -> np.ndarray:
-            return self._reward_wheel_vel(ctx) * self._upright_scale(ctx.gravity)
-
-        def _nonwheel_contact(ctx: RewardContext) -> np.ndarray:
-            return self._reward_nonwheel_contact(ctx) * self._upright_scale(ctx.gravity)
-
-        def _joint_pos_penalty(ctx: RewardContext) -> np.ndarray:
-            return self._reward_joint_pos_penalty(ctx) * self._upright_scale(ctx.gravity)
-
-        def _joint_power(ctx: RewardContext) -> np.ndarray:
-            return self._reward_joint_power(ctx) * self._upright_scale(ctx.gravity)
-
-        def _alive(ctx: RewardContext) -> np.ndarray:
-            return rewards.alive(ctx) * self._upright_scale(ctx.gravity)
-
-        self._reward_fns = {
-            "tracking_lin_vel": self._reward_tracking_forward_vel,
-            "tracking_ang_vel": rewards.tracking_ang_vel,
-            "balanced_tracking_lin_vel": self._reward_balanced_tracking_forward_vel,
-            "balanced_tracking_ang_vel": self._reward_balanced_tracking_ang_vel,
-            "forward_progress": self._reward_forward_progress,
-            "net_progress": self._reward_net_progress,
-            "under_speed": self._reward_under_speed,
-            "drive_wheel_command": self._reward_drive_wheel_command,
-            "yaw_rate_when_uncommanded": gated(rewards.yaw_rate_when_uncommanded),
-            "lin_vel_z": gated(rewards.lin_vel_z),
-            "ang_vel_xy": gated(rewards.ang_vel_xy),
-            "orientation": gated(self._reward_orientation),
-            "torques": _torques,
-            "wheel_vel": _wheel_vel,
-            "posture": _posture,
-            "leg_symmetry": _leg_symmetry,
-            "height_tracking": _height_tracking,
-            "joint_pos_penalty": _joint_pos_penalty,
-            "joint_power": _joint_power,
-            "nonwheel_contact": _nonwheel_contact,
-            "alive": _alive,
-            "action_rate": rewards.action_rate,
-        }
+        super()._init_reward_functions()
+        self._reward_fns["tracking_ang_vel"] = rewards.tracking_ang_vel
+        for name in (
+            "yaw_rate_when_uncommanded",
+            "lin_vel_z",
+            "ang_vel_xy",
+            "orientation",
+            "torques",
+            "wheel_vel",
+            "posture",
+            "leg_symmetry",
+            "height_tracking",
+            "joint_pos_penalty",
+            "joint_power",
+            "nonwheel_contact",
+            "alive",
+        ):
+            self._reward_fns[name] = gated(self._reward_fns[name])
 
     def _upright_scale(self, gravity: np.ndarray | None) -> np.ndarray:
         return rewards.upright_scale(gravity, self._num_envs)
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
-        return {"obs": 32, "critic": 45 + self._height_scan_dim}
+        return {
+            "obs": int(self._cfg.history.num_actor_history) * 28,
+            "critic": self._critic_one_step_dim,
+        }
+
+    @property
+    def _critic_one_step_dim(self) -> int:
+        return 59 + self._height_scan_dim
 
     def update_state(self, state: NpEnvState) -> NpEnvState:
         self._clear_height_scan_cache()
@@ -357,8 +479,36 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         if np.any(done):
             done_indices = np.where(done)[0]
             if self._terrain_curriculum_unlocked():
+                promote_performance = None
+                demote_performance = None
+                terrain_cfg = self._cfg.terrain_curriculum
+                if terrain_cfg.performance_gating:
+                    steps = np.maximum(self._segment_steps[done_indices], 1)
+                    vx_error = self._segment_vx_error_sum[done_indices] / steps
+                    tilt_rate = self._segment_tilt_sum[done_indices] / steps
+                    contact_rate = self._segment_nonwheel_contact_sum[done_indices] / steps
+                    promote_performance = (
+                        (vx_error <= float(terrain_cfg.max_vx_error))
+                        & (tilt_rate <= float(terrain_cfg.max_tilt_rate))
+                        & (
+                            contact_rate
+                            <= float(terrain_cfg.max_nonwheel_contact_rate)
+                        )
+                        & ~self._segment_recovery_seen[done_indices]
+                    )
+                    recovery_timeout = np.asarray(
+                        state.info.get(
+                            "termination_recovery_timeout",
+                            np.zeros((self._num_envs,), dtype=bool),
+                        ),
+                        dtype=bool,
+                    )[done_indices]
+                    demote_performance = (~promote_performance) | recovery_timeout
                 stats = self._spawn.update_on_done(
-                    done_indices, self._backend.get_base_pos()[done_indices]
+                    done_indices,
+                    self._backend.get_base_pos()[done_indices],
+                    promote_performance=promote_performance,
+                    demote_performance=demote_performance,
                 )
             else:
                 stats = {}
@@ -396,6 +546,9 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         log["terrain_curriculum/mean_level"] = float(spawn.levels.mean())
         log["terrain_curriculum/max_level"] = float(spawn.levels.max())
         log["terrain_curriculum/min_level"] = float(spawn.levels.min())
+        log["terrain_curriculum/bootstrap_type_frac"] = float(
+            np.mean(self._terrain_type_pending_unlock)
+        )
 
     def _clear_height_scan_cache(self) -> None:
         self._rough_scan_raw = None
@@ -440,34 +593,15 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
             )
         return self._rough_scan_height_obs
 
-    def _compute_obs(
-        self,
-        info: dict,
-        linvel: np.ndarray,
-        gyro: np.ndarray,
-        gravity: np.ndarray,
-        accel: np.ndarray,
-        dof_pos: np.ndarray,
-        dof_vel: np.ndarray,
-    ) -> dict[str, np.ndarray]:
-        obs_dict = super()._compute_obs(
-            info,
-            linvel,
-            gyro,
-            gravity,
-            accel,
-            dof_pos,
-            dof_vel,
-        )
-        critic = np.concatenate(
+    def _augment_critic_frame(self, critic: np.ndarray, num_obs: int) -> np.ndarray:
+        return np.concatenate(
             [
-                obs_dict["critic"],
-                self._cached_height_scan_obs(gyro.shape[0]),
+                critic,
+                self._cached_height_scan_obs(num_obs),
             ],
             axis=1,
             dtype=self._np_dtype,
         )
-        return {"obs": obs_dict["obs"], "critic": critic}
 
     def _reward_base_height_values(self, num_obs: int) -> np.ndarray:
         if num_obs != self._num_envs:
@@ -540,3 +674,8 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
                 out=truncated,
             )
         return truncated
+
+
+@registry.env("Real68Balance", sim_backend="mujoco")
+class Real68BalanceUnifiedEnv(Real68BalanceRoughEnv):
+    _cfg: Real68BalanceUnifiedCfg

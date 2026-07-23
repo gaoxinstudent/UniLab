@@ -181,6 +181,10 @@ class GamepadCommander(CommanderBase):
         deadzone: float = 0.12,
         vx_scale: float = 0.8,
         wz_scale: float = 0.4,
+        vx_max: float = 0.8,
+        wz_max: float = 0.4,
+        vx_axis: int = 1,
+        wz_axis: int = 2,
         axis_exponent: float = 1.5,
     ) -> None:
         super().__init__()
@@ -196,8 +200,12 @@ class GamepadCommander(CommanderBase):
         self._deadzone = float(np.clip(deadzone, 0.0, 0.95))
         self._vx_step = np.clip(max(float(vx_scale), 0.0) * 0.1, 0.05, 0.20)
         self._wz_step = np.clip(max(float(wz_scale), 0.0) * 0.1, 0.10, 0.50)
-        self._vx_command_magnitude = max(self._vx_step, 0.2)
-        self._wz_command_magnitude = max(self._wz_step, 0.2)
+        self._vx_max = max(float(vx_max), 0.0)
+        self._wz_max = max(float(wz_max), 0.0)
+        self._vx_axis = int(vx_axis)
+        self._wz_axis = int(wz_axis)
+        self._vx_command_magnitude = float(np.clip(vx_scale, 0.0, self._vx_max))
+        self._wz_command_magnitude = float(np.clip(wz_scale, 0.0, self._wz_max))
         self._axis_exponent = max(float(axis_exponent), 1.0)
         self._report_threshold = 1.0e-3
 
@@ -210,12 +218,18 @@ class GamepadCommander(CommanderBase):
             )
         self._joystick = pygame.joystick.Joystick(joystick_index)
         self._joystick.init()
+        if min(self._vx_axis, self._wz_axis) < 0 or max(self._vx_axis, self._wz_axis) >= self._joystick.get_numaxes():
+            raise RuntimeError(
+                "Configured PS2 axes are unavailable: "
+                f"vx={self._vx_axis}, wz={self._wz_axis}, axes={self._joystick.get_numaxes()}"
+            )
         self._button_prev = np.zeros((self._joystick.get_numbuttons(),), dtype=bool)
         self._hat_prev = self._joystick.get_hat(0) if self._joystick.get_numhats() > 0 else (0, 0)
         self._last_reported_command = self.command.copy()
         print(
             "[sim2sim] PS2 gamepad connected: "
-            f"{self._joystick.get_name()} axes={self._joystick.get_numaxes()} buttons={self._joystick.get_numbuttons()}"
+            f"{self._joystick.get_name()} axes={self._joystick.get_numaxes()} buttons={self._joystick.get_numbuttons()} "
+            f"mapping(vx_axis={self._vx_axis}, wz_axis={self._wz_axis})"
         )
         self._print_command_profile()
 
@@ -245,14 +259,14 @@ class GamepadCommander(CommanderBase):
             return -1.0
         return 0.0
 
-    def _adjust_magnitude(self, current: float, delta: float) -> float:
-        return float(max(current + delta, 0.0))
+    def _adjust_magnitude(self, current: float, delta: float, maximum: float) -> float:
+        return float(np.clip(current + delta, 0.0, maximum))
 
     def _print_command_profile(self) -> None:
         print(
             "[sim2sim] PS2 command profile: "
-            f"|vx|={self._vx_command_magnitude:.2f} step={self._vx_step:.2f}, "
-            f"|wz|={self._wz_command_magnitude:.2f} step={self._wz_step:.2f}"
+            f"|vx|={self._vx_command_magnitude:.2f}/{self._vx_max:.2f} step={self._vx_step:.2f}, "
+            f"|wz|={self._wz_command_magnitude:.2f}/{self._wz_max:.2f} step={self._wz_step:.2f}"
         )
 
     def _report_command_if_changed(self) -> None:
@@ -268,8 +282,8 @@ class GamepadCommander(CommanderBase):
             dtype=bool,
         )
 
-        vx_dir = self._axis_direction(self._joystick.get_axis(1), invert=True)
-        wz_dir = self._axis_direction(self._joystick.get_axis(2))
+        vx_dir = self._axis_direction(self._joystick.get_axis(self._vx_axis), invert=True)
+        wz_dir = self._axis_direction(self._joystick.get_axis(self._wz_axis))
         self.command[:] = np.asarray(
             [
                 vx_dir * self._vx_command_magnitude,
@@ -299,23 +313,23 @@ class GamepadCommander(CommanderBase):
             if hat != self._hat_prev:
                 if hat[1] == 1 and self._hat_prev[1] != 1:
                     self._vx_command_magnitude = self._adjust_magnitude(
-                        self._vx_command_magnitude, self._vx_step
+                        self._vx_command_magnitude, self._vx_step, self._vx_max
                     )
                     self._print_command_profile()
                 elif hat[1] == -1 and self._hat_prev[1] != -1:
                     self._vx_command_magnitude = self._adjust_magnitude(
-                        self._vx_command_magnitude, -self._vx_step
+                        self._vx_command_magnitude, -self._vx_step, self._vx_max
                     )
                     self._print_command_profile()
 
                 if hat[0] == 1 and self._hat_prev[0] != 1:
                     self._wz_command_magnitude = self._adjust_magnitude(
-                        self._wz_command_magnitude, self._wz_step
+                        self._wz_command_magnitude, self._wz_step, self._wz_max
                     )
                     self._print_command_profile()
                 elif hat[0] == -1 and self._hat_prev[0] != -1:
                     self._wz_command_magnitude = self._adjust_magnitude(
-                        self._wz_command_magnitude, -self._wz_step
+                        self._wz_command_magnitude, -self._wz_step, self._wz_max
                     )
                     self._print_command_profile()
                 self._hat_prev = hat
@@ -332,7 +346,6 @@ class Real68Sim2Sim:
         command_override: np.ndarray | None = None,
         random_yaw: bool = False,
         auto_reset: bool = False,
-        recovery_reset: bool = False,
     ) -> None:
         self.bundle_dir = Path(bundle_dir).resolve()
         self.cfg = Sim2SimConfig.load(self.bundle_dir / "sim2sim_config.json")
@@ -348,9 +361,30 @@ class Real68Sim2Sim:
         obs_input = self.session.get_inputs()[0]
         self.obs_name = obs_input.name
         self.obs_dim = int(obs_input.shape[-1])
-        if self.obs_dim not in (29, 32):
-            raise ValueError(f"Unsupported Real68 policy obs dim: {self.obs_dim}")
+        self.observation_schema = str(self.cfg.raw.get("observation_schema", "legacy"))
+        self.action_schema = str(self.cfg.raw.get("action_schema", "legacy"))
+        self.actor_one_step_dim = int(self.cfg.raw.get("actor_one_step_dim", self.obs_dim))
+        self.actor_history_length = int(self.cfg.raw.get("actor_history_length", 1))
+        self._uses_history_policy = self.observation_schema == "real68_balance_v2"
+        if self._uses_history_policy:
+            expected_obs_dim = self.actor_one_step_dim * self.actor_history_length
+            if self.actor_one_step_dim != 28 or self.obs_dim != expected_obs_dim:
+                raise ValueError(
+                    "Invalid real68_balance_v2 policy input contract: "
+                    f"one_step={self.actor_one_step_dim}, history={self.actor_history_length}, "
+                    f"onnx_input={self.obs_dim}"
+                )
+            if self.action_schema != "real68_direct_mixed_v1":
+                raise ValueError(f"Unsupported Real68 action schema: {self.action_schema}")
+        elif self.obs_dim not in (29, 32):
+            raise ValueError(f"Unsupported legacy Real68 policy obs dim: {self.obs_dim}")
         self.action_name = self.session.get_outputs()[0].name
+        action_shape = self.session.get_outputs()[0].shape
+        if not isinstance(action_shape[-1], int) or int(action_shape[-1]) != 6:
+            raise ValueError(
+                "Unsupported Real68 policy action shape: "
+                f"expected final dimension 6, got {action_shape}"
+            )
         self.control_cfg = self.cfg["control_config"]
         self.default_angles = np.asarray(self.cfg["default_active_angles"], dtype=np.float64)
         indices = self.cfg["indices"]
@@ -361,6 +395,14 @@ class Real68Sim2Sim:
         self.ctrl_lower = np.asarray(self.model.actuator_ctrlrange[:, 0], dtype=np.float64)
         self.ctrl_upper = np.asarray(self.model.actuator_ctrlrange[:, 1], dtype=np.float64)
         self.command_limits = np.asarray(self.cfg["command_limits"], dtype=np.float64)
+        if self.command_limits.shape != (2, 3):
+            raise ValueError(
+                "Expected command_limits shape (2, 3), got "
+                f"{self.command_limits.shape}"
+            )
+        feasibility_cfg = self.cfg.raw.get("command_feasibility", {})
+        self._wheel_radius = float(feasibility_cfg.get("wheel_radius", 0.06))
+        self._wheel_base = float(feasibility_cfg.get("wheel_base", 0.43))
         self.forward_axis = int(self.cfg.raw.get("forward_axis", 0))
         self.lateral_axis = int(
             self.cfg.raw.get("lateral_axis", 1 if self.forward_axis == 0 else 0)
@@ -371,7 +413,7 @@ class Real68Sim2Sim:
             if command_override is not None
             else np.zeros((3,), dtype=np.float64)
         )
-        self.requested_command[1] = 0.0
+        self.requested_command = self._sanitize_command(self.requested_command)
         self.command = self.requested_command.copy()
         self.height_command = float(self.cfg["base_height_target"])
         self.height_command_reference = float(
@@ -382,6 +424,8 @@ class Real68Sim2Sim:
         self.recovery_elapsed_steps = 0
         self.recovery_upright_steps = 0
         self.last_action = np.zeros((6,), dtype=np.float64)
+        self.obs_history = np.zeros((self.obs_dim,), dtype=np.float32)
+        self._history_initialized = False
         self.last_torque = np.zeros((6,), dtype=np.float64)
         self._policy_action_target = np.zeros((6,), dtype=np.float64)
         self.nonwheel_contact_steps = 0
@@ -389,13 +433,18 @@ class Real68Sim2Sim:
         self.reset_count = 0
         self.random_yaw = random_yaw
         self.auto_reset = auto_reset
-        self.recovery_reset = recovery_reset
         flat_terrain = self.terrain_origins.reshape(-1, 3)
         self._terrain_cell = min(2, flat_terrain.shape[0] - 1)
         self._status_deadline = time.perf_counter()
         self._home_key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "home")
         if self._home_key_id < 0:
             raise ValueError("Keyframe 'home' not found in scene.xml")
+        expected_sim_dt = float(self.cfg["sim_dt"])
+        if not np.isclose(float(self.model.opt.timestep), expected_sim_dt, rtol=0.0, atol=1.0e-9):
+            raise ValueError(
+                "MuJoCo timestep does not match the training bundle: "
+                f"scene={self.model.opt.timestep}, bundle={expected_sim_dt}"
+            )
         key_qpos = np.asarray(self.model.key_qpos, dtype=np.float64).reshape(
             self.model.nkey, self.model.nq
         )
@@ -437,7 +486,7 @@ class Real68Sim2Sim:
         terrain_z = self.hfield.sample(self.data.qpos[:2])
         return float(self.data.qpos[2] - terrain_z)
 
-    def _compute_obs(self) -> np.ndarray:
+    def _compute_actor_frame(self) -> np.ndarray:
         linvel = self.sensors.read(self.data, self.cfg["sensor_names"]["local_linvel"])
         gyro = self.sensors.read(self.data, self.cfg["sensor_names"]["gyro"])
         gravity = self.sensors.read(self.data, self.cfg["sensor_names"]["gravity"])
@@ -447,7 +496,7 @@ class Real68Sim2Sim:
         posture_diff = dof_pos[self.posture] - self.default_angles[self.posture]
         posture_vel = dof_vel[self.posture]
         wheel_vel = dof_vel[self.wheel]
-        if bool(self.cfg.raw.get("use_wheel_odometry", False)):
+        if not self._uses_history_policy and bool(self.cfg.raw.get("use_wheel_odometry", False)):
             linvel = np.zeros((3,), dtype=np.float64)
             linvel[self.forward_axis] = -0.06 * float(np.mean(wheel_vel))
         height_command = np.asarray(
@@ -461,21 +510,48 @@ class Real68Sim2Sim:
             posture_vel,
             wheel_vel,
             self.last_action,
-            self.command,
+            self.command[[0, 2]] if self._uses_history_policy else self.command,
             height_command,
         ]
-        if self.obs_dim == 32:
+        if not self._uses_history_policy and self.obs_dim == 32:
             parts.insert(0, linvel)
-        obs = np.concatenate(parts, axis=0)
-        if obs.shape != (self.obs_dim,):
-            raise ValueError(f"Expected obs shape ({self.obs_dim},), got {obs.shape}")
-        return obs.astype(np.float32, copy=False)
+        frame = np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+        expected_dim = self.actor_one_step_dim if self._uses_history_policy else self.obs_dim
+        if frame.shape != (expected_dim,):
+            raise ValueError(f"Expected actor frame shape ({expected_dim},), got {frame.shape}")
+        return frame
+
+    def _compute_obs(self) -> np.ndarray:
+        frame = self._compute_actor_frame()
+        if not self._uses_history_policy:
+            return frame
+        if not self._history_initialized:
+            self.obs_history[:] = np.tile(frame, self.actor_history_length)
+            self._history_initialized = True
+        else:
+            self.obs_history[:-self.actor_one_step_dim] = self.obs_history[
+                self.actor_one_step_dim :
+            ]
+            self.obs_history[-self.actor_one_step_dim :] = frame
+        return self.obs_history
 
     def _policy_action(self, obs: np.ndarray) -> np.ndarray:
         out = self.session.run([self.action_name], {self.obs_name: obs[None, :]})[0]
         action = np.asarray(out[0], dtype=np.float64)
         clip = float(self.control_cfg["clip_actions"])
         return np.clip(action, -clip, clip)
+
+    def _sanitize_command(self, command: np.ndarray) -> np.ndarray:
+        """Match the box and differential-drive command limits used during training."""
+        sanitized = np.clip(
+            np.asarray(command, dtype=np.float64), self.command_limits[0], self.command_limits[1]
+        )
+        sanitized[1] = 0.0
+        wheel_surface_speed = float(self.control_cfg["wheel_velocity_scale"]) * self._wheel_radius
+        demand = abs(sanitized[0]) + abs(sanitized[2]) * (0.5 * self._wheel_base)
+        if demand > wheel_surface_speed:
+            sanitized[[0, 2]] *= wheel_surface_speed / demand
+        return sanitized
 
     def _compute_torque(self, action: np.ndarray) -> np.ndarray:
         dof_pos = self.active_dof_pos()
@@ -503,8 +579,13 @@ class Real68Sim2Sim:
         self._update_recovery_state()
         obs = self._compute_obs()
         action = self._policy_action(obs)
+        execute_action = (
+            self.last_action.copy()
+            if bool(self.control_cfg.get("simulate_action_latency", False))
+            else action
+        )
         self.last_action[:] = action
-        self._policy_action_target[:] = action
+        self._policy_action_target[:] = execute_action
 
     def _apply_motor_control(self) -> None:
         torque = self._compute_torque(self._policy_action_target)
@@ -622,33 +703,25 @@ class Real68Sim2Sim:
         xy_jitter = min(float(reset_cfg["xy_jitter"]), 0.15)
         qpos[0] = origin[0] + np.random.uniform(-xy_jitter, xy_jitter)
         qpos[1] = origin[1] + np.random.uniform(-xy_jitter, xy_jitter)
-        roll = 0.0
-        pitch = 0.0
         yaw = np.random.uniform(*reset_cfg["yaw_range"]) if self.random_yaw else 0.0
-        recovering = bool(self.recovery_cfg.get("enabled", False)) and (
-            self.recovery_reset
-            or np.random.uniform()
-            < float(self.recovery_cfg.get("initial_recovery_probability", 0.0))
-        )
-        if recovering:
-            roll = np.random.uniform(*self.recovery_cfg["initial_roll_range"])
-            pitch = np.random.uniform(*self.recovery_cfg["initial_pitch_range"])
         terrain_z = self._spawn_surface_height(qpos[:2], yaw)
         qpos[2] = (
             terrain_z
             + float(self.cfg["home_base_height"])
             + float(reset_cfg["spawn_height_margin"])
         )
-        qpos[3:7] = quat_mul(qpos[3:7], quat_from_euler_xyz(roll, pitch, yaw))
+        qpos[3:7] = quat_mul(qpos[3:7], quat_from_euler_xyz(0.0, 0.0, yaw))
         qvel[:6] = 0.0
         self.data.qpos[:] = qpos
         self.data.qvel[:] = qvel
         self.data.ctrl[:] = 0.0
         self.last_action[:] = 0.0
+        self.obs_history[:] = 0.0
+        self._history_initialized = False
         self.last_torque[:] = 0.0
         self._policy_action_target[:] = 0.0
         self.nonwheel_contact_steps = 0
-        self.recovery_active = recovering
+        self.recovery_active = False
         self.recovery_elapsed_steps = 0
         self.recovery_upright_steps = 0
         self.control_tick = 0
@@ -672,8 +745,7 @@ class Real68Sim2Sim:
         self._terrain_cell = int(np.clip(cell, 0, flat.shape[0] - 1))
 
     def update_command(self, command: np.ndarray) -> None:
-        self.requested_command[:] = np.asarray(command, dtype=np.float64)
-        self.requested_command[1] = 0.0
+        self.requested_command[:] = self._sanitize_command(command)
         self.command[:] = 0.0 if self.recovery_active else self.requested_command
 
     def status_line(self) -> str:

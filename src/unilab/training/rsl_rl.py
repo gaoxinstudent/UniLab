@@ -222,5 +222,13 @@ class RslRlVecEnvWrapper:
         obs = self.env.state.obs
         return to_torch(obs.get("critic", obs["obs"]), self.device)
 
+    def training_state_dict(self) -> dict[str, Any]:
+        """Forward cold-path checkpoint state through the adapter contract."""
+        return self.env.training_state_dict()
+
+    def load_training_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore cold-path checkpoint state through the adapter contract."""
+        self.env.load_training_state_dict(state)
+
     def close(self) -> None:
         self.env.close()

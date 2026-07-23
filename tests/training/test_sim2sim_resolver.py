@@ -221,6 +221,9 @@ def test_action_scale_list_form(tmp_path):
 def test_env_structural_denylist_is_the_env_subset():
     assert ENV_STRUCTURAL_DENYLIST == [
         "env.control_config",
+        "env.observation_schema",
+        "env.action_schema",
+        "env.history",
         "env.control_config.action_scale",
         "env.sampling_mode",
     ]

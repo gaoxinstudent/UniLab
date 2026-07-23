@@ -103,6 +103,34 @@ def _get_log_root(cfg: DictConfig) -> str:
     return str(get_log_root(ROOT_DIR, cfg))
 
 
+def _resolve_training_resume_path(cfg: DictConfig) -> Path | None:
+    """Resolve an explicit training checkpoint without silently starting fresh."""
+    load_run = str(OmegaConf.select(cfg, "algo.load_run", default="-1"))
+    if load_run in {"", "-1"}:
+        return None
+
+    resume_path, resume_dir = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
+    if resume_path is not None:
+        return resume_path
+
+    selected_checkpoint = OmegaConf.select(cfg, "algo.checkpoint", default=-1)
+    if selected_checkpoint not in (None, "", -1, "-1"):
+        checkpoint_name = (
+            f"model_{selected_checkpoint}.pt"
+            if str(selected_checkpoint).isdigit()
+            else str(selected_checkpoint)
+        )
+        if resume_dir is not None:
+            detail = f"under {resume_dir / checkpoint_name}"
+        else:
+            detail = f"for load_run={load_run!r}, checkpoint={checkpoint_name!r}"
+    elif resume_dir is not None:
+        detail = f"under {resume_dir}"
+    else:
+        detail = f"for load_run={load_run!r}"
+    raise FileNotFoundError(f"Requested PPO resume checkpoint was not found {detail}.")
+
+
 def _algo_config_dict(cfg: DictConfig) -> dict[str, Any]:
     train_cfg_raw = OmegaConf.to_container(cfg.algo, resolve=True)
     if not isinstance(train_cfg_raw, dict):
@@ -124,6 +152,20 @@ def _resolve_ppo_wrapper_cls(rl_cfg: dict[str, Any]) -> type[RslRlVecEnvWrapper]
         rl_cfg,
         default_wrapper_cls=RslRlVecEnvWrapper,
     ).wrapper_cls
+
+
+def _resolve_ppo_runner_cls(rl_cfg: dict[str, Any]) -> tuple[type[Any], bool]:
+    runner_name = str(rl_cfg.get("runner_class_name", "OnPolicyRunner"))
+    if runner_name == "OnPolicyRunner":
+        return OnPolicyRunner, False
+    if runner_name in {
+        "HIMOnPolicyRunner",
+        "unilab.algos.torch.him_ppo.runner:HIMOnPolicyRunner",
+    }:
+        from unilab.algos.torch.him_ppo.runner import HIMOnPolicyRunner
+
+        return HIMOnPolicyRunner, True
+    raise ValueError(f"Unsupported PPO runner_class_name={runner_name!r}")
 
 
 def apply_ppo_runtime_flags(
@@ -186,6 +228,7 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
     """Play mode for RSL-RL."""
     rl_cfg = _algo_config_dict(cfg)
     wrapper_cls = _resolve_ppo_wrapper_cls(rl_cfg)
+    runner_cls, is_him = _resolve_ppo_runner_cls(rl_cfg)
 
     task_log_root = get_log_root(ROOT_DIR, cfg) / str(cfg.training.task_name)
     load_path, load_path_dir = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
@@ -227,7 +270,7 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
         env_cfg_override=env_cfg_override,
     )
     wrapped_env = wrapper_cls(env, device=device)
-    train_cfg = normalize_ppo_train_cfg(rl_cfg)
+    train_cfg = rl_cfg if is_him else normalize_ppo_train_cfg(rl_cfg)
     apply_ppo_runtime_flags(train_cfg, cfg, training_enabled=False)
     if "runner" not in train_cfg:
         train_cfg["runner"] = {}
@@ -235,14 +278,21 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
 
     runner = cast(
         Any,
-        OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=None, device=device),
+        runner_cls(cast(Any, wrapped_env), train_cfg, log_dir=None, device=device),
     )
     with policy_load_dim_guard(
         env_obs_dim=getattr(wrapped_env, "num_obs", None),
         env_action_dim=getattr(wrapped_env, "num_actions", None),
         algo_name="ppo",
     ):
-        runner.load(str(load_path), map_location=device)
+        if is_him:
+            runner.load(
+                str(load_path),
+                map_location=device,
+                restore_training_state=False,
+            )
+        else:
+            runner.load(str(load_path), map_location=device)
     policy = runner.get_inference_policy(device=device)
     if EXPORT_POLICY:
         runner.export_policy_to_onnx(path=str(load_path_dir))
@@ -301,7 +351,7 @@ def main(cfg: DictConfig) -> None:
     seed_info = apply_configured_training_seed(cfg, torch_runtime=True, cuda=True)
     env_cfg_override = build_ppo_env_cfg_override(cfg)
 
-    device = get_default_device()
+    device = str(cfg.training.device or get_default_device())
     print(f"Using device: {device}")
 
     # Compute effective max_iterations (supports num_timesteps override)
@@ -313,6 +363,10 @@ def main(cfg: DictConfig) -> None:
             f"Overriding max_iterations to {max_iterations} based on "
             f"num_timesteps {cfg.training.num_timesteps}"
         )
+
+    resume_path = _resolve_training_resume_path(cfg) if not cfg.training.play_only else None
+    if resume_path is not None:
+        print(f"Resuming from {resume_path}")
 
     if not cfg.training.play_only:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -347,6 +401,7 @@ def main(cfg: DictConfig) -> None:
             )
             rl_cfg = _algo_config_dict(cfg)
             wrapper_cls = _resolve_ppo_wrapper_cls(rl_cfg)
+            runner_cls, is_him = _resolve_ppo_runner_cls(rl_cfg)
 
             nan_guard_cfg = getattr(cfg.training, "nan_guard", None)
             if nan_guard_cfg is not None and getattr(nan_guard_cfg, "enabled", False):
@@ -366,7 +421,7 @@ def main(cfg: DictConfig) -> None:
 
             wrapped_env = wrapper_cls(env, device=device)
 
-            train_cfg = normalize_ppo_train_cfg(rl_cfg)
+            train_cfg = rl_cfg if is_him else normalize_ppo_train_cfg(rl_cfg)
             apply_ppo_runtime_flags(train_cfg, cfg, training_enabled=True)
             if "runner" not in train_cfg:
                 train_cfg["runner"] = {}
@@ -377,7 +432,8 @@ def main(cfg: DictConfig) -> None:
             train_cfg["runner"]["logger"] = logger_type
             train_cfg["logger"] = logger_type
 
-            patch_rsl_rl_resume_state()
+            if not is_him:
+                patch_rsl_rl_resume_state()
 
             if tracker is not None and logger_type == "wandb":
                 patch_rsl_rl_wandb_writer()
@@ -392,15 +448,13 @@ def main(cfg: DictConfig) -> None:
 
             runner = cast(
                 Any,
-                OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device),
+                runner_cls(cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device),
             )
-            _patch_runner_action_std_logging(runner)
+            if not is_him:
+                _patch_runner_action_std_logging(runner)
 
-            if cfg.algo.load_run != "-1":
-                resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
-                if resume_path:
-                    print(f"Resuming from {resume_path}")
-                    runner.load(str(resume_path))
+            if resume_path is not None:
+                runner.load(str(resume_path))
 
             train_start_wall = time.time()
             runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)

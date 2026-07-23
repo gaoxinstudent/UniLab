@@ -80,6 +80,26 @@ def test_step_passes_resolved_chunk_size(monkeypatch):
     assert seen["chunk_size"] == 7
 
 
+def test_reset_passes_resolved_chunk_size(monkeypatch):
+    backend = _build_small_backend(chunk_size=7, adaptive_chunk_size=False)
+    seen = {}
+    real_reset = backend._pool.reset
+
+    def _spy(*args, **kwargs):
+        seen["chunk_size"] = kwargs.get("chunk_size")
+        return real_reset(*args, **kwargs)
+
+    monkeypatch.setattr(backend._pool, "reset", _spy)
+    env_ids = np.asarray([0], dtype=np.int32)
+    qpos = backend._qpos_view[env_ids].copy()
+    qvel = backend._physics_state[
+        env_ids, backend._idx_qvel : backend._idx_qvel + backend.nv
+    ].copy()
+    backend.set_state(env_ids, qpos, qvel)
+
+    assert seen["chunk_size"] == 7
+
+
 def test_hot_path_does_no_xml_parse(monkeypatch):
     """Acceptance ③: step/reset must not parse asset/XML (any entrypoint)."""
     backend = _build_small_backend(adaptive_chunk_size=False)  # cold path done
@@ -107,7 +127,7 @@ def test_hot_path_does_no_xml_parse(monkeypatch):
     assert model_calls["n"] == 0
 
 
-def test_benchmark_runs_and_logs_table_on_adaptive(caplog, monkeypatch, tmp_path):
+def test_benchmark_runs_and_logs_table_on_adaptive(caplog, capsys, monkeypatch, tmp_path):
     """Acceptance ④: adaptive path benchmarks and emits a per-candidate table.
 
     Point the chunk_size cache at an empty ``tmp_path`` file so the resolve is a
@@ -117,15 +137,37 @@ def test_benchmark_runs_and_logs_table_on_adaptive(caplog, monkeypatch, tmp_path
     """
     import logging
 
-    from unilab.base.backend.mujoco import backend as backend_mod
-
-    # Force nthread < num_envs so there is genuinely something to tune; otherwise the
-    # resolve short-circuits (num_envs <= nthread => one chunk => no benchmark). With
-    # cpu_count()==1, nthread = min(_NUM_ENVS, 2) = 2 < _NUM_ENVS, deterministically.
-    monkeypatch.setattr(backend_mod, "cpu_count", lambda: 1)
+    # Keep nthread < num_envs so there is genuinely something to tune; otherwise
+    # resolve short-circuits (num_envs <= nthread => one chunk => no benchmark).
+    # Use the public worker-count contract instead of patching CPU discovery.
     monkeypatch.setenv("UNILAB_CHUNK_SIZE_CACHE", str(tmp_path / "chunk_size.json"))
     with caplog.at_level(logging.INFO, logger="unilab.base.backend.mujoco.chunk_tuner"):
-        backend = _build_small_backend(adaptive_chunk_size=True, chunk_size=None)
+        backend = _build_small_backend(
+            adaptive_chunk_size=True,
+            chunk_size=None,
+            num_threads=2,
+        )
     assert backend._chunk_size is None or isinstance(backend._chunk_size, int)
-    # Forced miss -> _log_benchmark_table emits the "chunk_size benchmark" record.
-    assert any("chunk_size benchmark" in r.message for r in caplog.records)
+    # _emit uses logging when INFO is active and stderr in unconfigured collector
+    # subprocesses. Both channels must surface the benchmark table.
+    stderr = capsys.readouterr().err
+    assert any("chunk_size benchmark" in r.message for r in caplog.records) or (
+        "chunk_size benchmark" in stderr
+    )
+
+
+def test_chunk_cache_metadata_uses_scene_path(monkeypatch):
+    captured = {}
+
+    def fake_resolve_chunk_size(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        "unilab.base.backend.mujoco.chunk_tuner.resolve_chunk_size",
+        fake_resolve_chunk_size,
+    )
+    backend = _build_small_backend(adaptive_chunk_size=True, chunk_size=None)
+
+    assert captured["model_file"] == backend.scene_model_file
+    assert isinstance(captured["model_file"], str)

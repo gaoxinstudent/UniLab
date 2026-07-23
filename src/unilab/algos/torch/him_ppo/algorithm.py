@@ -195,8 +195,8 @@ class HIMPPO:
                         param_group["lr"] = self.learning_rate
 
             estimation_loss, swap_loss = self.actor_critic.estimator.update(
-                obs_batch,
-                next_critic_obs_batch,
+                self.actor_critic.normalize_actor_obs(obs_batch),
+                self.actor_critic.normalize_critic_obs(next_critic_obs_batch),
                 lr=self.learning_rate,
             )
 
@@ -230,6 +230,7 @@ class HIMPPO:
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
             self.optimizer.step()
+            self.actor_critic.clamp_action_std_()
 
             mean_value_loss += float(value_loss.item())
             mean_surrogate_loss += float(surrogate_loss.item())
@@ -241,6 +242,12 @@ class HIMPPO:
         mean_surrogate_loss /= num_updates
         mean_estimation_loss /= num_updates
         mean_swap_loss /= num_updates
+        actor_observations = self.storage.observations.flatten(0, 1)
+        critic_storage = self.storage.privileged_observations
+        critic_observations = (
+            actor_observations if critic_storage is None else critic_storage.flatten(0, 1)
+        )
+        self.actor_critic.update_normalization(actor_observations, critic_observations)
         self.storage.clear()
 
         return (

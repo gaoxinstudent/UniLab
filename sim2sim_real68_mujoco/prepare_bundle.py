@@ -24,10 +24,13 @@ from unilab.envs.locomotion.real68.base import (
     WHEEL_INDICES,
 )
 from unilab.envs.locomotion.real68.base import ControlConfig as Real68ControlDefaults
+from unilab.envs.locomotion.real68.observations import (
+    ACTOR_ONE_STEP_DIM,
+)
 from unilab.envs.locomotion.real68.rough import Real68RoughTerrainCfg
 from unilab.training.run import get_latest_run
 
-_DEFAULT_LOG_ROOT = Path("logs/rsl_rl_ppo/Real68BalanceRough")
+_DEFAULT_LOG_ROOT = Path("logs/rsl_rl_ppo/Real68Balance")
 
 
 def _latest_run_dir() -> Path:
@@ -90,6 +93,13 @@ def _sim2sim_config(
     domain_rand = env_cfg["domain_rand"]
     termination = env_cfg["termination_config"]
     commands = env_cfg["commands"]
+    command_curriculum = env_cfg.get("command_curriculum", {})
+    command_limits = (
+        command_curriculum["final_vel_limit"]
+        if bool(command_curriculum.get("enabled", False))
+        and "final_vel_limit" in command_curriculum
+        else commands["vel_limit"]
+    )
     height_command = env_cfg.get("height_command", {})
     recovery = env_cfg.get("recovery", {})
     sensor_cfg = Real68Sensor()
@@ -101,8 +111,6 @@ def _sim2sim_config(
         reset_config = {
             "xy_jitter": float(abs(domain_rand.get("reset_pos_xy_range", [-0.5, 0.5])[1])),
             "z_offset_range": domain_rand.get("reset_height_offset_range", [0.0, 0.08]),
-            "roll_range": domain_rand.get("reset_roll_range", [-0.1, 0.1]),
-            "pitch_range": domain_rand.get("reset_pitch_range", [-0.1, 0.1]),
             "yaw_range": domain_rand.get(
                 "reset_yaw_range", [-3.141592653589793, 3.141592653589793]
             ),
@@ -113,8 +121,6 @@ def _sim2sim_config(
         reset_config = {
             "xy_jitter": 0.25,
             "z_offset_range": [0.0, 0.0],
-            "roll_range": [0.0, 0.0],
-            "pitch_range": [0.0, 0.0],
             "yaw_range": domain_rand.get("init_yaw_range", [-3.141592653589793, 3.141592653589793]),
             "reset_qvel_limit": float(domain_rand.get("reset_qvel_limit", 0.0)),
             "spawn_height_margin": 0.0,
@@ -126,9 +132,21 @@ def _sim2sim_config(
         "terrain_origins_file": "terrain_origins.npy",
         "run_dir": str(run_dir),
         "output_dir": str(output_dir),
-        "sim_dt": 0.001,
-        "ctrl_dt": 0.02,
-        "steps_per_control": int(round(0.02 / 0.001)),
+        "task_name": str(run_cfg["config"]["training"]["task_name"]),
+        "observation_schema": str(env_cfg.get("observation_schema", "legacy")),
+        "action_schema": str(env_cfg.get("action_schema", "legacy")),
+        "actor_one_step_dim": ACTOR_ONE_STEP_DIM,
+        "actor_history_length": int(
+            env_cfg.get("history", {}).get(
+                "num_actor_history",
+                run_cfg["config"].get("algo", {}).get("num_actor_history", 1),
+            )
+        ),
+        "sim_dt": float(env_cfg.get("sim_dt", 0.001)),
+        "ctrl_dt": float(env_cfg.get("ctrl_dt", 0.02)),
+        "steps_per_control": int(
+            round(float(env_cfg.get("ctrl_dt", 0.02)) / float(env_cfg.get("sim_dt", 0.001)))
+        ),
         "home_base_height": float(recovery.get("initial_base_height", HOME_BASE_HEIGHT)),
         "base_height_target": float(reward_cfg["base_height_target"]),
         "height_command_reference": float(
@@ -171,15 +189,21 @@ def _sim2sim_config(
             "wheel_kd": float(control_cfg.get("wheel_kd", control_defaults.wheel_kd)),
             "calf_kp": float(control_cfg.get("calf_kp", control_defaults.calf_kp)),
             "calf_kd": float(control_cfg.get("calf_kd", control_defaults.calf_kd)),
+            "simulate_action_latency": bool(
+                control_cfg.get(
+                    "simulate_action_latency", control_defaults.simulate_action_latency
+                )
+            ),
         },
-        "command_limits": commands["vel_limit"],
+        # A completed curriculum trains against this envelope, while commands.vel_limit
+        # remains its initial range in the composed Hydra config.
+        "command_limits": command_limits,
+        "command_feasibility": {
+            "wheel_radius": 0.06,
+            "wheel_base": 0.43,
+        },
         "recovery_config": {
             "enabled": bool(recovery.get("enabled", False)),
-            # Normal standalone reset stays upright. Recovery poses are
-            # explicitly requested with the player's --recovery-reset flag.
-            "initial_recovery_probability": 0.0,
-            "initial_roll_range": recovery.get("initial_roll_range", [-3.14159, 3.14159]),
-            "initial_pitch_range": recovery.get("initial_pitch_range", [-3.14159, 3.14159]),
             "fall_detect_cos": float(recovery.get("fall_detect_cos", 0.9)),
             "upright_cos": float(recovery.get("upright_cos", 0.96)),
             "upright_hold_seconds": float(recovery.get("upright_hold_seconds", 0.4)),

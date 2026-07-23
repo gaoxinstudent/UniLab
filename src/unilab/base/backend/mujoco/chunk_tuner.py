@@ -37,7 +37,7 @@ def _emit(msg: str) -> None:
     its own diagnostics); otherwise log normally so the main process sees no
     duplicate line.
     """
-    if logger.isEnabledFor(logging.INFO):
+    if logger.isEnabledFor(logging.INFO) and logger.hasHandlers():
         logger.info(msg)
     else:
         print(f"[unilab.chunk_size] {msg}", file=sys.stderr, flush=True)

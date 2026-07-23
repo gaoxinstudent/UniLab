@@ -20,6 +20,14 @@ ACTIVE_JOINT_POS_SENSORS: tuple[str, ...] = (
     "right_wheel_joint_pos",
     "right_calf_smallleg_joint_pos",
 )
+ACTIVE_JOINT_NAMES: tuple[str, ...] = (
+    "left_hip_bigleg_joint",
+    "left_wheel_joint",
+    "left_calf_smallleg_joint",
+    "right_hip_bigleg_joint",
+    "right_wheel_joint",
+    "right_calf_smallleg_joint",
+)
 ACTIVE_JOINT_VEL_SENSORS: tuple[str, ...] = (
     "left_hip_bigleg_joint_vel",
     "left_wheel_joint_vel",
@@ -50,6 +58,23 @@ PASSIVE_JOINT_VEL_SENSORS: tuple[str, ...] = (
 )
 WHEEL_CONTACT_SENSORS: tuple[str, ...] = ("left_wheel_contact", "right_wheel_contact")
 NONWHEEL_CONTACT_SENSORS: tuple[str, ...] = (
+    "base_link_contact",
+    "left_hip_bigleg_contact",
+    "left_calf_smallleg_liangan_contact",
+    "left_calf_smallleg_contact",
+    "left_chuanliangan2_contact",
+    "left_chuanliangan3_contact",
+    "left_chuanliangan5_contact",
+    "right_hip_bigleg_contact",
+    "right_calf_smallleg_liangan_contact",
+    "right_calf_smallleg_contact",
+    "right_liangan2_contact",
+    "right_liangan3_contact",
+    "right_liangan5_contact",
+)
+# Keep the critic contact slice checkpoint-compatible while internal reward and
+# termination logic observes every non-wheel collision link.
+NONWHEEL_CONTACT_OBSERVATION_SENSORS: tuple[str, ...] = (
     "base_link_contact",
     "left_chuanliangan3_contact",
     "left_chuanliangan5_contact",
@@ -128,17 +153,21 @@ def compute_real68_motor_ctrl(
     wheel_kd: np.ndarray,
     calf_kp: np.ndarray,
     calf_kd: np.ndarray,
+    motor_strength: np.ndarray | None,
     ctrl_lower: np.ndarray,
     ctrl_upper: np.ndarray,
     out: np.ndarray,
 ) -> np.ndarray:
     out[:, HIP_INDICES] = hip_kd * (policy_ctrl[:, HIP_INDICES] - active_vel[:, HIP_INDICES])
-    out[:, WHEEL_INDICES] = (
-        wheel_kd * (policy_ctrl[:, WHEEL_INDICES] - active_vel[:, WHEEL_INDICES])
+    out[:, WHEEL_INDICES] = wheel_kd * (
+        policy_ctrl[:, WHEEL_INDICES] - active_vel[:, WHEEL_INDICES]
     )
-    out[:, CALF_INDICES] = calf_kp * (
-        policy_ctrl[:, CALF_INDICES] - active_pos[:, CALF_INDICES]
-    ) - calf_kd * active_vel[:, CALF_INDICES]
+    out[:, CALF_INDICES] = (
+        calf_kp * (policy_ctrl[:, CALF_INDICES] - active_pos[:, CALF_INDICES])
+        - calf_kd * active_vel[:, CALF_INDICES]
+    )
+    if motor_strength is not None:
+        out *= motor_strength
     np.clip(out, ctrl_lower, ctrl_upper, out=out)
     return out
 
@@ -159,10 +188,14 @@ class Real68BaseEnv(LocomotionBaseEnv):
         self.default_angles = np.asarray(DEFAULT_ACTIVE_ANGLES, dtype=self._init_qpos.dtype)
 
     def get_dof_pos(self) -> np.ndarray:
-        return _stack_sensors(self._backend, ACTIVE_JOINT_POS_SENSORS, dtype=self.default_angles.dtype)
+        return _stack_sensors(
+            self._backend, ACTIVE_JOINT_POS_SENSORS, dtype=self.default_angles.dtype
+        )
 
     def get_dof_vel(self) -> np.ndarray:
-        return _stack_sensors(self._backend, ACTIVE_JOINT_VEL_SENSORS, dtype=self.default_angles.dtype)
+        return _stack_sensors(
+            self._backend, ACTIVE_JOINT_VEL_SENSORS, dtype=self.default_angles.dtype
+        )
 
     def get_passive_dof_pos(self) -> np.ndarray:
         return _stack_sensors(

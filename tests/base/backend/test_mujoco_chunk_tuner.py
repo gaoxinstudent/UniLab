@@ -222,9 +222,11 @@ def test_emit_falls_back_to_stderr_when_info_disabled(capsys, monkeypatch):
     assert "chosen=4" in err
 
 
-def test_emit_uses_logger_when_info_enabled(capsys, caplog):
+def test_emit_uses_logger_when_info_enabled(capsys, caplog, monkeypatch):
     # Main process (Hydra-configured, INFO enabled): go through logging, NOT a
     # raw stderr print, so there is no duplicate line.
+    monkeypatch.setattr(ct.logger, "propagate", True)
+    monkeypatch.setattr(logging.getLogger("unilab"), "propagate", True)
     caplog.set_level(logging.INFO, logger=ct.logger.name)
     ct._emit("chunk_size: cache hit -> 4")
     assert "chunk_size: cache hit -> 4" not in capsys.readouterr().err

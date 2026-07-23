@@ -8,9 +8,13 @@ from dataclasses import dataclass
 from multiprocessing import cpu_count, current_process, get_context
 from typing import Any, Optional, cast
 
-import mujoco
+from .gl import ensure_mujoco_gl_backend
+
+ensure_mujoco_gl_backend()
+
+import mujoco  # noqa: E402
 import numpy as np
-from mujoco.batch_env import BatchEnvPool
+from mujoco.batch_env import BatchEnvPool  # noqa: E402
 
 from unilab.base.scene import SceneCfg
 from unilab.dr.types import (
@@ -281,6 +285,7 @@ class MuJoCoBackend(SimBackend):
         post_step_forward_sensor: bool = False,
         chunk_size: Optional[int] = None,
         adaptive_chunk_size: bool = False,
+        num_threads: Optional[int] = None,
         bench_nsteps: int = 1,
     ):
         scene_context = _build_mujoco_scene_context(scene)
@@ -321,7 +326,12 @@ class MuJoCoBackend(SimBackend):
         self._pending_xfrc_applied = np.zeros((num_envs, 6 * self._model.nbody), dtype=np.float64)
 
         # Thread configuration.
-        self._n_threads = min(num_envs, cpu_count() * 2)
+        default_threads = min(num_envs, cpu_count() * 2)
+        self._n_threads = (
+            default_threads
+            if num_threads is None
+            else min(num_envs, max(int(num_threads), 1))
+        )
 
         self._model_variants: tuple[mujoco.MjModel, ...] = (self._model,)
         self._model_assignments = np.zeros((num_envs,), dtype=np.int32)
@@ -890,6 +900,7 @@ class MuJoCoBackend(SimBackend):
             env_ids=np.asarray(env_indices, dtype=np.int32),
             initial_state=state_np,
             randomization=self._translate_reset_randomization(randomization, num_reset),
+            chunk_size=self._chunk_size,
         )
 
         self._physics_state[env_indices] = state_out.astype(self._np_dtype)
@@ -944,7 +955,7 @@ class MuJoCoBackend(SimBackend):
             bench_nsteps=self._bench_nsteps,
             manual_chunk_size=self._manual_chunk_size,
             adaptive=self._adaptive_chunk_size,
-            model_file=self._model_file,
+            model_file=self.scene_model_file,
         )
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:

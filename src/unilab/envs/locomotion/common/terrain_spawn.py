@@ -56,7 +56,14 @@ class TerrainCurriculumCfg:
     ``[num_rows * cycle_top_frac, num_rows - 1]``."""
     spawn_height_margin: float = 0.05
     """Extra z added on top of the sampled terrain surface height."""
+    performance_gating: bool = False
+    """Require task-provided performance masks for level changes."""
+    max_vx_error: float = 0.5
+    max_tilt_rate: float = 0.05
+    max_nonwheel_contact_rate: float = 0.03
     seed: int | None = None
+    bootstrap_type: str | None = None
+    """Optional terrain type used until the task unlocks terrain variety."""
 
 
 class TerrainSpawnManager(BaseSpawnManager):
@@ -68,6 +75,8 @@ class TerrainSpawnManager(BaseSpawnManager):
         cfg: TerrainCurriculumCfg,
         terrain_surface_sampler: object | None = None,
         spawn_height_points: np.ndarray | None = None,
+        type_probabilities: np.ndarray | None = None,
+        initial_type_col: int | None = None,
     ) -> None:
         if terrain_origins.ndim != 3 or terrain_origins.shape[2] != 3:
             raise ValueError(
@@ -96,8 +105,24 @@ class TerrainSpawnManager(BaseSpawnManager):
                 )
             self._spawn_height_points = points
         self._rng = np.random.default_rng(cfg.seed)
+        if type_probabilities is None:
+            self._type_probabilities = None
+        else:
+            probabilities = np.asarray(type_probabilities, dtype=np.float64)
+            if probabilities.shape != (num_cols,):
+                raise ValueError(
+                    f"type_probabilities must have shape ({num_cols},), got "
+                    f"{probabilities.shape}"
+                )
+            if np.any(probabilities < 0.0) or float(probabilities.sum()) <= 0.0:
+                raise ValueError("type_probabilities must be non-negative with a positive sum")
+            self._type_probabilities = probabilities / probabilities.sum()
 
-        self.type_cols = self._rng.integers(0, num_cols, size=num_envs).astype(np.int32)
+        if initial_type_col is None:
+            self.type_cols = self._sample_type_cols(num_envs)
+        else:
+            self._validate_type_col(initial_type_col)
+            self.type_cols = np.full(num_envs, int(initial_type_col), dtype=np.int32)
         if cfg.enabled:
             self.levels = np.zeros(num_envs, dtype=np.int32)
         else:
@@ -109,6 +134,60 @@ class TerrainSpawnManager(BaseSpawnManager):
     @property
     def enabled(self) -> bool:
         return self._cfg.enabled
+
+    def training_state_dict(self) -> dict[str, object]:
+        """Return curriculum state without retaining live physics buffers."""
+        return {
+            "version": 1,
+            "levels": self.levels.tolist(),
+            "type_cols": self.type_cols.tolist(),
+            "rng_state": _to_builtin(self._rng.bit_generator.state),
+        }
+
+    def load_training_state_dict(self, state: dict[str, object]) -> None:
+        version = int(state.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported terrain training state version: {version}")
+        levels = np.asarray(state["levels"], dtype=self.levels.dtype)
+        type_cols = np.asarray(state["type_cols"], dtype=self.type_cols.dtype)
+        if levels.shape != self.levels.shape or type_cols.shape != self.type_cols.shape:
+            raise ValueError(
+                "Terrain training state shape mismatch: "
+                f"levels={levels.shape}/{self.levels.shape}, "
+                f"type_cols={type_cols.shape}/{self.type_cols.shape}"
+            )
+        if np.any((levels < 0) | (levels >= self._num_rows)):
+            raise ValueError("Terrain training state contains an invalid level")
+        if np.any((type_cols < 0) | (type_cols >= self._num_cols)):
+            raise ValueError("Terrain training state contains an invalid type column")
+        self.levels[:] = levels
+        self.type_cols[:] = type_cols
+        self._rng.bit_generator.state = state["rng_state"]  # type: ignore[assignment]
+        self._has_started.fill(False)
+
+    def _validate_type_col(self, type_col: int) -> None:
+        if not 0 <= int(type_col) < self._num_cols:
+            raise ValueError(
+                f"terrain type column must be in [0, {self._num_cols}), got {type_col}"
+            )
+
+    def _sample_type_cols(self, count: int) -> np.ndarray:
+        return np.asarray(
+            self._rng.choice(
+                self._num_cols,
+                size=int(count),
+                p=self._type_probabilities,
+            ),
+            dtype=np.int32,
+        )
+
+    def set_type_col(self, env_ids: np.ndarray, type_col: int) -> None:
+        self._validate_type_col(type_col)
+        self.type_cols[np.asarray(env_ids, dtype=np.int32)] = int(type_col)
+
+    def resample_type_cols(self, env_ids: np.ndarray) -> None:
+        ids = np.asarray(env_ids, dtype=np.int32)
+        self.type_cols[ids] = self._sample_type_cols(ids.size)
 
     def origins_for(self, env_ids: np.ndarray) -> np.ndarray:
         rows = self.levels[env_ids]
@@ -186,7 +265,14 @@ class TerrainSpawnManager(BaseSpawnManager):
         self._episode_start_xyz[env_ids] = qpos_xyz
         self._has_started[env_ids] = True
 
-    def update_on_done(self, done_indices: np.ndarray, current_xyz: np.ndarray) -> dict[str, float]:
+    def update_on_done(
+        self,
+        done_indices: np.ndarray,
+        current_xyz: np.ndarray,
+        *,
+        promote_performance: np.ndarray | None = None,
+        demote_performance: np.ndarray | None = None,
+    ) -> dict[str, float]:
         active_mask = self._has_started[done_indices]
         active = done_indices[active_mask]
         num_skipped = int((~active_mask).sum())
@@ -213,6 +299,17 @@ class TerrainSpawnManager(BaseSpawnManager):
             demote_threshold = self._cfg.demote_frac * self._cell_size
             promote_mask = walked > promote_threshold
             demote_mask = walked < demote_threshold
+            if promote_performance is not None:
+                promote = np.asarray(promote_performance, dtype=bool)
+                if promote.shape != done_indices.shape:
+                    raise ValueError("promote_performance must match done_indices shape")
+                promote_mask &= promote[active_mask]
+            if demote_performance is not None:
+                demote = np.asarray(demote_performance, dtype=bool)
+                if demote.shape != done_indices.shape:
+                    raise ValueError("demote_performance must match done_indices shape")
+                demote_mask |= demote[active_mask]
+            demote_mask &= ~promote_mask
 
             promote_ids = active[promote_mask]
             demote_ids = active[demote_mask]
@@ -242,3 +339,16 @@ class TerrainSpawnManager(BaseSpawnManager):
             "num_demoted": num_demoted,
             "num_skipped": num_skipped,
         }
+
+
+def _to_builtin(value: object) -> object:
+    """Convert NumPy RNG state into a weights-only torch-loadable payload."""
+    if isinstance(value, dict):
+        return {str(key): _to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_builtin(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value

@@ -44,6 +44,7 @@ class HIMEstimator(nn.Module):
         temperature: float = 3.0,
         velocity_target_start: int | None = None,
         target_obs_start: int = 3,
+        latent_dim: int | None = None,
     ) -> None:
         super().__init__()
         if temporal_steps <= 0:
@@ -55,7 +56,7 @@ class HIMEstimator(nn.Module):
 
         self.temporal_steps = int(temporal_steps)
         self.num_one_step_obs = int(num_one_step_obs)
-        self.num_latent = int(enc_hidden_dims[-1])
+        self.num_latent = int(enc_hidden_dims[-1] if latent_dim is None else latent_dim)
         self.max_grad_norm = float(max_grad_norm)
         self.temperature = float(temperature)
         self.velocity_target_start = (
@@ -65,21 +66,27 @@ class HIMEstimator(nn.Module):
 
         enc_input_dim = self.temporal_steps * self.num_one_step_obs
         enc_layers: list[nn.Module] = []
-        for hidden_dim in enc_hidden_dims[:-1]:
+        encoder_hidden_dims = enc_hidden_dims[:-1] if latent_dim is None else enc_hidden_dims
+        for hidden_dim in encoder_hidden_dims:
             enc_layers += [nn.Linear(enc_input_dim, int(hidden_dim)), get_activation(activation)]
             enc_input_dim = int(hidden_dim)
         enc_layers += [nn.Linear(enc_input_dim, self.num_latent + 3)]
         self.encoder = nn.Sequential(*enc_layers)
 
-        tar_input_dim = self.num_one_step_obs
-        tar_layers: list[nn.Module] = []
-        for hidden_dim in tar_hidden_dims:
-            tar_layers += [nn.Linear(tar_input_dim, int(hidden_dim)), get_activation(activation)]
-            tar_input_dim = int(hidden_dim)
-        tar_layers += [nn.Linear(tar_input_dim, self.num_latent)]
-        self.target = nn.Sequential(*tar_layers)
-
-        self.proto = nn.Embedding(int(num_prototype), self.num_latent)
+        self.target: nn.Sequential | None = None
+        self.proto: nn.Embedding | None = None
+        if self.num_latent > 0:
+            tar_input_dim = self.num_one_step_obs
+            tar_layers: list[nn.Module] = []
+            for hidden_dim in tar_hidden_dims:
+                tar_layers += [
+                    nn.Linear(tar_input_dim, int(hidden_dim)),
+                    get_activation(activation),
+                ]
+                tar_input_dim = int(hidden_dim)
+            tar_layers += [nn.Linear(tar_input_dim, self.num_latent)]
+            self.target = nn.Sequential(*tar_layers)
+            self.proto = nn.Embedding(int(num_prototype), self.num_latent)
         self.learning_rate = float(learning_rate)
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
 
@@ -94,7 +101,8 @@ class HIMEstimator(nn.Module):
     def encode(self, obs_history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         parts = self.encoder(obs_history.detach())
         vel, z = parts[..., :3], parts[..., 3:]
-        z = F.normalize(z, dim=-1, p=2)
+        if self.num_latent > 0:
+            z = F.normalize(z, dim=-1, p=2)
         return vel, z
 
     def update(
@@ -120,30 +128,26 @@ class HIMEstimator(nn.Module):
             )
 
         vel = next_critic_obs[:, vel_start:vel_end].detach()
-        next_obs = next_critic_obs[:, target_start:target_end].detach()
-
         parts = self.encoder(obs_history)
         pred_vel, z_s = parts[..., :3], parts[..., 3:]
-        z_t = self.target(next_obs)
-
-        z_s = F.normalize(z_s, dim=-1, p=2)
-        z_t = F.normalize(z_t, dim=-1, p=2)
-
-        with torch.no_grad():
-            self.proto.weight.copy_(F.normalize(self.proto.weight.data.clone(), dim=-1, p=2))
-
-        score_s = z_s @ self.proto.weight.T
-        score_t = z_t @ self.proto.weight.T
-
-        with torch.no_grad():
-            q_s = sinkhorn(score_s)
-            q_t = sinkhorn(score_t)
-
-        log_p_s = F.log_softmax(score_s / self.temperature, dim=-1)
-        log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
-
-        swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
         estimation_loss = F.mse_loss(pred_vel, vel)
+        swap_loss = torch.zeros((), device=estimation_loss.device)
+        if self.num_latent > 0:
+            assert self.target is not None and self.proto is not None
+            next_obs = next_critic_obs[:, target_start:target_end].detach()
+            z_t = self.target(next_obs)
+            z_s = F.normalize(z_s, dim=-1, p=2)
+            z_t = F.normalize(z_t, dim=-1, p=2)
+            with torch.no_grad():
+                self.proto.weight.copy_(F.normalize(self.proto.weight.data, dim=-1, p=2))
+            score_s = z_s @ self.proto.weight.T
+            score_t = z_t @ self.proto.weight.T
+            with torch.no_grad():
+                q_s = sinkhorn(score_s)
+                q_t = sinkhorn(score_t)
+            log_p_s = F.log_softmax(score_s / self.temperature, dim=-1)
+            log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
+            swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
         loss = estimation_loss + swap_loss
 
         self.optimizer.zero_grad()

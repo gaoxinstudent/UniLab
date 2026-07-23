@@ -34,6 +34,7 @@ def _headless_run(sim: Real68Sim2Sim, *, steps: int) -> None:
         linvel_samples.append(float(linvel[sim.forward_axis] * sim.forward_sign))
     distance = float((sim.data.qpos[sim.forward_axis] - start_forward) * sim.forward_sign)
     mean_vx = float(np.mean(linvel_samples)) if linvel_samples else 0.0
+    print(f"[sim2sim] final status: {sim.status_line()}")
     print(
         f"[sim2sim] headless summary: steps={steps} distance_forward={distance:.3f} mean_vx={mean_vx:.3f}"
     )
@@ -47,6 +48,8 @@ def _build_commander(
     deadzone: float,
     vx_scale: float | None,
     wz_scale: float | None,
+    ps2_vx_axis: int,
+    ps2_wz_axis: int,
 ):
     if input_device == "keyboard":
         commander = KeyboardCommander()
@@ -60,6 +63,10 @@ def _build_commander(
         deadzone=deadzone,
         vx_scale=default_vx_scale if vx_scale is None else float(vx_scale),
         wz_scale=default_wz_scale if wz_scale is None else float(wz_scale),
+        vx_max=float(max(abs(sim.command_limits[0, 0]), abs(sim.command_limits[1, 0]))),
+        wz_max=float(max(abs(sim.command_limits[0, 2]), abs(sim.command_limits[1, 2]))),
+        vx_axis=ps2_vx_axis,
+        wz_axis=ps2_wz_axis,
     )
 
 
@@ -71,6 +78,8 @@ def _interactive_run(
     deadzone: float,
     vx_scale: float | None,
     wz_scale: float | None,
+    ps2_vx_axis: int,
+    ps2_wz_axis: int,
 ) -> None:
     import mujoco.viewer
 
@@ -81,6 +90,8 @@ def _interactive_run(
         deadzone=deadzone,
         vx_scale=vx_scale,
         wz_scale=wz_scale,
+        ps2_vx_axis=ps2_vx_axis,
+        ps2_wz_axis=ps2_wz_axis,
     )
 
     def _on_key(keycode: int) -> None:
@@ -105,7 +116,7 @@ def _interactive_run(
             "[sim2sim] PS2 controls: left stick Y choose forward/back direction, "
             "right stick X choose yaw direction, D-pad up/down adjust |vx|, "
             "D-pad left/right adjust |wz|, CROSS zero, START reset, SELECT pause, CIRCLE next terrain, "
-            "TRIANGLE follow-camera, SQUARE single-step. D-pad magnitude is uncapped."
+            "TRIANGLE follow-camera, SQUARE single-step. Commands are clipped to the bundle limits."
         )
     try:
         with mujoco.viewer.launch_passive(sim.model, sim.data, key_callback=_on_key) as viewer:
@@ -152,11 +163,6 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=4000, help="Headless simulation steps.")
     parser.add_argument("--random-yaw", action="store_true", help="Use randomized yaw on reset.")
     parser.add_argument(
-        "--recovery-reset",
-        action="store_true",
-        help="Reset from a random roll/pitch pose to test self-righting.",
-    )
-    parser.add_argument(
         "--auto-reset", action="store_true", help="Automatically reset on fall/contact failure."
     )
     parser.add_argument(
@@ -186,6 +192,8 @@ def main() -> None:
         default=None,
         help="Initial yaw-rate magnitude and D-pad step-size reference for PS2 mode.",
     )
+    parser.add_argument("--ps2-vx-axis", type=int, default=1, help="PS2 forward-stick axis index.")
+    parser.add_argument("--ps2-wz-axis", type=int, default=2, help="PS2 yaw-stick axis index.")
     args = parser.parse_args()
 
     bundle_dir = args.bundle_dir.resolve() if args.bundle_dir is not None else _default_bundle_dir()
@@ -195,7 +203,6 @@ def main() -> None:
         command_override=command,
         random_yaw=bool(args.random_yaw),
         auto_reset=bool(args.auto_reset),
-        recovery_reset=bool(args.recovery_reset),
     )
     if args.terrain_cell is not None:
         sim.set_terrain_cell(int(args.terrain_cell))
@@ -210,6 +217,8 @@ def main() -> None:
         deadzone=float(args.deadzone),
         vx_scale=args.vx_scale,
         wz_scale=args.wz_scale,
+        ps2_vx_axis=int(args.ps2_vx_axis),
+        ps2_wz_axis=int(args.ps2_wz_axis),
     )
 
 

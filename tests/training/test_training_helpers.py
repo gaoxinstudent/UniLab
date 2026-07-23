@@ -11,7 +11,7 @@ from unilab.base.backend.motrix.backend import MotrixBackend
 from unilab.base.backend.motrix.playback import run_motrix_playback
 from unilab.base.backend.mujoco.backend import MuJoCoBackend
 from unilab.base.backend.mujoco.playback import run_mujoco_playback
-from unilab.base.scene import SceneCfg
+from unilab.base.scene import SceneCfg, TerrainSceneCfg
 from unilab.training import (
     BackendAdapter,
     get_entrypoint_log_root,
@@ -575,6 +575,13 @@ def test_render_play_mode_defaults_to_env_physics_snapshot(
             self.snapshot_calls += 1
             return np.full((2, 4), self.snapshot_calls, dtype=np.float32)
 
+        def get_playback_root_xy_offsets(self) -> np.ndarray:
+            shift = float(self.snapshot_calls - 1)
+            return np.asarray(
+                [[10.0 + shift, 20.0 + shift], [30.0 + shift, 40.0 + shift]],
+                dtype=np.float32,
+            )
+
         def run_playback(self, **kwargs):
             kwargs = _resolve_low_level_playback_flags(kwargs)
             kwargs.pop("render_offset_mode", None)
@@ -612,6 +619,70 @@ def test_render_play_mode_defaults_to_env_physics_snapshot(
     assert env.snapshot_calls == 2
     assert captured["model_file"] == "scene.xml"
     assert captured["fps"] == 20
+    states = captured["states"]
+    np.testing.assert_allclose(states[0][:, 1:3], [[-9.0, -19.0], [-29.0, -39.0]])
+    np.testing.assert_allclose(states[1][:, 1:3], [[-9.0, -19.0], [-29.0, -39.0]])
+
+
+def test_mujoco_hfield_playback_keeps_robot_and_terrain_in_world_coordinates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    captured: dict[str, object] = {}
+
+    class FakeEnv:
+        def __init__(self):
+            self.cfg = type(
+                "Cfg",
+                (),
+                {
+                    "ctrl_dt": 0.05,
+                    "scene": SceneCfg(
+                        model_file="scene.xml",
+                        terrain=TerrainSceneCfg(),
+                    ),
+                },
+            )()
+
+        def get_physics_state_snapshot(self) -> np.ndarray:
+            return np.asarray([[0.0, 10.0, 20.0, 0.0]], dtype=np.float32)
+
+        def get_playback_root_xy_offsets(self) -> np.ndarray:
+            return np.asarray([[10.0, 20.0]], dtype=np.float32)
+
+        def run_playback(self, **kwargs):
+            kwargs = _resolve_low_level_playback_flags(kwargs)
+            kwargs.pop("render_offset_mode", None)
+            return run_mujoco_playback(env=self, **kwargs)
+
+    def _render_states_get_frames(state_list, model_file, **kwargs):
+        captured["states"] = state_list
+        captured["model_file"] = model_file
+        captured["render_spacing"] = kwargs["render_spacing"]
+        return [np.zeros((2, 2, 3), dtype=np.uint8)]
+
+    monkeypatch.setattr(
+        "unilab.base.backend.playback_common.imageio.mimsave",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "unilab.visualization.render_many.render_states_get_frames",
+        _render_states_get_frames,
+    )
+
+    output_path = tmp_path / "play.mp4"
+    result = render_play_mode(
+        FakeEnv(),
+        sim_backend="mujoco",
+        initialize=lambda: 0,
+        step=lambda obs: obs + 1,
+        num_steps=1,
+        output_video=output_path,
+    )
+
+    assert result == str(output_path)
+    states = captured["states"]
+    np.testing.assert_allclose(states[0][:, 1:3], [[10.0, 20.0]])
+    assert captured["render_spacing"] == pytest.approx(0.0)
 
 
 def test_render_play_mode_uses_visualized_per_env_playback_models_for_video_export(

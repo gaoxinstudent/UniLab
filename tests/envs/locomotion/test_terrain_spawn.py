@@ -54,6 +54,46 @@ def test_init_type_cols_random_seeded():
     assert not np.array_equal(a.type_cols, c.type_cols)
 
 
+def test_initial_type_col_locks_then_resamples_with_configured_weights():
+    origins = _make_terrain_origins(num_rows=3, num_cols=3, cell_size=8.0)
+    manager = TerrainSpawnManager(
+        8,
+        origins,
+        8.0,
+        TerrainCurriculumCfg(enabled=True, seed=7),
+        type_probabilities=np.asarray([0.0, 0.0, 1.0]),
+        initial_type_col=0,
+    )
+    np.testing.assert_array_equal(manager.type_cols, np.zeros((8,), dtype=np.int32))
+
+    manager.resample_type_cols(np.asarray([1, 3, 5], dtype=np.int32))
+    np.testing.assert_array_equal(manager.type_cols, [0, 2, 0, 2, 0, 2, 0, 0])
+
+    manager.set_type_col(np.asarray([1, 5], dtype=np.int32), 0)
+    np.testing.assert_array_equal(manager.type_cols, [0, 0, 0, 2, 0, 0, 0, 0])
+
+
+def test_training_state_round_trip_restores_curriculum_and_rng():
+    original = _make_manager(num_envs=4, enabled=True, seed=17)
+    original.levels[:] = [0, 1, 2, 3]
+    state = original.training_state_dict()
+    expected_next_types = original._sample_type_cols(8)
+
+    restored = _make_manager(num_envs=4, enabled=True, seed=999)
+    restored.load_training_state_dict(state)
+
+    np.testing.assert_array_equal(restored.levels, [0, 1, 2, 3])
+    np.testing.assert_array_equal(restored.type_cols, original.type_cols)
+    np.testing.assert_array_equal(restored._sample_type_cols(8), expected_next_types)
+    assert not np.any(restored._has_started)
+
+
+def test_training_state_rejects_different_env_count():
+    state = _make_manager(num_envs=4, enabled=True).training_state_dict()
+    with pytest.raises(ValueError, match="shape mismatch"):
+        _make_manager(num_envs=3, enabled=True).load_training_state_dict(state)
+
+
 def test_origins_match_terrain_origins_plus_margin():
     sm = _make_manager(num_envs=4, enabled=True, spawn_height_margin=0.07)
     sm.levels[:] = [1, 2, 3, 4]
@@ -92,6 +132,24 @@ def test_demote_when_walked_short_and_enabled():
     assert sm.levels[1] == 4
     assert stats["num_demoted"] == 1
     assert stats["num_promoted"] == 1
+
+
+def test_performance_masks_gate_promotion_and_force_demotion():
+    sm = _make_manager(num_envs=2, cell_size=8.0, enabled=True)
+    sm.levels[:] = [2, 2]
+    sm.record_episode_start(np.array([0, 1]), np.zeros((2, 3)))
+    current = np.array([[10.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+
+    stats = sm.update_on_done(
+        np.array([0, 1]),
+        current,
+        promote_performance=np.array([True, False]),
+        demote_performance=np.array([False, True]),
+    )
+
+    np.testing.assert_array_equal(sm.levels, np.array([3, 1]))
+    assert stats["num_promoted"] == 1
+    assert stats["num_demoted"] == 1
 
 
 def test_levels_immutable_when_disabled():
@@ -133,6 +191,7 @@ def test_log_stats_keys():
     expected = {
         "mean_level",
         "max_level",
+        "min_level",
         "mean_walked",
         "num_promoted",
         "num_demoted",

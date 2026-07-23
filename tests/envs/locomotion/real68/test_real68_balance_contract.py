@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
 from unilab.assets import ASSETS_ROOT_PATH
 from unilab.base import registry
@@ -9,7 +10,10 @@ from unilab.base.registry import ensure_registries
 from unilab.base.scene import SceneCfg
 from unilab.envs.locomotion.common.rewards import RewardContext
 from unilab.envs.locomotion.real68.base import (
+    ACTIVE_JOINT_NAMES,
     DEFAULT_ACTIVE_ANGLES,
+    NONWHEEL_CONTACT_OBSERVATION_SENSORS,
+    NONWHEEL_CONTACT_SENSORS,
     POSTURE_INDICES,
     SYMMETRIC_STANDING_ACTIVE_ANGLES,
     WHEEL_INDICES,
@@ -27,6 +31,109 @@ def test_real68_scene_compiles_and_has_expected_counts():
     assert model.nu == 6
     assert model.nsensor >= 30
     assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home") >= 0
+    for sensor_name in NONWHEEL_CONTACT_SENSORS:
+        assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, sensor_name) >= 0
+    assert len(NONWHEEL_CONTACT_OBSERVATION_SENSORS) == 5
+
+
+def test_real68_collision_contract_uses_mesh_links_and_cylinder_wheels():
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(
+        str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+    )
+    collision_meshes = [
+        "left_hip_bigleg_collision",
+        "left_calf_smallleg_liangan_collision",
+        "left_calf_smallleg_collision",
+        "left_chuanliangan2_collision",
+        "left_chuanliangan3_collision",
+        "left_chuanliangan5_collision",
+        "right_hip_bigleg_collision",
+        "right_calf_smallleg_liangan_collision",
+        "right_calf_smallleg_collision",
+        "right_liangan2_collision",
+        "right_liangan3_collision",
+        "right_liangan5_collision",
+    ]
+    collision_meshes.append("base_link_collision")
+    for name in collision_meshes:
+        geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        assert geom_id >= 0, name
+        assert model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_MESH
+        assert model.geom_contype[geom_id] == 1
+        assert model.geom_conaffinity[geom_id] == 1
+        collision_mesh_id = model.geom_dataid[geom_id]
+        collision_mesh_name = mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_MESH, collision_mesh_id
+        )
+        assert collision_mesh_name == f"{name}_mesh"
+        assert model.mesh_vertnum[collision_mesh_id] < 256
+        assert model.mesh_facenum[collision_mesh_id] < 512
+
+        visual_geom_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, name.replace("_collision", "_visual")
+        )
+        assert model.geom_dataid[visual_geom_id] != collision_mesh_id
+
+    for side in ("left", "right"):
+        wheel_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_wheel_ground_contact"
+        )
+        assert model.geom_type[wheel_id] == mujoco.mjtGeom.mjGEOM_CYLINDER
+        assert model.geom_contype[wheel_id] == 1
+        assert model.geom_conaffinity[wheel_id] == 1
+        wheel_mesh_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_wheel_collision"
+        )
+        assert model.geom_contype[wheel_mesh_id] == 0
+        assert model.geom_conaffinity[wheel_mesh_id] == 0
+
+    for removed_proxy in (
+        "base_link_ground_contact",
+        "left_chuanliangan3_ground_contact",
+        "left_chuanliangan5_ground_contact",
+        "right_liangan3_ground_contact",
+        "right_liangan5_ground_contact",
+    ):
+        assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, removed_proxy) == -1
+
+    data = mujoco.MjData(model)
+    home_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
+    mujoco.mj_resetDataKeyframe(model, data, home_key)
+    mujoco.mj_forward(model, data)
+    assert data.ncon == 0
+
+
+def test_real68_production_reset_profile_is_upright_and_clear_of_floor():
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(
+        str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+    )
+    task_cfg = OmegaConf.load(
+        ASSETS_ROOT_PATH.parents[2] / "conf" / "ppo" / "task" / "real68_balance" / "mujoco.yaml"
+    )
+    assert task_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
+    assert task_cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
+    assert "initial_pose_bank" not in task_cfg.env.recovery
+    assert "initial_joint_pose_bank" not in task_cfg.env.recovery
+    assert task_cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
+    assert task_cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
+
+    play_recovery = task_cfg.play_profile.env.recovery
+    assert play_recovery.initial_recovery_probability == pytest.approx(0.0)
+    assert play_recovery.final_recovery_probability == pytest.approx(0.0)
+    assert "initial_pose_bank" not in play_recovery
+    assert "initial_joint_pose_bank" not in play_recovery
+
+    home_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, home_key)
+    data.qpos[2] = float(task_cfg.env.recovery.initial_base_height)
+    np.testing.assert_allclose(data.qpos[3:7], np.asarray([1.0, 0.0, 0.0, 0.0]))
+    mujoco.mj_forward(model, data)
+    assert all(data.contact[index].dist >= -1.0e-6 for index in range(data.ncon))
 
 
 def test_real68_balance_env_reset_and_step_contract():
@@ -48,13 +155,13 @@ def test_real68_balance_env_reset_and_step_contract():
     try:
         state = env.init_state()
         assert set(state.obs) == {"obs", "critic"}
-        assert state.obs["obs"].shape == (2, 32)
-        assert state.obs["critic"].shape == (2, 45)
+        assert state.obs["obs"].shape == (2, 28)
+        assert state.obs["critic"].shape == (2, 59)
         reset_obs, _ = env.reset(np.asarray([0], dtype=np.int32))
-        assert reset_obs["obs"].shape == (1, 32)
-        assert reset_obs["critic"].shape == (1, 45)
+        assert reset_obs["obs"].shape == (1, 28)
+        assert reset_obs["critic"].shape == (1, 59)
         step_state = env.step(np.zeros((2, 6), dtype=np.float32))
-        assert step_state.obs["obs"].shape == (2, 32)
+        assert step_state.obs["obs"].shape == (2, 28)
         assert step_state.reward.shape == (2,)
         assert step_state.terminated.shape == (2,)
         log = step_state.info.get("log", {})
@@ -125,7 +232,39 @@ def test_real68_joint_penalties_ignore_wheel_positions_and_power():
         env.close()
 
 
-def test_real68_deployment_observation_uses_wheel_odometry_when_enabled():
+def test_real68_nonwheel_contact_termination_has_explicit_reward():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "reward_config": {
+                "scales": {"nonwheel_contact_termination": -50.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        ctx = RewardContext(
+            info={"termination_nonwheel_contact": np.asarray([True, False])},
+            linvel=np.zeros((2, 3)),
+            gyro=np.zeros((2, 3)),
+            dof_pos=np.zeros((2, env._num_action)),
+            num_envs=2,
+        )
+        np.testing.assert_array_equal(
+            env._reward_fns["nonwheel_contact_termination"](ctx),
+            np.asarray([1.0, 0.0]),
+        )
+    finally:
+        env.close()
+
+
+def test_real68_all_collision_links_trigger_nonwheel_contact_handling():
     ensure_registries()
     env = registry.make(
         "Real68BalanceFlat",
@@ -135,7 +274,104 @@ def test_real68_deployment_observation_uses_wheel_odometry_when_enabled():
             "scene": SceneCfg(
                 model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
             ),
-            "sensor": {"use_wheel_odometry": True},
+            "recovery": {"enabled": False},
+            "termination_config": {
+                "nonwheel_contact_termination": True,
+                "nonwheel_contact_max_steps": 1,
+            },
+            "reward_config": {
+                "scales": {"nonwheel_contact": -1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._nonwheel_contacts.fill(0.0)
+        sensor_index = NONWHEEL_CONTACT_SENSORS.index("left_calf_smallleg_contact")
+        env._nonwheel_contacts[0, sensor_index] = 1.0
+        ctx = RewardContext(
+            info={},
+            linvel=np.zeros((1, 3), dtype=np.float32),
+            gyro=np.zeros((1, 3), dtype=np.float32),
+            dof_pos=np.zeros((1, env._num_action), dtype=np.float32),
+            num_envs=1,
+        )
+        np.testing.assert_allclose(env._reward_nonwheel_contact(ctx), np.ones((1,)))
+        causes = env._compute_termination_causes(
+            np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32)
+        )
+        assert causes["nonwheel_contact"][0]
+        assert causes["terminated"][0]
+    finally:
+        env.close()
+
+
+def test_real68_accumulated_path_error_penalties_are_bounded(monkeypatch):
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+                "balance_gate": {
+                    "enabled": True,
+                    "heading_error_limit": 0.3,
+                    "lateral_drift_limit": 0.3,
+                },
+            },
+        },
+    )
+    try:
+        ctx = RewardContext(
+            info={"commands": np.asarray([[0.5, 0.0, 0.0]], dtype=np.float32)},
+            linvel=np.zeros((1, 3), dtype=np.float32),
+            gyro=np.zeros((1, 3), dtype=np.float32),
+            dof_pos=np.broadcast_to(env.default_angles, (1, env._num_action)).copy(),
+            num_envs=1,
+            default_angles=env.default_angles,
+        )
+
+        monkeypatch.setattr(
+            env, "_compute_heading_error", lambda: np.asarray([0.3], dtype=np.float32)
+        )
+        monkeypatch.setattr(
+            env, "_compute_lateral_drift", lambda: np.asarray([0.3], dtype=np.float32)
+        )
+        heading_at_limit = env._reward_heading_stability(ctx)
+        drift_at_limit = env._reward_lateral_drift(ctx)
+        np.testing.assert_allclose(heading_at_limit, np.asarray([0.5]), atol=1.0e-6)
+        np.testing.assert_allclose(drift_at_limit, np.asarray([0.5]), atol=1.0e-6)
+
+        monkeypatch.setattr(
+            env, "_compute_heading_error", lambda: np.asarray([10.0], dtype=np.float32)
+        )
+        monkeypatch.setattr(
+            env, "_compute_lateral_drift", lambda: np.asarray([10.0], dtype=np.float32)
+        )
+        heading_far = env._reward_heading_stability(ctx)
+        drift_far = env._reward_lateral_drift(ctx)
+        assert float(heading_at_limit[0]) < float(heading_far[0]) < 1.0
+        assert float(drift_at_limit[0]) < float(drift_far[0]) < 1.0
+    finally:
+        env.close()
+
+
+def test_real68_v2_actor_excludes_local_linvel_and_keeps_wheel_velocity():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
             "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
         },
     )
@@ -145,14 +381,16 @@ def test_real68_deployment_observation_uses_wheel_odometry_when_enabled():
         dof_vel[:, WHEEL_INDICES] = -10.0
         obs = env._compute_obs(
             {"commands": np.zeros((1, 3), dtype=np.float32)},
-            np.zeros((1, 3), dtype=np.float32),
+            np.asarray([[4.0, 5.0, 6.0]], dtype=np.float32),
             np.zeros((1, 3), dtype=np.float32),
             np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32),
             np.zeros((1, 3), dtype=np.float32),
             dof_pos,
             dof_vel,
         )
-        np.testing.assert_allclose(obs["obs"][:, :3], [[0.0, 0.6, 0.0]])
+        np.testing.assert_allclose(obs["obs"][:, :3], np.zeros((1, 3)))
+        np.testing.assert_allclose(obs["obs"][:, 17:19], [[-10.0, -10.0]])
+        np.testing.assert_allclose(obs["critic"][:, :3], [[4.0, 5.0, 6.0]])
     finally:
         env.close()
 
@@ -190,7 +428,32 @@ def test_real68_actor_height_command_does_not_require_measured_base_height():
             np.zeros_like(dof_pos),
         )
         assert obs["obs"][0, -1] == pytest.approx(0.02)
-        assert obs["critic"][0, 28] != pytest.approx(obs["obs"][0, -1])
+        assert obs["critic"][0, -1] != pytest.approx(obs["obs"][0, -1])
+    finally:
+        env.close()
+
+
+def test_real68_history_reset_repeats_first_frame_and_exposes_estimator_target():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "history": {"num_actor_history": 5, "num_critic_history": 1},
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        obs, _ = env.reset(np.asarray([0, 1], dtype=np.int32))
+        assert obs["obs"].shape == (2, 140)
+        assert obs["critic"].shape == (2, 59)
+        frames = obs["obs"].reshape(2, 5, 28)
+        np.testing.assert_allclose(frames, np.repeat(frames[:, :1], 5, axis=1))
+        np.testing.assert_allclose(obs["critic"][:, 3:31], frames[:, -1])
     finally:
         env.close()
 
@@ -246,6 +509,7 @@ def test_real68_recovery_zeros_commands_and_suppresses_fall_termination():
         assert not env._recovery_active[0]
         assert env._recovery_stabilizing[0]
         assert not info["recovery_completed"][0]
+        np.testing.assert_allclose(info["commands"], np.zeros((1, 3)))
         env._update_recovery_state(info, upright_gravity)
         assert not env._recovery_stabilizing[0]
         assert info["recovery_completed"][0]
@@ -385,6 +649,109 @@ def test_real68_recovery_orientation_curriculum_advances_and_backs_off_from_outc
         env._recovery_orientation_stage_for_env[:] = 1
         env._update_recovery_orientation_curriculum(~completed, completed)
         assert env._recovery_orientation_stage == 0
+    finally:
+        env.close()
+
+
+def test_real68_recovery_joint_pose_reset_writes_active_qpos():
+    ensure_registries()
+    offsets = np.asarray([0.2, 0.0, -0.1, -0.3, 0.0, 0.15])
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "recovery": {
+                "enabled": True,
+                "initial_recovery_probability": 1.0,
+                "final_recovery_probability": 1.0,
+                "orientation_curriculum": False,
+                "initial_joint_pose_bank": [
+                    {"name": "test_pose", "offsets": offsets.tolist()}
+                ],
+                "joint_pose_stages": [1.0],
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        assert env._dr_manager is not None
+        plan = env._dr_manager._provider.build_reset_plan(
+            env, np.asarray([0, 1], dtype=np.int32)
+        )
+        np.testing.assert_allclose(
+            plan.qpos[:, env._active_qpos_indices],
+            np.broadcast_to(
+                env._init_qpos[env._active_qpos_indices] + offsets, (2, offsets.size)
+            ),
+        )
+        assert np.all(plan.info_updates["recovery_joint_pose_ids"] == 0)
+    finally:
+        env.close()
+
+
+def test_real68_joint_pose_curriculum_uses_worst_enabled_pose():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "recovery": {
+                "enabled": True,
+                "orientation_curriculum": False,
+                "initial_joint_pose_bank": [
+                    {"name": "a", "offsets": [0.0] * 6},
+                    {"name": "b", "offsets": [0.1] * 6},
+                ],
+                "joint_pose_stages": [0.0, 1.0],
+                "joint_pose_min_outcomes": 2,
+                "joint_pose_update_interval_logs": 1,
+                "joint_pose_success_threshold": 0.75,
+                "joint_pose_backoff_threshold": 0.25,
+                "joint_pose_unlock_orientation_scale": 0.0,
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        env._recovery_joint_pose_id_for_env[:] = [0, 1]
+        env._update_recovery_joint_pose_curriculum(
+            np.asarray([True, True]), np.asarray([False, False])
+        )
+        assert env._recovery_joint_pose_stage == 1
+
+        env._recovery_joint_pose_stage_for_env[:] = 1
+        env._update_recovery_joint_pose_curriculum(
+            np.asarray([True, False]), np.asarray([False, True])
+        )
+        assert env._recovery_joint_pose_stage == 0
+    finally:
+        env.close()
+
+
+def test_real68_domain_randomization_curriculum_tracks_recovery_stages():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "domain_rand_curriculum": {"enabled": True, "stages": [0.0, 0.5, 1.0]},
+            "recovery": {
+                "orientation_stages": [0.25, 1.0],
+                "initial_joint_pose_bank": [{"name": "neutral", "offsets": [0.0] * 6}],
+                "joint_pose_stages": [0.0, 1.0],
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        assert env._domain_rand_scale() == pytest.approx(0.0)
+        env._recovery_orientation_stage = 1
+        assert env._domain_rand_scale() == pytest.approx(0.0)
+        env._recovery_joint_pose_stage = 1
+        assert env._domain_rand_scale() == pytest.approx(1.0)
     finally:
         env.close()
 
@@ -611,6 +978,12 @@ def test_real68_command_curriculum_bootstraps_standing_before_velocity_commands(
                 "standing_prob_initial": 0.0,
                 "standing_prob_final": 0.0,
             },
+            "recovery": {
+                "enabled": True,
+                "initial_recovery_probability": 0.2,
+                "final_recovery_probability": 0.4,
+                "in_episode_fall_recovery_progress": 0.0,
+            },
             "reward_config": {
                 "scales": {"alive": 1.0},
                 "tracking_sigma": 0.25,
@@ -618,21 +991,228 @@ def test_real68_command_curriculum_bootstraps_standing_before_velocity_commands(
         },
     )
     try:
+        assert env._recovery_reset_probability() == pytest.approx(0.0)
         assert env._standing_command_probability() == pytest.approx(1.0)
         np.testing.assert_allclose(env.sample_velocity_commands(8), np.zeros((8, 3)))
+
+        env._recovery_active.fill(False)
+        env._recovery_eligible.fill(False)
+        fallen_gravity = np.zeros((8, 3), dtype=np.float32)
+        fallen_gravity[:, 2] = 0.8
+        recovery_info = {
+            "commands": np.zeros((8, 3), dtype=np.float32),
+            "tracking_commands": np.zeros((8, 3), dtype=np.float32),
+        }
+        env._update_recovery_state(recovery_info, fallen_gravity)
+        assert not np.any(env._recovery_active)
 
         env._standing_segment_count = 2
         env._standing_segment_steps_sum = 8.0
         env._standing_segment_wz_error_sum = 0.2
         env._standing_segment_nonwheel_contact_sum = 0.0
+        env._standing_segment_base_height_sum = 0.46
+        env._standing_segment_height_error_sum = 0.02
         env._update_command_curriculum()
 
         assert env._standing_bootstrap_complete is True
+        env._update_recovery_state(recovery_info, fallen_gravity)
+        assert np.all(env._recovery_active)
+        assert env._recovery_reset_probability() == pytest.approx(0.2)
         assert env._standing_command_probability() == pytest.approx(0.0)
         commands = env.sample_velocity_commands(8)
         assert np.all(commands[:, 0] >= 0.35)
         assert np.all(commands[:, 0] <= 0.45)
         np.testing.assert_allclose(commands[:, 1:], np.zeros((8, 2)))
+    finally:
+        env.close()
+
+
+def test_real68_standing_bootstrap_requires_clearance_before_unlocking_motion():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {
+                "enabled": True,
+                "update_interval_logs": 1,
+                "standing_bootstrap_enabled": True,
+                "standing_bootstrap_min_segments": 2,
+                "standing_bootstrap_min_segment_steps": 4,
+                "standing_bootstrap_max_abs_vx": 0.08,
+                "standing_bootstrap_max_wz_error": 0.2,
+                "standing_bootstrap_max_nonwheel_contact": 0.01,
+                "standing_bootstrap_min_base_height": 0.225,
+                "standing_bootstrap_max_height_error": 0.025,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._standing_segment_count = 2
+        env._standing_segment_steps_sum = 8.0
+        env._standing_segment_wz_error_sum = 0.2
+        env._standing_segment_nonwheel_contact_sum = 0.0
+        env._standing_segment_base_height_sum = 0.40
+        env._standing_segment_height_error_sum = 0.02
+        env._update_command_curriculum()
+
+        assert env._standing_bootstrap_complete is False
+        assert env._last_standing_bootstrap_eval is not None
+        assert env._last_standing_bootstrap_eval["base_height"] == pytest.approx(0.20)
+
+        env._standing_segment_count = 2
+        env._standing_segment_steps_sum = 8.0
+        env._standing_segment_wz_error_sum = 0.2
+        env._standing_segment_nonwheel_contact_sum = 0.0
+        env._standing_segment_base_height_sum = 0.46
+        env._standing_segment_height_error_sum = 0.02
+        env._update_command_curriculum()
+
+        assert env._standing_bootstrap_complete is True
+    finally:
+        env.close()
+
+
+def test_real68_curriculum_counts_any_nonwheel_contact_as_contacted_step():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        contacts = np.zeros((2, len(NONWHEEL_CONTACT_SENSORS)), dtype=np.float32)
+        contacts[0, 0] = 1.0
+        env._accumulate_command_segments(
+            {
+                "commands": np.zeros((2, 3), dtype=np.float32),
+                "nonwheel_contacts": contacts,
+            },
+            np.zeros((2, 3), dtype=np.float32),
+            np.zeros((2, 3), dtype=np.float32),
+        )
+
+        np.testing.assert_allclose(env._segment_nonwheel_contact_sum, [1.0, 0.0])
+    finally:
+        env.close()
+
+
+def test_real68_standing_bootstrap_rejects_unreachable_command_horizon():
+    ensure_registries()
+    with pytest.raises(ValueError, match="standing bootstrap horizon is unreachable"):
+        registry.make(
+            "Real68BalanceFlat",
+            num_envs=1,
+            sim_backend="mujoco",
+            env_cfg_override={
+                "scene": SceneCfg(
+                    model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+                ),
+                "commands": {"resampling_time": 1.0},
+                "command_curriculum": {
+                    "enabled": True,
+                    "standing_bootstrap_enabled": True,
+                    "standing_bootstrap_min_segment_steps": 80,
+                },
+                "reward_config": {
+                    "scales": {"alive": 1.0},
+                    "tracking_sigma": 0.25,
+                },
+            },
+        )
+
+
+def test_real68_training_state_round_trip_preserves_curriculum_progress():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {
+                "enabled": True,
+                "standing_bootstrap_enabled": True,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env.step_counter = 321
+        env._command_curriculum_vx_progress = 0.65
+        env._command_curriculum_yaw_progress = 0.25
+        env._command_curriculum_log_count = 17
+        env._standing_bootstrap_complete = True
+        env._last_standing_bootstrap_eval = {
+            "mean_steps": 80.0,
+            "abs_vx": 0.0,
+            "wz_error": 0.0,
+            "nonwheel_contact": 0.0,
+            "base_height": 0.24,
+            "height_error": 0.0,
+        }
+        env._curriculum_vx_count[:] = [1, 2, 3, 4]
+        env._curriculum_recorded_segments = 99
+        env._last_curriculum_vx_eval = {"speed_ratio": 0.7}
+        state = env.training_state_dict()
+
+        env.step_counter = 0
+        env._command_curriculum_vx_progress = 0.0
+        env._command_curriculum_yaw_progress = 0.0
+        env._command_curriculum_log_count = 0
+        env._standing_bootstrap_complete = False
+        env._curriculum_vx_count.fill(0)
+        env._curriculum_recorded_segments = 0
+        env._last_curriculum_vx_eval = None
+        env.load_training_state_dict(state)
+
+        assert env.step_counter == 321
+        assert env._command_curriculum_vx_progress == pytest.approx(0.65)
+        assert env._command_curriculum_yaw_progress == pytest.approx(0.25)
+        assert env._command_curriculum_log_count == 17
+        assert env._standing_bootstrap_complete is True
+        np.testing.assert_array_equal(env._curriculum_vx_count, [1, 2, 3, 4])
+        assert env._curriculum_recorded_segments == 99
+        assert env._last_curriculum_vx_eval == {"speed_ratio": 0.7}
+        expected_high_vx = 0.35 + 0.65 * (2.0 - 0.35)
+        assert env._command_curriculum_high[0] == pytest.approx(expected_high_vx)
+
+        state["command_curriculum"]["last_standing_eval"]["base_height"] = 0.19
+        env.load_training_state_dict(state)
+        assert env._standing_bootstrap_complete is False
+
+        state["command_curriculum"]["last_standing_eval"]["base_height"] = 0.24
+        state["command_curriculum"].pop("standing_segment_base_height_sum")
+        state["command_curriculum"].pop("standing_segment_height_error_sum")
+        env._standing_segment_base_height_sum = 1.0
+        env._standing_segment_height_error_sum = 1.0
+        env.load_training_state_dict(state)
+        assert env._standing_bootstrap_complete is False
+        assert env._command_curriculum_vx_progress == pytest.approx(0.0)
+        assert env._standing_segment_base_height_sum == pytest.approx(0.0)
+        assert env._standing_segment_height_error_sum == pytest.approx(0.0)
     finally:
         env.close()
 
@@ -695,6 +1275,7 @@ def test_real68_command_curriculum_can_bias_high_speed_commands():
                 "standing_prob_final": 0.0,
                 "high_speed_command_prob": 1.0,
                 "high_speed_min_abs_vx": 1.0,
+                "high_speed_unlock_vx_progress": 0.5,
             },
             "reward_config": {
                 "scales": {"alive": 1.0},
@@ -703,6 +1284,14 @@ def test_real68_command_curriculum_can_bias_high_speed_commands():
         },
     )
     try:
+        locked_commands = np.zeros((128, 3), dtype=env._np_dtype)
+        env._apply_high_speed_command_bias(
+            locked_commands,
+            eligible_mask=np.ones((128,), dtype=bool),
+        )
+        np.testing.assert_allclose(locked_commands, np.zeros((128, 3)))
+
+        env._command_curriculum_vx_progress = 0.5
         commands = env.sample_velocity_commands(128)
         assert np.all(np.abs(commands[:, 0]) >= 1.0)
         assert np.all(np.abs(commands[:, 0]) <= 1.5)
@@ -761,6 +1350,80 @@ def test_real68_command_curriculum_reports_velocity_safety_rates():
         assert log["command_curriculum/eval_tilt_angle_deg"] == pytest.approx(4.5)
         assert log["command_curriculum/eval_height_violation_rate"] == pytest.approx(0.01)
         assert log["command_curriculum/eval_nonwheel_contact_rate"] == pytest.approx(0.02)
+    finally:
+        env.close()
+
+
+def test_real68_command_curriculum_does_not_retain_failed_evaluation_window():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {
+                "enabled": True,
+                "initial_vel_limit": [[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]],
+                "final_vel_limit": [[0.0, 0.0, 0.0], [0.8, 0.0, 0.0]],
+                "update_interval_logs": 1,
+                "standing_bootstrap_enabled": False,
+                "min_segment_count": 2,
+                "min_speed_ratio": 0.5,
+                "min_speed_ratio_down": 0.2,
+                "vx_step": 0.1,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        segment = {
+            "cmd_x": 0.4,
+            "cmd_yaw": 0.0,
+            "mean_abs_vx": 0.12,
+            "mean_abs_wz": 0.0,
+            "vx_error": 0.1,
+            "wz_error": 0.0,
+            "mean_nonwheel_contact": 0.0,
+            "mean_tilt": 0.0,
+            "mean_tilt_angle_deg": 1.0,
+            "mean_height_violation": 0.0,
+            "segment_steps": 25,
+        }
+        env._record_command_segment_stats(mean_signed_vx=0.12, **segment)
+        env._update_command_curriculum()
+
+        assert env._curriculum_vx_eval() is None
+        assert np.sum(env._curriculum_vx_count) == 1
+
+        env._record_command_segment_stats(mean_signed_vx=0.12, **segment)
+        env._update_command_curriculum()
+
+        assert env._command_curriculum_vx_progress == pytest.approx(0.0)
+        assert env._curriculum_vx_eval() is None
+        failed_log: dict[str, float] = {}
+        env._write_command_curriculum_metrics(failed_log)
+        assert failed_log["command_curriculum/eval_signed_vx_ratio"] == pytest.approx(0.3)
+
+        env._record_command_segment_stats(mean_signed_vx=0.28, **segment)
+        env._update_command_curriculum()
+
+        assert env._curriculum_vx_eval() is None
+        assert np.sum(env._curriculum_vx_count) == 1
+
+        env._record_command_segment_stats(mean_signed_vx=0.28, **segment)
+        env._update_command_curriculum()
+
+        assert env._command_curriculum_vx_progress == pytest.approx(0.1)
+        assert env._curriculum_vx_eval() is None
+        passing_log: dict[str, float] = {}
+        env._write_command_curriculum_metrics(passing_log)
+        assert passing_log["command_curriculum/eval_signed_vx_ratio"] == pytest.approx(0.7)
     finally:
         env.close()
 

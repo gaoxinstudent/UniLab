@@ -38,6 +38,7 @@ class EnvCfg:
     post_step_forward_sensor: bool = False
     adaptive_chunk_size: bool = True
     chunk_size: Optional[int] = None
+    mujoco_num_threads: Optional[int] = None
 
     @property
     def max_episode_steps(self) -> Optional[int]:
@@ -64,6 +65,22 @@ class EnvCfg:
 
 
 class ABEnv(abc.ABC):
+    def training_state_dict(self) -> dict[str, Any]:
+        """Return cold-path state required to resume training faithfully.
+
+        Stateless environments can keep the default empty payload. Tasks with
+        curricula should override this method and restore the same schema in
+        :meth:`load_training_state_dict`.
+        """
+        return {}
+
+    def load_training_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore state produced by :meth:`training_state_dict`."""
+        if state:
+            raise ValueError(
+                f"{self.__class__.__name__} does not support non-empty training state"
+            )
+
     @property
     def play_capabilities(self) -> EnvPlayCapabilities:
         """Return env-facing play/render capabilities."""
@@ -217,6 +234,10 @@ class ABEnv(abc.ABC):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support physics-state playback"
         )
+
+    def get_playback_root_xy_offsets(self) -> np.ndarray | None:
+        """Return per-env world XY origins to remove before grid playback."""
+        return None
 
     def get_playback_model(self, env_index: int | None = None) -> Any:
         """Return a model object suitable for backend-specific playback tooling.

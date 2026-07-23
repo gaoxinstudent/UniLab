@@ -976,28 +976,34 @@ def test_build_ppo_play_env_cfg_override_applies_g1_motion_tracking_play_profile
     assert env_cfg_override["reward_config"]["scales"]["motion_body_pos"] == pytest.approx(1.0)
 
 
-def test_real68_velocity_tracking_play_profile_forces_canonical_recovery(
+def test_real68_play_and_training_disable_random_recovery_resets(
     monkeypatch: pytest.MonkeyPatch,
 ):
     mod = _train_rsl_rl(monkeypatch)
-    cfg = _ppo_cfg(["task=real68_balance_veltrack_flat/mujoco", "training.play_only=true"])
+    cfg = _ppo_cfg(["task=real68_balance/mujoco", "training.play_only=true"])
 
     env_cfg_override = mod.build_ppo_play_env_cfg_override(cfg)
 
     recovery = env_cfg_override["recovery"]
-    assert recovery["initial_recovery_probability"] == pytest.approx(1.0)
-    assert recovery["final_recovery_probability"] == pytest.approx(1.0)
+    assert recovery["initial_recovery_probability"] == pytest.approx(0.0)
+    assert recovery["final_recovery_probability"] == pytest.approx(0.0)
     assert recovery["orientation_curriculum"] is False
-    assert [pose["name"] for pose in recovery["initial_pose_bank"]] == [
-        "prone",
-        "supine",
-        "left_side",
-        "right_side",
-    ]
+    assert "initial_pose_bank" not in recovery
+    assert "initial_joint_pose_bank" not in recovery
 
-    train_cfg = _ppo_cfg(["task=real68_balance_veltrack_flat/mujoco"])
-    assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.45)
-    assert train_cfg.env.recovery.orientation_curriculum is True
+    train_cfg = _ppo_cfg(["task=real68_balance/mujoco"])
+    assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
+    assert train_cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
+    assert train_cfg.env.recovery.orientation_curriculum is False
+    assert "initial_pose_bank" not in train_cfg.env.recovery
+    assert "initial_joint_pose_bank" not in train_cfg.env.recovery
+    assert train_cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
+    assert train_cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
+    assert train_cfg.env.command_curriculum.standing_bootstrap_enabled is True
+    assert train_cfg.env.command_curriculum.initial_vel_limit == [
+        [0.0, 0.0, -0.4],
+        [0.35, 0.0, 0.4],
+    ]
 
 
 def test_build_ppo_play_env_cfg_override_respects_cli_play_env_override(
@@ -2409,6 +2415,24 @@ def test_ppo_hydra_load_run_in_algo_not_training():
     assert cfg.algo.load_run == "-1"
     # training section should NOT have load_run anymore
     assert "load_run" not in cfg.training or OmegaConf.is_missing(cfg.training, "load_run")
+
+
+def test_ppo_training_resume_missing_checkpoint_fails_fast(tmp_path, monkeypatch):
+    mod = _train_rsl_rl(monkeypatch)
+    cfg = _ppo_cfg(
+        [
+            "task=real68_balance/mujoco",
+            "algo.load_run=missing_run",
+            "algo.checkpoint=300",
+        ]
+    )
+    monkeypatch.setattr(mod, "ROOT_DIR", tmp_path)
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"Requested PPO resume checkpoint was not found.*model_300\.pt",
+    ):
+        mod._resolve_training_resume_path(cfg)
 
 
 def test_appo_hydra_default_algo_log_name():

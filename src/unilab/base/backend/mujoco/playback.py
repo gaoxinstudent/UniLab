@@ -42,16 +42,38 @@ def run_mujoco_playback(
     assert frame_state_getter is not None
 
     obs = initialize()
+    root_offset_getter = getattr(env, "get_playback_root_xy_offsets", None)
+    scene = getattr(getattr(env, "cfg", None), "scene", None)
+    terrain_scene = isinstance(scene, SceneCfg) and scene.terrain is not None
     state_list = []
     marker_list: list[np.ndarray | None] = []
     for _ in range(num_steps):
         obs = step(obs)
-        state_list.append(np.asarray(frame_state_getter(), dtype=np.float32).copy())
+        snapshot = np.asarray(frame_state_getter(), dtype=np.float32).copy()
+        root_xy_offsets = (
+            np.asarray(root_offset_getter(), dtype=np.float32)
+            if callable(root_offset_getter)
+            else None
+        )
+        if root_xy_offsets is not None:
+            if root_xy_offsets.shape != (snapshot.shape[0], 2):
+                raise ValueError(
+                    "playback root XY offsets must have shape "
+                    f"({snapshot.shape[0]}, 2), got {root_xy_offsets.shape}"
+                )
+            if snapshot.shape[1] < 3:
+                raise ValueError("physics snapshot must contain time and root XY qpos")
+            if not terrain_scene:
+                snapshot[:, 1:3] -= root_xy_offsets
+        state_list.append(snapshot)
         if extra_data_getter is not None:
             marker = extra_data_getter()
-            marker_list.append(
+            marker_snapshot = (
                 np.asarray(marker, dtype=np.float32).copy() if marker is not None else None
             )
+            if marker_snapshot is not None and root_xy_offsets is not None:
+                marker_snapshot[:, :2] -= root_xy_offsets
+            marker_list.append(marker_snapshot)
         else:
             marker_list.append(None)
 
@@ -70,6 +92,11 @@ def run_mujoco_playback(
         if render_spacing is not None
         else float(env_cfg_value(env, "render_spacing", 1.0))
     )
+    if terrain_scene and callable(root_offset_getter):
+        # A heightfield is one shared world-space surface. Moving only the
+        # robot into a compact grid puts it over a different terrain cell,
+        # making it appear to sink or float in playback. Keep its physical XY.
+        effective_spacing = 0.0
     with tempfile.TemporaryDirectory(prefix="unilab-playback-models-") as tmp_dir:
         model_files = resolve_render_play_model_files(
             env,
