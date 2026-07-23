@@ -36,6 +36,22 @@ def test_real68_scene_compiles_and_has_expected_counts():
     assert len(NONWHEEL_CONTACT_OBSERVATION_SENSORS) == 5
 
 
+def test_real68_leg_actuators_use_continuous_torque_limit():
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(
+        str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+    )
+    for name in (
+        "left_hip_bigleg_joint_actuator",
+        "left_calf_smallleg_joint_actuator",
+        "right_hip_bigleg_joint_actuator",
+        "right_calf_smallleg_joint_actuator",
+    ):
+        actuator_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        np.testing.assert_allclose(model.actuator_ctrlrange[actuator_id], [-20.0, 20.0])
+
+
 def test_real68_collision_contract_uses_mesh_links_and_cylinder_wheels():
     import mujoco
 

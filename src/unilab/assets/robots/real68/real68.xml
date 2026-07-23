@@ -170,12 +170,12 @@
   </equality>
 
   <actuator>
-    <motor name="left_hip_bigleg_joint_actuator" joint="left_hip_bigleg_joint" ctrlrange="-8 8"/>
+    <motor name="left_hip_bigleg_joint_actuator" joint="left_hip_bigleg_joint" ctrlrange="-20 20"/>
     <motor name="left_wheel_joint_actuator" joint="left_wheel_joint" ctrlrange="-12 12"/>
-    <motor name="left_calf_smallleg_joint_actuator" joint="left_calf_smallleg_joint" ctrlrange="-18 18"/>
-    <motor name="right_hip_bigleg_joint_actuator" joint="right_hip_bigleg_joint" ctrlrange="-8 8"/>
+    <motor name="left_calf_smallleg_joint_actuator" joint="left_calf_smallleg_joint" ctrlrange="-20 20"/>
+    <motor name="right_hip_bigleg_joint_actuator" joint="right_hip_bigleg_joint" ctrlrange="-20 20"/>
     <motor name="right_wheel_joint_actuator" joint="right_wheel_joint" ctrlrange="-12 12"/>
-    <motor name="right_calf_smallleg_joint_actuator" joint="right_calf_smallleg_joint" ctrlrange="-18 18"/>
+    <motor name="right_calf_smallleg_joint_actuator" joint="right_calf_smallleg_joint" ctrlrange="-20 20"/>
   </actuator>
 
   <contact>
