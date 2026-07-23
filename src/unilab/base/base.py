@@ -81,6 +81,15 @@ class ABEnv(abc.ABC):
                 f"{self.__class__.__name__} does not support non-empty training state"
             )
 
+    def load_playback_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore checkpoint state needed to reproduce its play command envelope.
+
+        The default is a full training-state restore. Environments whose training
+        state contains arrays sized by ``num_envs`` can override this to retain
+        only portable playback state.
+        """
+        self.load_training_state_dict(state)
+
     @property
     def play_capabilities(self) -> EnvPlayCapabilities:
         """Return env-facing play/render capabilities."""

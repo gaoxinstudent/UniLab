@@ -138,6 +138,10 @@ def test_real68_production_reset_profile_is_upright_and_clear_of_floor():
     assert task_cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
 
     play_recovery = task_cfg.play_profile.env.recovery
+    assert task_cfg.play_profile.restore_curriculum_state is False
+    assert task_cfg.play_profile.env.commands.vel_limit == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
+    assert task_cfg.play_profile.env.commands.resampling_time == pytest.approx(4.0)
+    assert task_cfg.play_profile.env.commands.rel_standing_envs == pytest.approx(0.10)
     assert play_recovery.initial_recovery_probability == pytest.approx(0.0)
     assert play_recovery.final_recovery_probability == pytest.approx(0.0)
     assert "initial_pose_bank" not in play_recovery
@@ -1233,6 +1237,44 @@ def test_real68_training_state_round_trip_preserves_curriculum_progress():
         env.close()
 
 
+def test_real68_playback_state_restores_only_portable_curriculum_limits():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {"enabled": True},
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        env._command_curriculum_vx_progress = 0.40
+        env._command_curriculum_yaw_progress = 0.10
+        env._standing_bootstrap_complete = True
+        state = env.training_state_dict()
+        # Training statistics are sized by training num_envs and must not be
+        # restored into a smaller playback vector environment.
+        state["command_curriculum"]["arrays"]["_curriculum_vx_count"]["shape"] = [8192]
+
+        env.step_counter = 0
+        env._command_curriculum_vx_progress = 0.0
+        env._command_curriculum_yaw_progress = 0.0
+        env._standing_bootstrap_complete = False
+        env.load_playback_state_dict(state)
+
+        assert env.step_counter == 0
+        assert env._command_curriculum_vx_progress == pytest.approx(0.40)
+        assert env._command_curriculum_yaw_progress == pytest.approx(0.10)
+        assert env._standing_bootstrap_complete is True
+        assert env._command_curriculum_high[0] == pytest.approx(1.01)
+    finally:
+        env.close()
+
+
 def test_real68_command_curriculum_can_separate_straight_and_yaw_only_commands():
     ensure_registries()
     env = registry.make(
@@ -1440,6 +1482,41 @@ def test_real68_command_curriculum_does_not_retain_failed_evaluation_window():
         passing_log: dict[str, float] = {}
         env._write_command_curriculum_metrics(passing_log)
         assert passing_log["command_curriculum/eval_signed_vx_ratio"] == pytest.approx(0.7)
+    finally:
+        env.close()
+
+
+def test_real68_command_curriculum_immediately_backs_off_on_live_tilt(monkeypatch):
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=2,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "command_curriculum": {
+                "enabled": True,
+                "update_interval_logs": 1,
+                "standing_bootstrap_enabled": False,
+                "vx_step_down": 0.05,
+                "max_tilt_angle_deg_high": 10.0,
+            },
+            "reward_config": {
+                "scales": {"alive": 1.0},
+                "tracking_sigma": 0.25,
+            },
+        },
+    )
+    try:
+        env._standing_bootstrap_complete = True
+        env._command_curriculum_vx_progress = 0.35
+        monkeypatch.setattr(env, "_live_tilt_angle_deg", lambda: 11.0)
+
+        env._update_command_curriculum()
+
+        assert env._command_curriculum_vx_progress == pytest.approx(0.30)
     finally:
         env.close()
 

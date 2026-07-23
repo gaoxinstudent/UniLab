@@ -16,13 +16,17 @@ training:
 
 play_profile:
   enabled: true
+  # Evaluation is an explicit full-curriculum stress playback. It must not
+  # restore a checkpoint's partial progress and silently narrow its commands.
+  restore_curriculum_state: false
   env:
     commands:
+      # Match the final command-curriculum envelope, including reverse and yaw.
       vel_limit:
-        - [-0.8, 0.0, -2.5]
-        - [1.2, 0.0, 2.5]
-      resampling_time: 1.5
-      rel_standing_envs: 0.0
+        - [-1.2, 0.0, -3.0]
+        - [1.4, 0.0, 3.0]
+      resampling_time: 4.0
+      rel_standing_envs: 0.10
     command_curriculum:
       enabled: false
     domain_rand:
@@ -129,7 +133,7 @@ env:
       - [1.4, 0.0, 3.0]
     # Separate forward-speed, yaw, reverse, and terrain difficulty transitions.
     vx_step: 0.025
-    vx_step_down: 0.025
+    vx_step_down: 0.05
     yaw_step: 0.01
     yaw_step_down: 0.025
     yaw_unlock_vx_progress: 0.40
@@ -148,7 +152,7 @@ env:
     max_height_violation_rate: 0.01
     max_height_violation_rate_high: 0.03
     max_nonwheel_contact_rate: 0.01
-    max_nonwheel_contact_rate_high: 0.03
+    max_nonwheel_contact_rate_high: 0.02
     min_segment_count: 96
     update_interval_logs: 24
     standing_bootstrap_enabled: true
@@ -159,8 +163,8 @@ env:
     standing_bootstrap_max_abs_vx: 0.08
     standing_bootstrap_max_wz_error: 0.25
     standing_bootstrap_max_nonwheel_contact: 0.01
-    standing_bootstrap_min_base_height: 0.225
-    standing_bootstrap_max_height_error: 0.025
+    standing_bootstrap_min_base_height: 0.245
+    standing_bootstrap_max_height_error: 0.020
     standing_prob_initial: 0.10
     standing_prob_final: 0.10
     standing_decay_vx_progress: 0.8
@@ -172,12 +176,12 @@ env:
     high_speed_unlock_vx_progress: 0.90
   height_command:
     # Height is command-relative because the physical robot has no height sensor.
-    # Do not ask the bootstrap policy to trade clearance against a random
-    # height. Learn one mechanically safe standing geometry first.
-    range: [0.24, 0.24]
+    # This is a bootstrap-only standing reference. Once velocity commands are
+    # unlocked, base height is no longer a tracking objective.
+    range: [0.257282, 0.257282]
     speed_lift_gain: 0.0
     max_speed_lift: 0.0
-    observation_reference_height: 0.24
+    observation_reference_height: 0.257282
   terrain_scan:
     enabled: true
     hfield_name: terrain_hfield
@@ -261,9 +265,11 @@ reward:
     yaw_rate_when_uncommanded: -2.0
     heading_stability: -1.5
     lateral_drift: -1.2
-    height_tracking: 1.0
-    height_safety: -6.0
-    under_height: -8.0
+    # Locomotion chooses its own leg extension. Height remains only a low
+    # clearance safety condition; nonwheel contact is the primary guard.
+    height_tracking: 0.0
+    height_safety: -1.5
+    under_height: 0.0
     orientation: -24.0
     tilt_termination: -25.0
     lin_vel_z: -2.0
@@ -297,8 +303,8 @@ reward:
   tracking_sigma: 0.30
   height_tracking_sigma: 0.02
   height_safety_margin: 0.02
-  base_height_target: 0.24
-  min_base_height: 0.22
+  base_height_target: 0.257282
+  min_base_height: 0.18
   max_base_height: 0.40
   max_tilt_cos: 0.90
   command_lean:

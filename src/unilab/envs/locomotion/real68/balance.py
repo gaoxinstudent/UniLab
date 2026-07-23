@@ -949,6 +949,25 @@ class Real68BalanceEnv(Real68BaseEnv):
             _RECOVERY_CURRICULUM_ARRAY_STATE,
         )
 
+    def load_playback_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore the checkpoint's unlocked command envelope for evaluation.
+
+        Curriculum aggregate arrays are intentionally excluded because they are
+        shaped by the training environment count and have no effect on playback.
+        """
+        version = int(state.get("version", 0))
+        if version != 1:
+            raise ValueError(f"Unsupported Real68 playback state version: {version}")
+        command = cast(dict[str, Any], state["command_curriculum"])
+        self._command_curriculum_vx_progress = _progress_value(
+            command["vx_progress"], "vx_progress"
+        )
+        self._command_curriculum_yaw_progress = _progress_value(
+            command["yaw_progress"], "yaw_progress"
+        )
+        self._standing_bootstrap_complete = bool(command["standing_bootstrap_complete"])
+        self._refresh_command_curriculum_limits()
+
     def _init_buffers(self) -> None:
         super()._init_buffers()
         actor_history = int(self._cfg.history.num_actor_history)
@@ -1476,6 +1495,25 @@ class Real68BalanceEnv(Real68BaseEnv):
                 self._last_standing_bootstrap_eval = standing_eval
                 self._reset_standing_bootstrap_stats()
             return
+        live_tilt_angle_deg = self._live_tilt_angle_deg()
+        if live_tilt_angle_deg >= float(ccfg.max_tilt_angle_deg_high):
+            backed_off = False
+            if self._command_curriculum_vx_progress > 0.0:
+                self._command_curriculum_vx_progress = max(
+                    0.0,
+                    self._command_curriculum_vx_progress - float(ccfg.vx_step_down),
+                )
+                backed_off = True
+            if self._command_curriculum_yaw_progress > 0.0:
+                self._command_curriculum_yaw_progress = max(
+                    0.0,
+                    self._command_curriculum_yaw_progress - float(ccfg.yaw_step_down),
+                )
+                backed_off = True
+            if backed_off:
+                self._refresh_command_curriculum_limits()
+                self._reset_command_curriculum_stats()
+            return
         vx_eval = self._curriculum_vx_eval()
         progressed = False
         if vx_eval is not None:
@@ -1486,6 +1524,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 and vx_eval["vx_error"] <= vx_up_threshold
                 and vx_eval["tilt_rate"] <= float(ccfg.max_tilt_rate)
                 and vx_eval["tilt_angle_deg"] <= float(ccfg.max_tilt_angle_deg)
+                and live_tilt_angle_deg <= float(ccfg.max_tilt_angle_deg)
                 and vx_eval["height_violation_rate"] <= float(ccfg.max_height_violation_rate)
                 and vx_eval["nonwheel_contact_rate"] <= float(ccfg.max_nonwheel_contact_rate)
             )
@@ -1519,6 +1558,7 @@ class Real68BalanceEnv(Real68BaseEnv):
                 yaw_eval["wz_error"] <= float(ccfg.max_wz_error)
                 and yaw_eval["tilt_rate"] <= float(ccfg.max_tilt_rate)
                 and yaw_eval["tilt_angle_deg"] <= float(ccfg.max_tilt_angle_deg)
+                and live_tilt_angle_deg <= float(ccfg.max_tilt_angle_deg)
                 and yaw_eval["height_violation_rate"] <= float(ccfg.max_height_violation_rate)
                 and yaw_eval["nonwheel_contact_rate"] <= float(ccfg.max_nonwheel_contact_rate)
             )
@@ -1547,6 +1587,14 @@ class Real68BalanceEnv(Real68BaseEnv):
             self._reset_vx_curriculum_stats()
         if yaw_evaluated:
             self._reset_yaw_curriculum_stats()
+
+    def _live_tilt_angle_deg(self) -> float:
+        gravity = np.asarray(
+            self._backend.get_sensor_data(self._cfg.sensor.gravity), dtype=self._np_dtype
+        )
+        if gravity.shape != (self._num_envs, 3):
+            return 0.0
+        return float(np.mean(np.rad2deg(np.arccos(np.clip(gravity[:, 2], -1.0, 1.0)))))
 
     def _vx_curriculum_up_threshold(self) -> float:
         ccfg = self._cfg.command_curriculum
@@ -2546,6 +2594,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             0.0 if yaw_eval is None else yaw_eval["count"]
         )
         log["command_curriculum/segments_recorded"] = float(self._curriculum_recorded_segments)
+        log["command_curriculum/live_tilt_angle_deg"] = self._live_tilt_angle_deg()
         log["command_curriculum/standing_prob"] = float(self._standing_command_probability())
         straight_prob, yaw_only_prob = self._command_mix_probabilities()
         log["command_curriculum/straight_command_prob"] = float(straight_prob)

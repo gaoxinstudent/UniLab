@@ -280,6 +280,9 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
         Any,
         runner_cls(cast(Any, wrapped_env), train_cfg, log_dir=None, device=device),
     )
+    restore_playback_state = bool(
+        OmegaConf.select(cfg, "play_profile.restore_curriculum_state", default=False)
+    )
     with policy_load_dim_guard(
         env_obs_dim=getattr(wrapped_env, "num_obs", None),
         env_action_dim=getattr(wrapped_env, "num_actions", None),
@@ -291,6 +294,13 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
                 map_location=device,
                 restore_training_state=False,
             )
+            if restore_playback_state:
+                checkpoint_state = torch.load(load_path, map_location="cpu", weights_only=True)
+                env_state = checkpoint_state.get("env_state")
+                if env_state is None:
+                    print("Checkpoint has no env_state; using the static play command envelope.")
+                else:
+                    wrapped_env.load_playback_state_dict(env_state)
         else:
             runner.load(str(load_path), map_location=device)
     policy = runner.get_inference_policy(device=device)

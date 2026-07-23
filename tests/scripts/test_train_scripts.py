@@ -990,6 +990,8 @@ def test_real68_play_and_training_disable_random_recovery_resets(
     assert recovery["orientation_curriculum"] is False
     assert "initial_pose_bank" not in recovery
     assert "initial_joint_pose_bank" not in recovery
+    assert env_cfg_override["commands"]["vel_limit"] == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
+    assert env_cfg_override["command_curriculum"]["enabled"] is False
 
     train_cfg = _ppo_cfg(["task=real68_balance/mujoco"])
     assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)

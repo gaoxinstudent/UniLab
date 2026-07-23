@@ -230,5 +230,9 @@ class RslRlVecEnvWrapper:
         """Restore cold-path checkpoint state through the adapter contract."""
         self.env.load_training_state_dict(state)
 
+    def load_playback_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore portable checkpoint state needed for command playback."""
+        self.env.load_playback_state_dict(state)
+
     def close(self) -> None:
         self.env.close()

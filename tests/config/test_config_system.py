@@ -439,23 +439,24 @@ def test_ppo_real68_balance_uses_single_sim2real_owner():
     assert cfg.reward.scales.joint_pos_penalty == pytest.approx(-0.4)
     assert cfg.reward.scales.ang_vel_xy == pytest.approx(-1.2)
     assert cfg.reward.scales.orientation == pytest.approx(-24.0)
-    assert cfg.reward.scales.height_safety == pytest.approx(-6.0)
-    assert cfg.reward.scales.under_height == pytest.approx(-8.0)
+    assert cfg.reward.scales.height_tracking == pytest.approx(0.0)
+    assert cfg.reward.scales.height_safety == pytest.approx(-1.5)
+    assert cfg.reward.scales.under_height == pytest.approx(0.0)
     assert cfg.reward.scales.nonwheel_contact == pytest.approx(-8.0)
     assert cfg.reward.scales.posture == pytest.approx(-1.0)
     assert cfg.reward.scales.leg_symmetry == pytest.approx(-3.0)
     assert cfg.reward.tracking_sigma == pytest.approx(0.30)
     assert cfg.reward.max_tilt_cos == pytest.approx(0.90)
-    assert cfg.reward.min_base_height == pytest.approx(0.22)
+    assert cfg.reward.min_base_height == pytest.approx(0.18)
     assert cfg.reward.height_safety_margin == pytest.approx(0.02)
     assert cfg.reward.command_lean.enabled is True
     assert cfg.reward.command_lean.gravity_x_gain == pytest.approx(-0.06)
     assert cfg.reward.command_lean.hip_gain == pytest.approx(0.03)
     assert cfg.reward.command_lean.calf_gain == pytest.approx(0.03)
     assert cfg.reward.balance_gate.enabled is True
-    assert cfg.env.height_command.range == pytest.approx([0.24, 0.24])
-    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.24)
-    assert cfg.reward.base_height_target == pytest.approx(0.24)
+    assert cfg.env.height_command.range == pytest.approx([0.257282, 0.257282])
+    assert cfg.env.height_command.observation_reference_height == pytest.approx(0.257282)
+    assert cfg.reward.base_height_target == pytest.approx(0.257282)
     assert cfg.env.recovery.enabled is True
     assert cfg.env.recovery.initial_base_height == pytest.approx(0.25623)
     assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
@@ -481,7 +482,7 @@ def test_ppo_real68_balance_uses_single_sim2real_owner():
     assert ccfg.initial_vel_limit == [[0.0, 0.0, -0.4], [0.35, 0.0, 0.4]]
     assert ccfg.final_vel_limit == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
     assert ccfg.vx_step == pytest.approx(0.025)
-    assert ccfg.vx_step_down == pytest.approx(0.025)
+    assert ccfg.vx_step_down == pytest.approx(0.05)
     assert ccfg.yaw_step == pytest.approx(0.01)
     assert ccfg.yaw_step_down == pytest.approx(0.025)
     assert ccfg.yaw_unlock_vx_progress == pytest.approx(0.40)
@@ -490,11 +491,11 @@ def test_ppo_real68_balance_uses_single_sim2real_owner():
     assert ccfg.standing_bootstrap_enabled is True
     assert ccfg.standing_bootstrap_min_segments == 128
     assert ccfg.standing_bootstrap_min_segment_steps == 100
-    assert ccfg.standing_bootstrap_min_base_height == pytest.approx(0.225)
-    assert ccfg.standing_bootstrap_max_height_error == pytest.approx(0.025)
+    assert ccfg.standing_bootstrap_min_base_height == pytest.approx(0.245)
+    assert ccfg.standing_bootstrap_max_height_error == pytest.approx(0.020)
     assert ccfg.standing_prob_initial == pytest.approx(0.10)
     assert ccfg.max_nonwheel_contact_rate == pytest.approx(0.01)
-    assert ccfg.max_nonwheel_contact_rate_high == pytest.approx(0.03)
+    assert ccfg.max_nonwheel_contact_rate_high == pytest.approx(0.02)
     assert ccfg.update_interval_logs == 24
     assert ccfg.standing_prob_final == pytest.approx(0.10)
     assert ccfg.standing_decay_vx_progress == pytest.approx(0.8)
