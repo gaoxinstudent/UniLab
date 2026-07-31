@@ -97,6 +97,8 @@ def run_mujoco_playback(
         # robot into a compact grid puts it over a different terrain cell,
         # making it appear to sink or float in playback. Keep its physical XY.
         effective_spacing = 0.0
+    ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
+    fps = int(1.0 / ctrl_dt)
     with tempfile.TemporaryDirectory(prefix="unilab-playback-models-") as tmp_dir:
         model_files = resolve_render_play_model_files(
             env,
@@ -105,9 +107,11 @@ def run_mujoco_playback(
         )
 
         if use_tracking:
-            frames = render_many.render_states_get_frames_tracking(
+            rendered = render_many.render_states_tracking_to_video(
                 state_list,
                 model_files,
+                str(output_video),
+                fps=fps,
                 width=1280,
                 height=720,
                 tracking_env_idx=tracking_env_idx,
@@ -118,6 +122,7 @@ def run_mujoco_playback(
                 render_spacing=effective_spacing,
                 marker_positions_list=marker_positions_list,
             )
+            frames = None
         else:
             frames = render_many.render_states_get_frames(
                 state_list,
@@ -129,16 +134,17 @@ def run_mujoco_playback(
                 marker_positions_list=marker_positions_list,
                 **cam_kw,
             )
+            rendered = bool(frames)
 
-    if not frames:
+    if not rendered:
         # Rendering was skipped (e.g. no usable off-screen GL backend on a
         # headless host). render_many already warned with actionable guidance;
         # don't fail the eval/play run — just skip the video export.
         print(f"[playback] No frames rendered; skipping video export to {output_video}.")
         return None
 
-    ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
-    write_playback_video(str(output_video), frames, fps=int(1.0 / ctrl_dt))
+    if frames is not None:
+        write_playback_video(str(output_video), frames, fps=fps)
     return str(output_video)
 
 

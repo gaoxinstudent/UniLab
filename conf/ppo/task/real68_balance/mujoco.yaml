@@ -4,15 +4,18 @@
 training:
   task_name: Real68Balance
   sim_backend: mujoco
-  play_env_num: 16
-  play_steps: 200
+  play_env_num: 7
+  # Six command segments leave enough time to observe runtime self-righting.
+  play_steps: 1200
   render_spacing: 0.60
-  cam_distance: 3.6
-  cam_elevation: -18.0
-  cam_azimuth: 110.0
+  cam_distance: 3.5
+  cam_elevation: -14.0
+  cam_azimuth: 120.0
   cam_tracking: true
-  cam_tracking_env_idx: 12
-  cam_tracking_extra_envs: 24
+  # Follow the pyramid-stairs robot; the other terrain environments continue
+  # to run in the same playback batch for full-terrain coverage.
+  cam_tracking_env_idx: 1
+  cam_tracking_extra_envs: 0
 
 play_profile:
   enabled: true
@@ -29,6 +32,12 @@ play_profile:
       rel_standing_envs: 0.10
     command_curriculum:
       enabled: false
+    terrain_curriculum:
+      # One playback robot per generated terrain type, at the highest level.
+      enabled: false
+      bootstrap_type: null
+      initial_type_cols: [0, 1, 2, 3, 4, 5, 6]
+      initial_levels: [5, 5, 5, 5, 5, 5, 5]
     domain_rand:
       randomize_init_yaw: true
       reset_qvel_limit: 0.10
@@ -43,15 +52,18 @@ play_profile:
       fall_detect_cos: 0.90
       upright_cos: 0.96
       upright_hold_seconds: 0.40
-      post_recovery_stability_seconds: 2.0
-      timeout_seconds: 8.0
-      final_timeout_seconds: 8.0
+      post_recovery_stability_seconds: 3.0
+      # Playback must give a fallen policy time to attempt self-righting.
+      in_episode_fall_recovery_progress: 0.0
+      allow_during_standing_bootstrap: true
+      timeout_seconds: 15.0
+      final_timeout_seconds: 15.0
 
 algo:
   # Keep the original 78.6M-step budget while using a larger batch for higher
   # MuJoCo throughput. Eight mini-batches preserve the previous 24,576-sample
   # mini-batch size and total optimizer update count across 400 iterations.
-  num_envs: 8192
+  num_envs: 4096
   max_iterations: 400
   runner_class_name: unilab.algos.torch.him_ppo.runner:HIMOnPolicyRunner
   num_one_step_obs: 28
@@ -226,9 +238,22 @@ env:
   recovery:
     enabled: true
     initial_base_height: 0.25623
-    initial_recovery_probability: 0.0
-    final_recovery_probability: 0.0
-    orientation_curriculum: false
+    # Recovery samples start mild and retain a small replay fraction after
+    # locomotion commands unlock, so self-righting does not disappear.
+    initial_recovery_probability: 0.30
+    final_recovery_probability: 0.08
+    orientation_curriculum: true
+    initial_orientation_scale: 0.35
+    orientation_stages: [0.35, 0.60, 1.0]
+    orientation_success_threshold: 0.55
+    orientation_backoff_threshold: 0.20
+    orientation_min_outcomes: 128
+    orientation_update_interval_logs: 10
+    initial_pose_bank:
+      - {name: left_side, roll: 1.57, pitch: 0.0, base_height: 0.14}
+      - {name: right_side, roll: -1.57, pitch: 0.0, base_height: 0.14}
+      - {name: forward_fall, roll: 0.0, pitch: 1.20, base_height: 0.14, min_orientation_scale: 0.60}
+      - {name: backward_fall, roll: 0.0, pitch: -1.20, base_height: 0.14, min_orientation_scale: 0.60}
     # Runtime falls enter recovery after the standing bootstrap completes.
     in_episode_fall_recovery_progress: 0.0
     # Bootstrap must measure true standing survival, not recovery occupancy.
@@ -237,8 +262,8 @@ env:
     upright_cos: 0.96
     upright_hold_seconds: 0.40
     post_recovery_stability_seconds: 2.0
-    timeout_seconds: 8.0
-    final_timeout_seconds: 8.0
+    timeout_seconds: 12.0
+    final_timeout_seconds: 15.0
   termination_config:
     terrain_out_of_bounds: true
     terrain_distance_buffer: 3.0
@@ -291,14 +316,15 @@ reward:
     nonwheel_contact_termination: -50.0
     liangan5_contact: -3.0
     liangan5_contact_asymmetry: -4.0
-    recovery_progress: 20.0
+    recovery_progress: 35.0
     recovery_upright: 0.0
-    recovery_orientation: -8.0
+    recovery_orientation: -2.0
     recovery_support: 0.0
-    recovery_sweep: 0.0
-    recovery_pull: 30.0
-    recovery_rise: 0.0
-    recovery_complete: 50.0
+    recovery_sweep: 0.2
+    recovery_pull: 40.0
+    recovery_rise: 3.0
+    recovery_forbidden_contact: -8.0
+    recovery_complete: 100.0
     alive: 0.10
   tracking_sigma: 0.30
   height_tracking_sigma: 0.02

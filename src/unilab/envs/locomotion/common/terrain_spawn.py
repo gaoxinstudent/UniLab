@@ -64,6 +64,10 @@ class TerrainCurriculumCfg:
     seed: int | None = None
     bootstrap_type: str | None = None
     """Optional terrain type used until the task unlocks terrain variety."""
+    initial_type_cols: list[int] | None = None
+    """Optional explicit terrain type assignment, one column per environment."""
+    initial_levels: list[int] | None = None
+    """Optional explicit terrain level assignment, one level per environment."""
 
 
 class TerrainSpawnManager(BaseSpawnManager):
@@ -118,12 +122,39 @@ class TerrainSpawnManager(BaseSpawnManager):
                 raise ValueError("type_probabilities must be non-negative with a positive sum")
             self._type_probabilities = probabilities / probabilities.sum()
 
-        if initial_type_col is None:
+        configured_type_cols = cfg.initial_type_cols
+        if initial_type_col is not None and configured_type_cols is not None:
+            raise ValueError("initial_type_col conflicts with terrain initial_type_cols")
+        if configured_type_cols is not None:
+            type_cols = np.asarray(configured_type_cols, dtype=np.int32)
+            if type_cols.shape != (num_envs,):
+                raise ValueError(
+                    "terrain initial_type_cols must have one entry per environment: "
+                    f"{type_cols.shape} != ({num_envs},)"
+                )
+            if np.any((type_cols < 0) | (type_cols >= num_cols)):
+                raise ValueError(
+                    f"terrain initial_type_cols must be in [0, {num_cols})"
+                )
+            self.type_cols = type_cols.copy()
+        elif initial_type_col is None:
             self.type_cols = self._sample_type_cols(num_envs)
         else:
             self._validate_type_col(initial_type_col)
             self.type_cols = np.full(num_envs, int(initial_type_col), dtype=np.int32)
-        if cfg.enabled:
+
+        configured_levels = cfg.initial_levels
+        if configured_levels is not None:
+            levels = np.asarray(configured_levels, dtype=np.int32)
+            if levels.shape != (num_envs,):
+                raise ValueError(
+                    "terrain initial_levels must have one entry per environment: "
+                    f"{levels.shape} != ({num_envs},)"
+                )
+            if np.any((levels < 0) | (levels >= num_rows)):
+                raise ValueError(f"terrain initial_levels must be in [0, {num_rows})")
+            self.levels = levels.copy()
+        elif cfg.enabled:
             self.levels = np.zeros(num_envs, dtype=np.int32)
         else:
             self.levels = self._rng.integers(0, num_rows, size=num_envs).astype(np.int32)

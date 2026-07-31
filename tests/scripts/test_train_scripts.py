@@ -976,7 +976,7 @@ def test_build_ppo_play_env_cfg_override_applies_g1_motion_tracking_play_profile
     assert env_cfg_override["reward_config"]["scales"]["motion_body_pos"] == pytest.approx(1.0)
 
 
-def test_real68_play_and_training_disable_random_recovery_resets(
+def test_real68_play_starts_upright_while_training_uses_recovery_curriculum(
     monkeypatch: pytest.MonkeyPatch,
 ):
     mod = _train_rsl_rl(monkeypatch)
@@ -992,12 +992,14 @@ def test_real68_play_and_training_disable_random_recovery_resets(
     assert "initial_joint_pose_bank" not in recovery
     assert env_cfg_override["commands"]["vel_limit"] == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
     assert env_cfg_override["command_curriculum"]["enabled"] is False
+    assert env_cfg_override["terrain_curriculum"]["initial_type_cols"] == list(range(7))
+    assert env_cfg_override["terrain_curriculum"]["initial_levels"] == [5] * 7
 
     train_cfg = _ppo_cfg(["task=real68_balance/mujoco"])
-    assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
-    assert train_cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
-    assert train_cfg.env.recovery.orientation_curriculum is False
-    assert "initial_pose_bank" not in train_cfg.env.recovery
+    assert train_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.30)
+    assert train_cfg.env.recovery.final_recovery_probability == pytest.approx(0.08)
+    assert train_cfg.env.recovery.orientation_curriculum is True
+    assert len(train_cfg.env.recovery.initial_pose_bank) == 4
     assert "initial_joint_pose_bank" not in train_cfg.env.recovery
     assert train_cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
     assert train_cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]

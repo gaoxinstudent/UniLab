@@ -75,6 +75,14 @@ _REAL68_LEFT_CALF_INDEX = int(CALF_INDICES[0])
 _REAL68_RIGHT_CALF_INDEX = int(CALF_INDICES[1])
 _REAL68_LEFT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("left_chuanliangan5_contact")
 _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("right_liangan5_contact")
+_REAL68_RECOVERY_FORBIDDEN_CONTACT_INDICES = np.asarray(
+    [
+        NONWHEEL_CONTACT_SENSORS.index("base_link_contact"),
+        NONWHEEL_CONTACT_SENSORS.index("left_hip_bigleg_contact"),
+        NONWHEEL_CONTACT_SENSORS.index("right_hip_bigleg_contact"),
+    ],
+    dtype=np.int32,
+)
 _REAL68_NONWHEEL_CONTACT_OBSERVATION_INDICES = np.asarray(
     [NONWHEEL_CONTACT_SENSORS.index(name) for name in NONWHEEL_CONTACT_OBSERVATION_SENSORS],
     dtype=np.int32,
@@ -1274,7 +1282,13 @@ class Real68BalanceEnv(Real68BaseEnv):
         cfg = self._cfg.recovery
         initial = float(np.clip(cfg.initial_recovery_probability, 0.0, 1.0))
         final = float(np.clip(cfg.final_recovery_probability, 0.0, 1.0))
-        progress = float(np.clip(self._command_curriculum_vx_progress, 0.0, 1.0))
+        if self._recovery_orientation_stages.size > 1:
+            progress = self._recovery_orientation_stage / float(
+                self._recovery_orientation_stages.size - 1
+            )
+        else:
+            progress = float(self._command_curriculum_vx_progress)
+        progress = float(np.clip(progress, 0.0, 1.0))
         return initial + (final - initial) * progress
 
     def _recovery_timeout_seconds(self) -> float:
@@ -1761,6 +1775,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             "recovery_sweep": self._reward_recovery_sweep,
             "recovery_pull": self._reward_recovery_pull,
             "recovery_rise": self._reward_recovery_rise,
+            "recovery_forbidden_contact": self._reward_recovery_forbidden_contact,
             "recovery_complete": self._reward_recovery_complete,
         }
 
@@ -3164,6 +3179,13 @@ class Real68BalanceEnv(Real68BaseEnv):
         height = self._reward_base_height_values(ctx.num_envs)
         target = max(float(self._cfg.recovery.initial_base_height), 1.0e-6)
         return np.asarray(rise * np.clip(height / target, 0.0, 1.0), dtype=self._np_dtype)
+
+    def _reward_recovery_forbidden_contact(self, ctx: RewardContext) -> np.ndarray:
+        """Penalize chassis/hip impacts while allowing linkage support in recovery."""
+        forbidden = np.max(
+            self._nonwheel_contacts[:, _REAL68_RECOVERY_FORBIDDEN_CONTACT_INDICES], axis=1
+        )
+        return np.asarray(forbidden * self._recovery_mask(ctx), dtype=self._np_dtype)
 
     def _reward_recovery_complete(self, ctx: RewardContext) -> np.ndarray:
         return np.asarray(

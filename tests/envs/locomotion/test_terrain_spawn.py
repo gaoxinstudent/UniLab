@@ -54,6 +54,23 @@ def test_init_type_cols_random_seeded():
     assert not np.array_equal(a.type_cols, c.type_cols)
 
 
+def test_explicit_initial_layout_assigns_each_environment():
+    origins = _make_terrain_origins(num_rows=3, num_cols=3, cell_size=8.0)
+    manager = TerrainSpawnManager(
+        3,
+        origins,
+        8.0,
+        TerrainCurriculumCfg(
+            enabled=False,
+            initial_type_cols=[0, 1, 2],
+            initial_levels=[2, 1, 0],
+        ),
+    )
+
+    np.testing.assert_array_equal(manager.type_cols, [0, 1, 2])
+    np.testing.assert_array_equal(manager.levels, [2, 1, 0])
+
+
 def test_initial_type_col_locks_then_resamples_with_configured_weights():
     origins = _make_terrain_origins(num_rows=3, num_cols=3, cell_size=8.0)
     manager = TerrainSpawnManager(

@@ -130,16 +130,31 @@ def test_real68_production_reset_profile_is_upright_and_clear_of_floor():
     task_cfg = OmegaConf.load(
         ASSETS_ROOT_PATH.parents[2] / "conf" / "ppo" / "task" / "real68_balance" / "mujoco.yaml"
     )
-    assert task_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
-    assert task_cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
-    assert "initial_pose_bank" not in task_cfg.env.recovery
+    assert task_cfg.env.recovery.initial_recovery_probability == pytest.approx(0.30)
+    assert task_cfg.env.recovery.final_recovery_probability == pytest.approx(0.08)
+    assert [pose["name"] for pose in task_cfg.env.recovery.initial_pose_bank] == [
+        "left_side",
+        "right_side",
+        "forward_fall",
+        "backward_fall",
+    ]
     assert "initial_joint_pose_bank" not in task_cfg.env.recovery
     assert task_cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
     assert task_cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
 
     play_recovery = task_cfg.play_profile.env.recovery
+    assert task_cfg.training.play_env_num == 7
+    assert task_cfg.training.play_steps == 1200
+    assert task_cfg.training.cam_tracking_env_idx == 1
+    assert task_cfg.training.cam_tracking_extra_envs == 0
     assert task_cfg.play_profile.restore_curriculum_state is False
     assert task_cfg.play_profile.env.commands.vel_limit == [[-1.2, 0.0, -3.0], [1.4, 0.0, 3.0]]
+    assert task_cfg.play_profile.env.command_curriculum.enabled is False
+    assert task_cfg.play_profile.env.terrain_curriculum.enabled is False
+    assert task_cfg.play_profile.env.terrain_curriculum.initial_type_cols == list(range(7))
+    assert task_cfg.play_profile.env.terrain_curriculum.initial_levels == [5] * 7
+    assert play_recovery.in_episode_fall_recovery_progress == pytest.approx(0.0)
+    assert play_recovery.timeout_seconds == pytest.approx(15.0)
     assert task_cfg.play_profile.env.commands.resampling_time == pytest.approx(4.0)
     assert task_cfg.play_profile.env.commands.rel_standing_envs == pytest.approx(0.10)
     assert play_recovery.initial_recovery_probability == pytest.approx(0.0)
@@ -539,6 +554,68 @@ def test_real68_recovery_zeros_commands_and_suppresses_fall_termination():
         env._update_recovery_state(info, fallen_gravity)
         assert not env._recovery_active[0]
         assert env._compute_termination_causes(fallen_gravity)["terminated"][0]
+    finally:
+        env.close()
+
+
+def test_real68_recovery_only_penalizes_chassis_and_hip_contacts():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {"enabled": True},
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        ctx = RewardContext(
+            num_envs=1,
+            info={"recovery_active": np.asarray([True])},
+            linvel=np.zeros((1, 3), dtype=np.float32),
+            gyro=np.zeros((1, 3), dtype=np.float32),
+            dof_pos=np.zeros((1, 6), dtype=np.float32),
+        )
+        env._nonwheel_contacts.fill(0.0)
+        env._nonwheel_contacts[0, 2] = 1.0
+        assert env._reward_recovery_forbidden_contact(ctx)[0] == pytest.approx(0.0)
+
+        env._nonwheel_contacts[0, 0] = 1.0
+        assert env._reward_recovery_forbidden_contact(ctx)[0] == pytest.approx(1.0)
+    finally:
+        env.close()
+
+
+def test_real68_recovery_reset_probability_follows_recovery_stage():
+    ensure_registries()
+    env = registry.make(
+        "Real68BalanceFlat",
+        num_envs=1,
+        sim_backend="mujoco",
+        env_cfg_override={
+            "scene": SceneCfg(
+                model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            ),
+            "recovery": {
+                "enabled": True,
+                "initial_recovery_probability": 0.30,
+                "final_recovery_probability": 0.08,
+                "orientation_stages": [0.35, 0.60, 1.0],
+            },
+            "reward_config": {"scales": {"alive": 1.0}, "tracking_sigma": 0.25},
+        },
+    )
+    try:
+        env._standing_bootstrap_complete = True
+        env._command_curriculum_vx_progress = 1.0
+        assert env._recovery_reset_probability() == pytest.approx(0.30)
+
+        env._recovery_orientation_stage = 2
+        assert env._recovery_reset_probability() == pytest.approx(0.08)
     finally:
         env.close()
 

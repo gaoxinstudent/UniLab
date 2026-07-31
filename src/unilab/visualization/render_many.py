@@ -708,6 +708,69 @@ def render_states_get_frames_tracking(
     return frames
 
 
+def render_states_tracking_to_video(
+    state_list,
+    model_path,
+    output_path,
+    *,
+    fps: int,
+    width=1280,
+    height=720,
+    tracking_env_idx=0,
+    max_extra_envs=2,
+    cam_distance=2.0,
+    cam_elevation=-20,
+    cam_azimuth=90,
+    render_spacing=1.0,
+    marker_positions_list=None,
+) -> bool:
+    """Render tracking playback directly to video without retaining all frames."""
+    if not state_list:
+        print("No states to render.")
+        return False
+    if not render_backend_usable():
+        _warn_render_unavailable()
+        return False
+
+    num_envs = state_list[0].shape[0]
+    offsets = get_grid_offsets(num_envs, spacing=render_spacing)
+    tracking_env_idx = min(tracking_env_idx, num_envs - 1)
+    neighbour_indices = _get_nearest_env_indices(offsets, tracking_env_idx, max_extra_envs)
+    env_indices = [tracking_env_idx] + neighbour_indices
+    primary_local_idx = 0
+    print(
+        f"Rendering {len(state_list)} frames (tracking env {tracking_env_idx} "
+        f"+ {len(env_indices) - 1} neighbours) ..."
+    )
+
+    init_worker(model_path, (width, height))
+    try:
+        with imageio.get_writer(output_path, fps=fps) as writer:
+            for state, marker_positions in zip(
+                state_list,
+                marker_positions_list
+                if marker_positions_list is not None
+                else [None] * len(state_list),
+            ):
+                frame = render_frame_tracking_job(
+                    (
+                        state,
+                        offsets,
+                        env_indices,
+                        primary_local_idx,
+                        cam_distance,
+                        cam_elevation,
+                        cam_azimuth,
+                        marker_positions,
+                    )
+                )
+                writer.append_data(frame)
+    finally:
+        _close_worker()
+    print("Done.")
+    return True
+
+
 def render_states_to_video(
     state_list,
     model_path,

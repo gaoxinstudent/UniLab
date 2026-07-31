@@ -224,6 +224,44 @@ def test_render_states_get_frames_tracking_skips_when_backend_unusable(monkeypat
     assert frames == []
 
 
+def test_render_states_tracking_to_video_streams_frames(monkeypatch, tmp_path) -> None:
+    render_many = _reload_render_many(monkeypatch)
+    monkeypatch.setattr(render_many, "render_backend_usable", lambda: True)
+    monkeypatch.setattr(render_many, "init_worker", lambda *_args: None)
+    monkeypatch.setattr(render_many, "_close_worker", lambda: None)
+    monkeypatch.setattr(
+        render_many,
+        "render_frame_tracking_job",
+        lambda task: np.full((2, 3, 3), int(task[0][0, 0]), dtype=np.uint8),
+    )
+
+    captured: list[np.ndarray] = []
+
+    class Writer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def append_data(self, frame):
+            captured.append(np.asarray(frame).copy())
+
+    monkeypatch.setattr(render_many.imageio, "get_writer", lambda *_args, **_kwargs: Writer())
+
+    rendered = render_many.render_states_tracking_to_video(
+        [np.zeros((1, 8), dtype=np.float32), np.ones((1, 8), dtype=np.float32)],
+        "scene.xml",
+        tmp_path / "play.mp4",
+        fps=20,
+    )
+
+    assert rendered is True
+    assert len(captured) == 2
+    np.testing.assert_array_equal(captured[0], np.zeros((2, 3, 3), dtype=np.uint8))
+    np.testing.assert_array_equal(captured[1], np.ones((2, 3, 3), dtype=np.uint8))
+
+
 def test_render_states_get_frames_fails_fast_on_worker_init_error(monkeypatch) -> None:
     """A failing pool initializer must NOT respawn workers forever (issue #605).
 

@@ -415,7 +415,7 @@ def test_ppo_real68_balance_uses_single_sim2real_owner():
 
     assert cfg.training.task_name == "Real68Balance"
     assert cfg.training.sim_backend == "mujoco"
-    assert cfg.algo.num_envs == 8192
+    assert cfg.algo.num_envs == 4096
     assert cfg.algo.max_iterations == 400
     assert cfg.algo.algorithm.num_mini_batches == 8
     assert cfg.env.mujoco_num_threads == 64
@@ -459,24 +459,25 @@ def test_ppo_real68_balance_uses_single_sim2real_owner():
     assert cfg.reward.base_height_target == pytest.approx(0.257282)
     assert cfg.env.recovery.enabled is True
     assert cfg.env.recovery.initial_base_height == pytest.approx(0.25623)
-    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.0)
-    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.0)
-    assert "initial_pose_bank" not in cfg.env.recovery
+    assert cfg.env.recovery.initial_recovery_probability == pytest.approx(0.30)
+    assert cfg.env.recovery.final_recovery_probability == pytest.approx(0.08)
+    assert cfg.env.recovery.orientation_stages == [0.35, 0.60, 1.0]
     assert "initial_joint_pose_bank" not in cfg.env.recovery
     assert cfg.env.domain_rand.reset_roll_range == [0.0, 0.0]
     assert cfg.env.domain_rand.reset_pitch_range == [0.0, 0.0]
     assert cfg.env.recovery.post_recovery_stability_seconds == pytest.approx(2.0)
     assert cfg.env.recovery.in_episode_fall_recovery_progress == pytest.approx(0.0)
     assert cfg.env.recovery.allow_during_standing_bootstrap is False
-    assert cfg.env.recovery.timeout_seconds == pytest.approx(8.0)
-    assert cfg.env.recovery.final_timeout_seconds == pytest.approx(8.0)
-    assert cfg.reward.scales.recovery_progress == pytest.approx(20.0)
+    assert cfg.env.recovery.timeout_seconds == pytest.approx(12.0)
+    assert cfg.env.recovery.final_timeout_seconds == pytest.approx(15.0)
+    assert cfg.reward.scales.recovery_progress == pytest.approx(35.0)
     assert cfg.reward.scales.recovery_upright == pytest.approx(0.0)
-    assert cfg.reward.scales.recovery_orientation == pytest.approx(-8.0)
+    assert cfg.reward.scales.recovery_orientation == pytest.approx(-2.0)
     assert cfg.reward.scales.recovery_support == pytest.approx(0.0)
-    assert cfg.reward.scales.recovery_sweep == pytest.approx(0.0)
-    assert cfg.reward.scales.recovery_rise == pytest.approx(0.0)
-    assert cfg.reward.scales.recovery_complete == pytest.approx(50.0)
+    assert cfg.reward.scales.recovery_sweep == pytest.approx(0.2)
+    assert cfg.reward.scales.recovery_rise == pytest.approx(3.0)
+    assert cfg.reward.scales.recovery_forbidden_contact == pytest.approx(-8.0)
+    assert cfg.reward.scales.recovery_complete == pytest.approx(100.0)
     ccfg = cfg.env.command_curriculum
     assert ccfg.enabled is True
     assert ccfg.initial_vel_limit == [[0.0, 0.0, -0.4], [0.35, 0.0, 0.4]]
