@@ -41,15 +41,24 @@ UV_CACHE_DIR=/tmp/uv-cache uv run -m sim2sim_real68_mujoco.main
 
 Controls:
 
-- `W/S`: increase/decrease forward velocity command
-- `A/D`: increase/decrease yaw-rate command
-- `Space`: zero the command
-- `R`: reset
-- `T`: switch to the next terrain cell and reset
-- `P`: pause/resume
-- `N`: single-step when paused
-- `F`: toggle follow-camera
-- `1/2/3`: forward command presets
+- Keyboard input is read from the terminal, so MuJoCo viewer hotkeys are not
+  intercepted.
+- `W/S`: forward/backward command while the terminal key repeats
+- `A/D`: left/right yaw command while the terminal key repeats
+- `Space`: zero the command immediately
+- `+/-`: increase/decrease both speed steps
+- `[/]`: decrease/increase forward speed step
+- `,/.`: decrease/increase yaw speed step
+- `1/2/3`: timed forward command presets
+- `R`: reset, `T`: next terrain, `P`: pause, `N`: single-step, `F`: camera, `Q`: quit
+
+Terminals do not expose physical key-up events. Movement commands therefore
+expire after `--key-timeout` seconds without a repeated key press (default
+`0.35 s`), which makes releasing a key return to zero while still supporting
+normal terminal key repeat for held keys.
+
+The viewer batches physics steps before each render. The default refresh is
+60 Hz; change it with `--render-fps` if needed.
 
 ## Interactive run with PS2 gamepad
 

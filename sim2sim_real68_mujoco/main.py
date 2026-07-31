@@ -50,11 +50,14 @@ def _build_commander(
     wz_scale: float | None,
     ps2_vx_axis: int,
     ps2_wz_axis: int,
+    key_timeout: float,
 ):
     if input_device == "keyboard":
-        commander = KeyboardCommander()
-        commander.command[:] = sim.command
-        return commander
+        return KeyboardCommander(
+            vx_max=float(max(abs(sim.command_limits[0, 0]), abs(sim.command_limits[1, 0]))),
+            wz_max=float(max(abs(sim.command_limits[0, 2]), abs(sim.command_limits[1, 2]))),
+            key_timeout=key_timeout,
+        )
 
     default_vx_scale = float(max(abs(sim.command[0]), 0.8))
     default_wz_scale = float(max(abs(sim.command[2]), 0.4))
@@ -80,6 +83,8 @@ def _interactive_run(
     wz_scale: float | None,
     ps2_vx_axis: int,
     ps2_wz_axis: int,
+    key_timeout: float,
+    render_fps: float,
 ) -> None:
     import mujoco.viewer
 
@@ -92,10 +97,8 @@ def _interactive_run(
         wz_scale=wz_scale,
         ps2_vx_axis=ps2_vx_axis,
         ps2_wz_axis=ps2_wz_axis,
+        key_timeout=key_timeout,
     )
-
-    def _on_key(keycode: int) -> None:
-        commander.handle(keycode)
 
     def _apply_control_requests() -> None:
         if commander.reset_requested:
@@ -108,8 +111,12 @@ def _interactive_run(
     print("[sim2sim] Opening MuJoCo viewer.")
     if input_device == "keyboard":
         print(
-            "[sim2sim] Controls: W/S forward, A/D yaw, Space zero, R reset, T next terrain, "
-            "P pause, N single-step, F follow-camera, 1/2/3 presets."
+            "[sim2sim] Terminal controls: W/S forward, A/D yaw; Space zero; "
+            "R reset, T next terrain, P pause, N single-step, F camera, Q quit."
+        )
+        print(
+            "[sim2sim] Speed: +/- both axes, [/ ] forward step, ,/. yaw step; "
+            "1/2/3 timed presets. Commands expire when key repeat stops."
         )
     else:
         print(
@@ -119,17 +126,24 @@ def _interactive_run(
             "TRIANGLE follow-camera, SQUARE single-step. Commands are clipped to the bundle limits."
         )
     try:
-        with mujoco.viewer.launch_passive(sim.model, sim.data, key_callback=_on_key) as viewer:
+        with mujoco.viewer.launch_passive(sim.model, sim.data) as viewer:
             viewer.cam.distance = float(sim.cfg["terrain"]["follow_camera_distance"])
             viewer.cam.elevation = -20.0
             viewer.cam.azimuth = 90.0
-            last = time.perf_counter()
+            render_period = 1.0 / max(float(render_fps), 1.0)
+            physics_steps_per_frame = max(
+                1, int(round(render_period / float(sim.model.opt.timestep)))
+            )
+            print(
+                f"[sim2sim] render={float(render_fps):.1f} Hz, "
+                f"physics_steps_per_frame={physics_steps_per_frame}"
+            )
             while viewer.is_running():
-                now = time.perf_counter()
-                dt = now - last
-                last = now
+                frame_start = time.perf_counter()
                 commander.poll()
                 _apply_control_requests()
+                if commander.quit_requested:
+                    break
                 if commander.follow_camera:
                     sim.set_viewer_camera(viewer)
                 if commander.paused and not commander.single_step:
@@ -137,11 +151,13 @@ def _interactive_run(
                     time.sleep(0.01)
                     continue
                 sim.update_command(commander.command)
-                sim.step()
+                steps = 1 if commander.single_step else physics_steps_per_frame
+                for _ in range(steps):
+                    sim.step()
                 commander.single_step = False
                 viewer.sync()
                 sim.maybe_print_status()
-                sleep_time = max(float(sim.model.opt.timestep) - dt, 0.0)
+                sleep_time = max(render_period - (time.perf_counter() - frame_start), 0.0)
                 if sleep_time > 0.0:
                     time.sleep(sleep_time)
     finally:
@@ -161,6 +177,15 @@ def main() -> None:
     )
     parser.add_argument("--headless", action="store_true", help="Run without launching the viewer.")
     parser.add_argument("--steps", type=int, default=4000, help="Headless simulation steps.")
+    parser.add_argument(
+        "--render-fps", type=float, default=60.0, help="Interactive viewer refresh rate."
+    )
+    parser.add_argument(
+        "--key-timeout",
+        type=float,
+        default=0.35,
+        help="Seconds before a terminal movement command expires without key repeat.",
+    )
     parser.add_argument("--random-yaw", action="store_true", help="Use randomized yaw on reset.")
     parser.add_argument(
         "--auto-reset", action="store_true", help="Automatically reset on fall/contact failure."
@@ -219,6 +244,8 @@ def main() -> None:
         wz_scale=args.wz_scale,
         ps2_vx_axis=int(args.ps2_vx_axis),
         ps2_wz_axis=int(args.ps2_wz_axis),
+        key_timeout=float(args.key_timeout),
+        render_fps=float(args.render_fps),
     )
 
 

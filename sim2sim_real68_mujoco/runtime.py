@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import select
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +89,7 @@ class CommanderBase:
         self.reset_requested = False
         self.next_terrain_requested = False
         self.follow_camera = True
+        self.quit_requested = False
 
     def poll(self) -> None:
         return
@@ -130,38 +133,167 @@ class CommanderBase:
 
 
 class KeyboardCommander(CommanderBase):
-    def __init__(self, *, step_size: float = 0.05) -> None:
+    """Read terminal input without installing a MuJoCo viewer key callback.
+
+    Terminals report key presses, not physical key-up events. Directional
+    commands therefore expire unless terminal key-repeat keeps refreshing them.
+    """
+
+    def __init__(
+        self,
+        *,
+        step_size: float = 0.05,
+        vx_max: float = 1.0,
+        wz_max: float = 1.0,
+        key_timeout: float = 0.35,
+    ) -> None:
         super().__init__()
-        self._step_size = float(step_size)
+        if not sys.stdin.isatty():
+            raise RuntimeError("Terminal keyboard control requires stdin to be a TTY.")
+
+        import fcntl
+        import termios
+        import tty
+
+        self._fcntl = fcntl
+        self._termios = termios
+        self._stdin_fd = sys.stdin.fileno()
+        self._old_termios = termios.tcgetattr(self._stdin_fd)
+        self._old_flags = fcntl.fcntl(self._stdin_fd, fcntl.F_GETFL)
+        tty.setcbreak(self._stdin_fd)
+        fcntl.fcntl(self._stdin_fd, fcntl.F_SETFL, self._old_flags | os.O_NONBLOCK)
+
+        self._vx_max = max(float(vx_max), 0.0)
+        self._wz_max = max(float(wz_max), 0.0)
+        self._vx_step = float(np.clip(step_size, 0.01, max(self._vx_max, 0.01)))
+        self._wz_step = float(np.clip(step_size, 0.01, max(self._wz_max, 0.01)))
+        self._key_timeout = max(float(key_timeout), 0.05)
+        self._active_keys: dict[str, float] = {}
+        self._preset: tuple[np.ndarray, float] | None = None
+        self._closed = False
+
+        print(
+            "[sim2sim] Terminal keyboard enabled. Release/stop key repeat to zero the command."
+        )
+        self._print_speed_profile()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._fcntl.fcntl(self._stdin_fd, self._fcntl.F_SETFL, self._old_flags)
+        self._termios.tcsetattr(self._stdin_fd, self._termios.TCSADRAIN, self._old_termios)
+        print()
+
+    def _print_speed_profile(self) -> None:
+        print(f"[sim2sim] keyboard speed: vx_step={self._vx_step:.2f}, wz_step={self._wz_step:.2f}")
+
+    def _set_speed(self, *, vx_delta: float = 0.0, wz_delta: float = 0.0) -> None:
+        self._vx_step = float(np.clip(self._vx_step + vx_delta, 0.01, self._vx_max))
+        self._wz_step = float(np.clip(self._wz_step + wz_delta, 0.01, self._wz_max))
+        self._print_speed_profile()
+
+    def _clear_motion(self) -> None:
+        self._active_keys.clear()
+        self._preset = None
+        self.command[:] = 0.0
+
+    def _handle_terminal_key(self, key: str, now: float) -> None:
+        if key == "\x03":
+            self.quit_requested = True
+            return
+        if key in ("q", "Q"):
+            self.quit_requested = True
+            return
+        if key == " ":
+            self._clear_motion()
+            self._print_command()
+            return
+        if key in ("p", "P"):
+            self.paused = not self.paused
+            print(f"[sim2sim] {'paused' if self.paused else 'resumed'}")
+            return
+        if key in ("n", "N"):
+            self.single_step = True
+            return
+        if key in ("r", "R"):
+            self.reset_requested = True
+            return
+        if key in ("t", "T"):
+            self.next_terrain_requested = True
+            return
+        if key in ("f", "F"):
+            self.follow_camera = not self.follow_camera
+            print(f"[sim2sim] follow_camera={self.follow_camera}")
+            return
+        if key in ("=", "+"):
+            self._set_speed(vx_delta=0.05, wz_delta=0.05)
+            return
+        if key in ("-", "_"):
+            self._set_speed(vx_delta=-0.05, wz_delta=-0.05)
+            return
+        if key == "[":
+            self._set_speed(vx_delta=-0.05)
+            return
+        if key == "]":
+            self._set_speed(vx_delta=0.05)
+            return
+        if key == ",":
+            self._set_speed(wz_delta=-0.05)
+            return
+        if key == ".":
+            self._set_speed(wz_delta=0.05)
+            return
+
+        if key in "wWaAsSdD":
+            self._active_keys[key.lower()] = now
+            self._preset = None
+            return
+        preset = {
+            "1": np.asarray([0.2, 0.0, 0.0], dtype=np.float64),
+            "2": np.asarray([0.5, 0.0, 0.0], dtype=np.float64),
+            "3": np.asarray([0.8, 0.0, 0.0], dtype=np.float64),
+        }.get(key)
+        if preset is not None:
+            self._active_keys.clear()
+            self._preset = (preset, now)
+
+    def _update_motion_command(self, now: float) -> None:
+        self._active_keys = {
+            key: timestamp
+            for key, timestamp in self._active_keys.items()
+            if now - timestamp <= self._key_timeout
+        }
+        if self._active_keys:
+            vx = self._vx_step * (
+                float("w" in self._active_keys) - float("s" in self._active_keys)
+            )
+            wz = self._wz_step * (
+                float("a" in self._active_keys) - float("d" in self._active_keys)
+            )
+            self.command[:] = np.asarray([vx, 0.0, wz], dtype=np.float64)
+            return
+        if self._preset is not None and now - self._preset[1] <= self._key_timeout:
+            self.command[:] = self._preset[0]
+            return
+        self._preset = None
+        self.command[:] = 0.0
+
+    def poll(self) -> None:
+        now = time.perf_counter()
+        while select.select([sys.stdin], [], [], 0.0)[0]:
+            try:
+                data = os.read(self._stdin_fd, 128)
+            except BlockingIOError:
+                break
+            if not data:
+                break
+            for key in data.decode("utf-8", errors="ignore"):
+                self._handle_terminal_key(key, now)
+        self._update_motion_command(now)
 
     def handle(self, keycode: int) -> None:
-        if self._handle_common_key(keycode):
-            return
-        updated = False
-        if keycode in (ord("w"), ord("W")):
-            self.command[0] += self._step_size
-            updated = True
-        elif keycode in (ord("s"), ord("S")):
-            self.command[0] -= self._step_size
-            updated = True
-        elif keycode in (ord("a"), ord("A")):
-            self.command[2] += self._step_size
-            updated = True
-        elif keycode in (ord("d"), ord("D")):
-            self.command[2] -= self._step_size
-            updated = True
-        elif keycode in (ord("1"),):
-            self.command[:] = np.asarray([0.2, 0.0, 0.0], dtype=np.float64)
-            updated = True
-        elif keycode in (ord("2"),):
-            self.command[:] = np.asarray([0.5, 0.0, 0.0], dtype=np.float64)
-            updated = True
-        elif keycode in (ord("3"),):
-            self.command[:] = np.asarray([0.8, 0.0, 0.0], dtype=np.float64)
-            updated = True
-        if updated:
-            self._normalize_command()
-            self._print_command()
+        self._handle_terminal_key(chr(keycode), time.perf_counter())
 
 
 class GamepadCommander(CommanderBase):
