@@ -1,6 +1,11 @@
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0 AND BSD-3-Clause
 #
 # HIM-PPO OnPolicy Runner for UniLab.
+# Adapted from HIMLoco; Copyright (c) 2024 Junfeng Long, Zirui Wang;
+# RSL-RL attribution: Copyright (c) 2021-2025, ETH Zurich and NVIDIA
+# CORPORATION; BSD-3-Clause portions.
+# https://github.com/InternRobotics/HIMLoco; CC BY-NC-SA 4.0.
+# See THIRD_PARTY_NOTICES.md for the mixed-license boundary.
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import torch
 
 from unilab.algos.torch.him_ppo.actor_critic import HIMActorCritic
 from unilab.algos.torch.him_ppo.algorithm import HIMPPO
+from unilab.algos.torch.him_ppo.checkpoint import load_source_mlp_compatible_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,7 @@ class HIMOnPolicyRunner:
         cfg: dict[str, Any] = dict(train_cfg)
 
         num_one_step_obs = int(cfg["num_one_step_obs"])
+        num_estimate = int(cfg.get("num_estimate", 3))
         num_actor_history = int(cfg.get("num_actor_history", 1))
         num_actor_obs = num_actor_history * num_one_step_obs
         num_critic_obs = int(getattr(env, "num_privileged_obs", None) or env.num_obs)
@@ -68,6 +75,7 @@ class HIMOnPolicyRunner:
             num_critic_obs=num_critic_obs,
             num_one_step_obs=num_one_step_obs,
             num_actions=num_actions,
+            num_estimate=num_estimate,
             actor_hidden_dims=list(policy_cfg.get("actor_hidden_dims", [512, 256, 128])),
             critic_hidden_dims=list(policy_cfg.get("critic_hidden_dims", [512, 256, 128])),
             activation=str(policy_cfg.get("activation", "elu")),
@@ -104,6 +112,22 @@ class HIMOnPolicyRunner:
             except ImportError:
                 pass
 
+    @property
+    def tot_timesteps(self) -> int:
+        """Source-runner spelling for the accumulated environment steps.
+
+        The upstream WheelBipe runner keeps this counter on the runner itself,
+        while the compact UniLab logger owns the rolling statistics.  Exposing
+        a property keeps both call surfaces backed by one authoritative value
+        (and avoids checkpoints silently diverging after a resume).
+        """
+
+        return int(self.logger.tot_timesteps)
+
+    @tot_timesteps.setter
+    def tot_timesteps(self, value: int) -> None:
+        self.logger.tot_timesteps = int(value)
+
     # ── Public interface ─────────────────────────────────────────────────────
 
     def learn(
@@ -116,10 +140,25 @@ class HIMOnPolicyRunner:
         critic_obs = obs_td.get("critic", obs).to(self.device)
 
         if init_at_random_ep_len:
-            self.env.episode_length_buf = torch.randint_like(
-                self.env.episode_length_buf,
-                high=int(self.env.max_episode_length),
-            )
+            # Lightweight adapters used by evaluation/tests need not expose
+            # Isaac-style episode buffers.  Match the custom runner's
+            # explicit no-op contract when those optional fields are absent,
+            # while still validating a malformed maximum before mutating an
+            # existing environment buffer.
+            episode_length_buf = getattr(self.env, "episode_length_buf", None)
+            max_episode_length = getattr(self.env, "max_episode_length", None)
+            if isinstance(episode_length_buf, torch.Tensor) and max_episode_length is not None:
+                try:
+                    high = int(max_episode_length)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(
+                        "HIM-PPO env.max_episode_length must be integer-compatible"
+                    ) from exc
+                if high > 0:
+                    with torch.no_grad():
+                        # Route through the wrapper setter so the underlying
+                        # NpEnv step counter follows the source lifecycle.
+                        self.env.episode_length_buf = torch.randint_like(episode_length_buf, high=high)
 
         self.alg.train_mode()
         start_iter = self.current_learning_iteration
@@ -148,14 +187,28 @@ class HIMOnPolicyRunner:
                         self._ep_returns[done_ids] = 0.0
                         self._ep_lengths[done_ids] = 0.0
 
-                    self.alg.process_env_step(obs_td, rewards, dones, infos)
+                    # Pass the post-step critic frame.  Using ``obs_td`` here
+                    # would feed the pre-step observation into the compact
+                    # remapper and silently corrupt timeout bootstrapping and
+                    # the estimator's next-frame target.
+                    self.alg.process_env_step(rewards, dones, infos, next_critic_obs)
                     obs = next_obs
                     critic_obs = next_critic_obs
 
                 self.alg.compute_returns(critic_obs)
 
             # ── Update ───────────────────────────────────────────────────────
-            value_loss, surrogate_loss, estimation_loss, swap_loss = self.alg.update()
+            update_result = self.alg.update()
+            if isinstance(update_result, dict):
+                # Source mapping storage returns named losses; compact storage
+                # retains the historical four-tuple.  Normalize both at the
+                # runner boundary so logging/checkpoint cadence is identical.
+                value_loss = float(update_result.get("value_function", 0.0))
+                surrogate_loss = float(update_result.get("surrogate", 0.0))
+                estimation_loss = float(update_result.get("estimation", 0.0))
+                swap_loss = float(update_result.get("swap", 0.0))
+            else:
+                value_loss, surrogate_loss, estimation_loss, swap_loss = update_result
 
             self.current_learning_iteration = it + 1
             self.logger.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -192,24 +245,96 @@ class HIMOnPolicyRunner:
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
-    def save(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(
-            {
-                "actor_state_dict": self.actor_critic.state_dict(),
-                "optimizer_state_dict": self.alg.optimizer.state_dict(),
-                "iteration": self.current_learning_iteration,
-            },
-            path,
+    def save(
+        self,
+        path: str,
+        infos: dict[str, Any] | None = None,
+        is_best: bool = False,
+    ) -> None:
+        """Persist a checkpoint readable by UniLab *and* source runners.
+
+        ``is_best`` is accepted for the source runner's public signature.  It
+        has no effect on local filesystem writes; callers remain responsible
+        for choosing the destination filename.  Both key spellings are
+        emitted intentionally so an old play script and the upstream loader
+        can consume the same artifact without a conversion step.
+        """
+
+        del is_best
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        estimator_optimizer = getattr(
+            getattr(self.actor_critic, "estimator", None), "optimizer", None
+        )
+        payload: dict[str, Any] = {
+            # UniLab spelling.
+            "actor_state_dict": self.actor_critic.state_dict(),
+            "iteration": self.current_learning_iteration,
+            # Upstream WheelBipe spelling.
+            "model_state_dict": self.actor_critic.state_dict(),
+            "iter": self.current_learning_iteration,
+            "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "total_timesteps": self.tot_timesteps,
+            "infos": infos,
+        }
+        if estimator_optimizer is not None and hasattr(estimator_optimizer, "state_dict"):
+            payload["estimator_optimizer_state_dict"] = estimator_optimizer.state_dict()
+        torch.save(payload, path)
+
+    def load(
+        self,
+        path: str,
+        load_optimizer: bool = True,
+        load_iteration: bool = True,
+    ) -> dict[str, Any] | None:
+        """Load either UniLab or upstream WheelBipe checkpoint keys.
+
+        Defaults retain the historical UniLab resume behavior.  Source-style
+        callers can pass ``load_optimizer=False, load_iteration=False`` (the
+        upstream defaults) when using a checkpoint only for evaluation.
+        """
+
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
+        if not isinstance(ckpt, dict):
+            raise ValueError(f"HIM-PPO checkpoint must be a mapping, got {type(ckpt).__name__}")
+        state_dict = ckpt.get("actor_state_dict")
+        if state_dict is None:
+            state_dict = ckpt.get("model_state_dict")
+        if state_dict is None:
+            raise KeyError("HIM-PPO checkpoint is missing actor_state_dict/model_state_dict")
+        load_source_mlp_compatible_state_dict(
+            self.actor_critic,
+            state_dict,
+            mlp_roots=("actor", "critic"),
+            label="HIM-PPO",
         )
 
-    def load(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device, weights_only=True)
-        self.actor_critic.load_state_dict(ckpt["actor_state_dict"])
-        if "optimizer_state_dict" in ckpt:
-            self.alg.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "iteration" in ckpt:
-            self.current_learning_iteration = int(ckpt["iteration"])
+        if load_optimizer:
+            optimizer_state = ckpt.get("optimizer_state_dict")
+            if optimizer_state is not None:
+                self.alg.optimizer.load_state_dict(optimizer_state)
+            estimator_optimizer_state = ckpt.get("estimator_optimizer_state_dict")
+            estimator_optimizer = getattr(
+                getattr(self.actor_critic, "estimator", None), "optimizer", None
+            )
+            if estimator_optimizer_state is not None and estimator_optimizer is not None:
+                estimator_optimizer.load_state_dict(estimator_optimizer_state)
+
+        if load_iteration:
+            iteration = ckpt.get("iteration", ckpt.get("iter"))
+            if iteration is not None:
+                self.current_learning_iteration = int(iteration)
+            total_timesteps = ckpt.get("total_timesteps")
+            if total_timesteps is not None:
+                self.tot_timesteps = int(total_timesteps)
+            elif iteration is not None:
+                # Legacy artifacts did not persist this field; derive the
+                # same value used by the training loop when dimensions exist.
+                self.tot_timesteps = int(iteration) * self.num_steps_per_env * self.env.num_envs
+
+        infos = ckpt.get("infos")
+        return infos if isinstance(infos, dict) else infos
 
     def get_inference_policy(self, device: str | None = None) -> Callable[..., Any]:
         self.actor_critic.eval()
@@ -233,22 +358,33 @@ class HIMOnPolicyRunner:
                 return self.ac.act_inference(obs_history)
 
         orig_device = next(self.actor_critic.parameters()).device
-        model = _PolicyExport(self.actor_critic).cpu().eval()
-        dummy = torch.zeros(1, self.actor_critic.num_actor_obs)
-        os.makedirs(path, exist_ok=True)
         save_path = os.path.join(path, filename)
-        with torch.inference_mode():
-            torch.onnx.export(
-                model,
-                (dummy,),
-                save_path,
-                export_params=True,
-                opset_version=18,
-                input_names=["obs_history"],
-                output_names=["actions"],
-                dynamic_axes={"obs_history": {0: "batch_size"}, "actions": {0: "batch_size"}},
-            )
-        self.actor_critic.to(orig_device)
+        try:
+            # ``cpu()`` mutates the live policy.  Keep directory creation and
+            # dummy-input setup inside the same guard as the exporter: a bad
+            # path or allocation error must not strand a resumed CUDA/MPS
+            # runner on CPU either.
+            model = _PolicyExport(self.actor_critic).cpu().eval()
+            dummy = torch.zeros(1, self.actor_critic.num_actor_obs)
+            os.makedirs(path, exist_ok=True)
+            with torch.inference_mode():
+                torch.onnx.export(
+                    model,
+                    (dummy,),
+                    save_path,
+                    export_params=True,
+                    opset_version=18,
+                    input_names=["obs_history"],
+                    output_names=["actions"],
+                    dynamic_axes={
+                        "obs_history": {0: "batch_size"},
+                        "actions": {0: "batch_size"},
+                    },
+                )
+        finally:
+            # Exporting on CPU is required by several ONNX backends, but a
+            # tracing failure must not leave a resumed CUDA/MPS runner on CPU.
+            self.actor_critic.to(orig_device)
         print(f"Exported HIM-PPO policy to {save_path}")
 
     def export_policy_to_jit(self, path: str, filename: str = "policy.pt") -> None:
@@ -258,28 +394,35 @@ class HIMOnPolicyRunner:
         so that torch.jit.trace can introspect it without hitting the distribution assert.
         """
         orig_device = next(self.actor_critic.parameters()).device
-        ac = self.actor_critic.cpu().eval()
-        num_one_step_obs = ac.num_one_step_obs
-
-        class _PolicyExport(torch.nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.estimator = ac.estimator
-                self.actor_mlp = ac.actor
-
-            def forward(self, obs_history: torch.Tensor) -> torch.Tensor:
-                vel, latent = self.estimator.get_latent(obs_history)
-                actor_input = torch.cat((obs_history[:, :num_one_step_obs], vel, latent), dim=-1)
-                return self.actor_mlp(actor_input)
-
-        model = _PolicyExport().eval()
-        dummy = torch.zeros(1, ac.num_actor_obs)
-        with torch.inference_mode():
-            traced = cast(torch.jit.ScriptModule, torch.jit.trace(model, (dummy,)))
-        os.makedirs(path, exist_ok=True)
         save_path = os.path.join(path, filename)
-        traced.save(save_path)
-        self.actor_critic.to(orig_device)
+        try:
+            # As with ONNX export, all operations after moving the live policy
+            # to CPU remain inside the restoration guard.  This includes
+            # nested wrapper construction and output-directory setup.
+            ac = self.actor_critic.cpu().eval()
+            num_one_step_obs = ac.num_one_step_obs
+
+            class _PolicyExport(torch.nn.Module):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.estimator = ac.estimator
+                    self.actor_mlp = ac.actor
+
+                def forward(self, obs_history: torch.Tensor) -> torch.Tensor:
+                    vel, latent = self.estimator.get_latent(obs_history)
+                    actor_input = torch.cat(
+                        (obs_history[:, -num_one_step_obs:], vel, latent), dim=-1
+                    )
+                    return self.actor_mlp(actor_input)
+
+            model = _PolicyExport().eval()
+            dummy = torch.zeros(1, ac.num_actor_obs)
+            os.makedirs(path, exist_ok=True)
+            with torch.inference_mode():
+                traced = cast(torch.jit.ScriptModule, torch.jit.trace(model, (dummy,)))
+            traced.save(save_path)
+        finally:
+            self.actor_critic.to(orig_device)
         print(f"Exported HIM-PPO policy (JIT) to {save_path}")
 
     # ── Helpers ──────────────────────────────────────────────────────────────

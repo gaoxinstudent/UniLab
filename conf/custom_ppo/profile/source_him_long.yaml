@@ -1,0 +1,35 @@
+# @package _global_
+# Source WheelBipe ``WheelbipeV14FlatHIMPPORunnerCfg`` profile.
+# Compose with ``task=wheelbipe_v14_flat_him/<backend>``.  The compact UniLab
+# owner uses the source history/estimator contract but not source Isaac
+# dynamics; convergence still requires a real long run.
+algo:
+  algorithm_name: him
+  num_envs: 4096
+  num_steps_per_env: 24
+  max_iterations: 5000
+  save_interval: 500
+  num_actor_history: 5
+  history_reset_mode: source_zero_current
+  num_estimate: 4
+  policy:
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+  estimator:
+    enc_hidden_dims: [128, 64, 16]
+    tar_hidden_dims: [128, 64]
+    velocity_target_start: 28
+    target_obs_start: 4
+  algorithm:
+    value_loss_coef: 4.0
+    use_clipped_value_loss: true
+    clip_param: 0.2
+    entropy_coef: 0.005
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 1.0e-4
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    max_grad_norm: 1.0

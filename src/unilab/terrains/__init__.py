@@ -27,6 +27,10 @@ from unilab.terrains.heightfield_terrains import (
     HfRandomUniformTerrainCfg,
     HfWaveTerrainCfg,
 )
+from unilab.terrains.source_wheelbipe import (
+    HfWheelbipeCliffInvertedStairsTerrainCfg,
+    HfWheelbipeGridBarsTerrainCfg,
+)
 from unilab.terrains.terrain_generator import (
     FlatPatchSamplingCfg,
     GeneratedTerrain,
@@ -47,6 +51,8 @@ __all__ = [
     "HfPyramidStairsTerrainCfg",
     "HfRandomUniformTerrainCfg",
     "HfWaveTerrainCfg",
+    "HfWheelbipeCliffInvertedStairsTerrainCfg",
+    "HfWheelbipeGridBarsTerrainCfg",
     "ROUGH_TERRAINS_CFG",
     "STAIRS_TERRAINS_CFG",
     "SubTerrainCfg",

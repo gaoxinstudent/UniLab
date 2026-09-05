@@ -214,6 +214,20 @@ class ABEnv(abc.ABC):
     def close(self) -> None:
         """Clean up environment resources"""
 
+    def set_nan_guard(self, guard: Any) -> None:
+        """Attach the optional numerical NaN guard.
+
+        :class:`~unilab.base.np_env.NpEnv` implements the storage and runtime
+        checks.  Declaring the hook at the public environment boundary keeps
+        training entrypoints from depending on a concrete environment class;
+        unsupported environment implementations fail explicitly if the
+        feature is requested.
+        """
+        del guard
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support a numerical NaN guard"
+        )
+
     def init_play_renderer(
         self,
         render_spacing: float | None = None,

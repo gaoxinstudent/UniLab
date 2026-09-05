@@ -11,6 +11,7 @@ reward、scene 以及 task 专属运行时字段的身份标识。
 | APPO | `conf/appo/task/<task>/<backend>.yaml` |
 | SAC / TD3 / FlashSAC | `conf/offpolicy/task/<algo>/<task>/<backend>.yaml` |
 | HIM-PPO | `conf/ppo_him/task/<task>/<backend>.yaml` |
+| WheelBipe custom HIM / DreamWaQ / NP3O | `conf/custom_ppo/task/<variant>/<backend>.yaml` |
 | HORA 蒸馏 | `conf/hora_distill/task/<task>/<backend>.yaml` |
 
 示例：
@@ -23,6 +24,8 @@ uv run train --algo sac --task g1_walk_flat --sim mujoco
 
 对于 off-policy，`--algo` 选择 `conf/offpolicy/task/<algo>/` 下 owner 路径的第一
 个分段；不要在 `--task` 中包含算法名称。
+对于 WheelBipe custom 路由，公共的 `--task wheelbipe_v14_flat` 和 `--algo` 会映射到
+对应的命名 variant owner；不要把内部 variant slug 作为公共 task 传入。
 
 ## 安全的 Override
 

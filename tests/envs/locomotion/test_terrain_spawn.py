@@ -54,6 +54,46 @@ def test_init_type_cols_random_seeded():
     assert not np.array_equal(a.type_cols, c.type_cols)
 
 
+def test_play_assignment_covers_columns_and_pins_initial_level():
+    sm = _make_manager(
+        num_envs=10,
+        num_rows=6,
+        num_cols=4,
+        enabled=False,
+        type_col_assignment="round_robin",
+        initial_level=3,
+    )
+
+    np.testing.assert_array_equal(sm.type_cols, [0, 1, 2, 3, 0, 1, 2, 3, 0, 1])
+    np.testing.assert_array_equal(sm.levels, np.full(10, 3, dtype=np.int32))
+
+
+def test_invalid_play_terrain_assignment_or_level_raises():
+    with pytest.raises(ValueError, match="type_col_assignment"):
+        TerrainCurriculumCfg(type_col_assignment="diagonal")
+    with pytest.raises(ValueError, match="within generated rows"):
+        TerrainSpawnManager(
+            1,
+            _make_terrain_origins(num_rows=3, num_cols=2, cell_size=8.0),
+            8.0,
+            TerrainCurriculumCfg(initial_level=3),
+        )
+
+
+def test_none_seed_derives_reproducibly_from_run_level_numpy_stream():
+    caller_state = np.random.get_state()
+    try:
+        np.random.seed(31415)
+        a = _make_manager(seed=None)
+        np.random.seed(31415)
+        b = _make_manager(seed=None)
+    finally:
+        np.random.set_state(caller_state)
+
+    np.testing.assert_array_equal(a.type_cols, b.type_cols)
+    np.testing.assert_array_equal(a.levels, b.levels)
+
+
 def test_origins_match_terrain_origins_plus_margin():
     sm = _make_manager(num_envs=4, enabled=True, spawn_height_margin=0.07)
     sm.levels[:] = [1, 2, 3, 4]
@@ -70,6 +110,47 @@ def test_origins_match_terrain_origins_plus_margin():
     expected_z = np.array([1 + 0 * 0.1, 2 + 1 * 0.1, 3 + 2 * 0.1, 4 + 3 * 0.1]) + 0.07
     np.testing.assert_allclose(out[:, :2], expected_xy)
     np.testing.assert_allclose(out[:, 2], expected_z)
+
+
+def test_runtime_cells_follow_positions_without_mutating_assigned_cells():
+    sm = _make_manager(num_envs=2, num_rows=3, num_cols=4, cell_size=8.0, enabled=False)
+    sm.levels[:] = [0, 2]
+    sm.type_cols[:] = [0, 3]
+
+    assigned = sm.terrain_cells_for(np.asarray([0, 1]))
+    current = sm.terrain_cells_at_positions(
+        np.asarray(
+            [
+                [16.0, 8.0, 100.0],
+                [0.0, 16.0, -100.0],
+            ]
+        )
+    )
+
+    np.testing.assert_array_equal(assigned[0], [0, 2])
+    np.testing.assert_array_equal(assigned[1], [0, 3])
+    np.testing.assert_array_equal(current[0], [2, 0])
+    np.testing.assert_array_equal(current[1], [1, 2])
+    np.testing.assert_array_equal(sm.levels, [0, 2])
+    np.testing.assert_array_equal(sm.type_cols, [0, 3])
+
+
+def test_runtime_cells_use_half_cell_boundaries_and_clamp_out_of_grid():
+    sm = _make_manager(num_envs=1, num_rows=3, num_cols=4, cell_size=8.0)
+
+    rows, cols = sm.terrain_cells_at_positions(
+        np.asarray(
+            [
+                [-1.0e6, -1.0e6],
+                [3.999, 3.999],
+                [4.0, 4.0],
+                [1.0e6, 1.0e6],
+            ]
+        )
+    )
+
+    np.testing.assert_array_equal(rows, [0, 0, 1, 2])
+    np.testing.assert_array_equal(cols, [0, 0, 1, 3])
 
 
 def test_promote_when_walked_far_and_enabled():

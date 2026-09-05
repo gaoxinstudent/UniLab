@@ -91,6 +91,12 @@ def _fake_mujoco_backend(pre_step_control_fn=None, post_step_forward_sensor=Fals
     backend._np_dtype = np.float32
     backend._physics_state = np.zeros((1, 1), dtype=np.float32)
     backend._sensor_data = np.zeros((1, 1), dtype=np.float32)
+    # This unit fixture deliberately bypasses ``MuJoCoBackend.__init__``.
+    # Keep it aligned with the backend-owned physics-step acceleration cache.
+    backend._dof_vel_view = backend._physics_state
+    backend._dof_acc = np.zeros_like(backend._dof_vel_view)
+    backend._dof_vel_before_step = np.zeros_like(backend._dof_vel_view)
+    backend._sim_dt = 1.0
     backend._pending_xfrc_applied = np.zeros((1, 0), dtype=np.float64)
     backend._post_step_forward_sensor = post_step_forward_sensor
     backend._chunk_size = None
@@ -176,9 +182,18 @@ def _fake_motrix_backend(pre_step_control_fn=None):
     backend._model = _FakeMotrixModel()
     backend._data = SimpleNamespace(
         actuator_ctrls=np.zeros((1, 2), dtype=np.float32),
+        dof_vel=np.zeros((1, 1), dtype=np.float32),
         sensor_value=0.0,
     )
+    # This fixture also bypasses ``MotrixBackend.__init__``; materialize the
+    # public DoF-acceleration contract used by the real constructor.
+    backend._actuator_joint_vel_indices = None
+    backend._joint_dof_vel_indices = np.asarray([0], dtype=np.int64)
+    backend._dof_acc = np.zeros((1, 1), dtype=np.float32)
+    backend._dof_vel_before_step = np.zeros_like(backend._dof_acc)
+    backend._sim_dt = 1.0
     backend._refresh_link_pose_cache = lambda: None
+    backend._invalidate_link_velocity_cache = lambda: None
     return backend
 
 

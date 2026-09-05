@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -58,6 +59,36 @@ class TerrainCurriculumCfg:
     spawn_height_margin: float = 0.05
     """Extra z added on top of the sampled terrain surface height."""
     seed: int | None = None
+    """Private curriculum-stream seed; ``None`` derives from run-level NumPy."""
+    type_col_assignment: Literal["random", "round_robin"] = "random"
+    """Initial terrain-column assignment for vectorized environments.
+
+    ``random`` is the training-compatible default.  ``round_robin`` is useful
+    for a play-only showcase because the first ``num_cols`` environments then
+    cover every generated terrain column instead of drawing duplicate terrain
+    types by chance.
+    """
+    initial_level: int | None = None
+    """Optional fixed initial difficulty row (primarily for play profiles)."""
+
+    def __post_init__(self) -> None:
+        assignment = str(self.type_col_assignment).strip().lower()
+        if assignment not in {"random", "round_robin"}:
+            raise ValueError(
+                "terrain_curriculum.type_col_assignment must be 'random' or 'round_robin', "
+                f"got {self.type_col_assignment!r}"
+            )
+        self.type_col_assignment = assignment  # type: ignore[assignment]
+        if self.initial_level is not None:
+            try:
+                level = int(self.initial_level)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "terrain_curriculum.initial_level must be an integer or null"
+                ) from exc
+            if level != self.initial_level:
+                raise ValueError("terrain_curriculum.initial_level must be an integer or null")
+            self.initial_level = level
 
 
 class TerrainSpawnManager(BaseSpawnManager):
@@ -85,6 +116,13 @@ class TerrainSpawnManager(BaseSpawnManager):
         self._num_rows = num_rows
         self._num_cols = num_cols
         self._cell_size = float(cell_size)
+        if not np.isfinite(self._cell_size) or self._cell_size <= 0.0:
+            raise ValueError(f"cell_size must be finite and positive, got {cell_size!r}")
+        # Generated terrain origins are cell-local spawn centers. Cache the
+        # two world-space axes once so runtime profile lookup never inspects a
+        # generator, heightfield asset, or backend-private model.
+        self._terrain_row_centers_x = np.median(self._terrain_origins[:, :, 0], axis=1)
+        self._terrain_col_centers_y = np.median(self._terrain_origins[:, :, 1], axis=0)
         self._cfg = cfg
         if sample_height is not None and not callable(sample_height):
             raise TypeError("sample_height must be callable")
@@ -98,10 +136,43 @@ class TerrainSpawnManager(BaseSpawnManager):
                     f"spawn_height_points must have shape (num_points, 3), got {points.shape}"
                 )
             self._spawn_height_points = points
-        self._rng = np.random.default_rng(cfg.seed)
+        # ``None`` means "derive from the run-level NumPy seed", not OS
+        # entropy.  This keeps procedural spawn assignment reproducible under
+        # UniLab's training seed contract and lets the Gym facade isolate the
+        # complete cold-path stream while retaining a private Generator for
+        # later curriculum updates.
+        rng_seed = (
+            int(cfg.seed)
+            if cfg.seed is not None
+            else int(np.random.randint(0, np.iinfo(np.uint32).max))
+        )
+        self._rng = np.random.default_rng(rng_seed)
 
-        self.type_cols = self._rng.integers(0, num_cols, size=num_envs).astype(np.int32)
-        if cfg.enabled:
+        assignment = str(getattr(cfg, "type_col_assignment", "random")).strip().lower()
+        if assignment == "round_robin":
+            self.type_cols = (np.arange(num_envs, dtype=np.int32) % num_cols).astype(np.int32)
+        elif assignment == "random":
+            self.type_cols = self._rng.integers(0, num_cols, size=num_envs).astype(np.int32)
+        else:
+            raise ValueError(
+                "terrain_curriculum.type_col_assignment must be 'random' or 'round_robin', "
+                f"got {assignment!r}"
+            )
+        initial_level = getattr(cfg, "initial_level", None)
+        if initial_level is not None:
+            try:
+                initial_level = int(initial_level)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "terrain_curriculum.initial_level must be an integer or null"
+                ) from exc
+            if initial_level < 0 or initial_level >= num_rows:
+                raise ValueError(
+                    "terrain_curriculum.initial_level must be within generated rows: "
+                    f"got {initial_level}, num_rows={num_rows}"
+                )
+            self.levels = np.full(num_envs, initial_level, dtype=np.int32)
+        elif cfg.enabled:
             self.levels = np.zeros(num_envs, dtype=np.int32)
         else:
             self.levels = self._rng.integers(0, num_rows, size=num_envs).astype(np.int32)
@@ -112,6 +183,50 @@ class TerrainSpawnManager(BaseSpawnManager):
     @property
     def enabled(self) -> bool:
         return self._cfg.enabled
+
+    @property
+    def terrain_grid_shape(self) -> tuple[int, int]:
+        """Return the cold-path generated terrain cell grid shape."""
+
+        return self._num_rows, self._num_cols
+
+    def terrain_cells_for(self, env_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return assigned ``(row, column)`` cells for selected environments."""
+
+        ids = np.asarray(env_ids, dtype=np.intp).reshape(-1)
+        if np.any(ids < 0) or np.any(ids >= self.levels.size):
+            raise IndexError(f"terrain spawn env ids out of range: {ids.tolist()}")
+        return self.levels[ids].copy(), self.type_cols[ids].copy()
+
+    def terrain_cells_at_positions(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Resolve current world positions to clamped generated-grid cells.
+
+        Reset owners should use :meth:`terrain_cells_for`, because an env's
+        assigned origin is authoritative before its root state is spawned.
+        Runtime command/state owners use this method so crossing a row or
+        column immediately switches to that cell's real terrain identity.
+        """
+
+        points = np.asarray(positions, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] not in {2, 3}:
+            raise ValueError(
+                f"terrain positions must have shape (N, 2) or (N, 3), got {points.shape}"
+            )
+        if not np.all(np.isfinite(points[:, :2])):
+            raise ValueError("terrain positions must contain finite x/y coordinates")
+
+        def axis_indices(values: np.ndarray, centers: np.ndarray) -> np.ndarray:
+            if centers.size == 1:
+                return np.zeros((values.size,), dtype=np.int32)
+            step = float(np.median(np.diff(centers)))
+            if not np.isfinite(step) or abs(step) <= np.finfo(np.float64).eps:
+                step = self._cell_size
+            indices = np.floor((values - float(centers[0])) / step + 0.5).astype(np.int32)
+            return np.clip(indices, 0, centers.size - 1)
+
+        rows = axis_indices(points[:, 0], self._terrain_row_centers_x)
+        cols = axis_indices(points[:, 1], self._terrain_col_centers_y)
+        return rows, cols
 
     def origins_for(self, env_ids: np.ndarray) -> np.ndarray:
         rows = self.levels[env_ids]

@@ -1,6 +1,11 @@
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0 AND BSD-3-Clause
 #
 # Adapted from the HIMLoco RSL-RL HIM estimator for UniLab.
+# RSL-RL attribution: Copyright (c) 2021-2025, ETH Zurich and NVIDIA
+# CORPORATION; BSD-3-Clause portions.
+# HIMLoco attribution: Copyright (c) 2024 Junfeng Long, Zirui Wang;
+# https://github.com/InternRobotics/HIMLoco; CC BY-NC-SA 4.0.
+# See THIRD_PARTY_NOTICES.md for the mixed-license boundary.
 
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ class HIMEstimator(nn.Module):
         self,
         temporal_steps: int,
         num_one_step_obs: int,
+        num_estimate: int = 3,
         enc_hidden_dims: list[int] | tuple[int, ...] = (128, 64, 16),
         tar_hidden_dims: list[int] | tuple[int, ...] = (128, 64),
         activation: str = "elu",
@@ -50,11 +56,14 @@ class HIMEstimator(nn.Module):
             raise ValueError("temporal_steps must be positive")
         if num_one_step_obs <= 0:
             raise ValueError("num_one_step_obs must be positive")
+        if isinstance(num_estimate, bool) or int(num_estimate) <= 0:
+            raise ValueError("num_estimate must be a positive integer")
         if len(enc_hidden_dims) == 0:
             raise ValueError("enc_hidden_dims must not be empty")
 
         self.temporal_steps = int(temporal_steps)
         self.num_one_step_obs = int(num_one_step_obs)
+        self.num_estimate = int(num_estimate)
         self.num_latent = int(enc_hidden_dims[-1])
         self.max_grad_norm = float(max_grad_norm)
         self.temperature = float(temperature)
@@ -68,7 +77,7 @@ class HIMEstimator(nn.Module):
         for hidden_dim in enc_hidden_dims[:-1]:
             enc_layers += [nn.Linear(enc_input_dim, int(hidden_dim)), get_activation(activation)]
             enc_input_dim = int(hidden_dim)
-        enc_layers += [nn.Linear(enc_input_dim, self.num_latent + 3)]
+        enc_layers += [nn.Linear(enc_input_dim, self.num_latent + self.num_estimate)]
         self.encoder = nn.Sequential(*enc_layers)
 
         tar_input_dim = self.num_one_step_obs
@@ -93,7 +102,12 @@ class HIMEstimator(nn.Module):
 
     def encode(self, obs_history: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         parts = self.encoder(obs_history.detach())
-        vel, z = parts[..., :3], parts[..., 3:]
+        # The estimate head is configurable because the compact WheelBipe
+        # critic predicts four values (body-frame velocity xyz plus height),
+        # whereas the generic HIM defaults historically used three velocity
+        # channels.  Keep the split identical to ``update``; a hard-coded
+        # three here silently changes the actor input width for custom owners.
+        vel, z = parts[..., : self.num_estimate], parts[..., self.num_estimate :]
         z = F.normalize(z, dim=-1, p=2)
         return vel, z
 
@@ -109,21 +123,21 @@ class HIMEstimator(nn.Module):
                 param_group["lr"] = self.learning_rate
 
         vel_start = self.velocity_target_start
-        vel_end = vel_start + 3
+        vel_end = vel_start + self.num_estimate
         target_start = self.target_obs_start
         target_end = target_start + self.num_one_step_obs
         if next_critic_obs.shape[-1] < max(vel_end, target_end):
             raise ValueError(
                 "next_critic_obs is too small for HIM estimator slices: "
-                f"shape={tuple(next_critic_obs.shape)}, velocity=[{vel_start}:{vel_end}], "
+                f"shape={tuple(next_critic_obs.shape)}, estimate=[{vel_start}:{vel_end}], "
                 f"target=[{target_start}:{target_end}]"
             )
 
-        vel = next_critic_obs[:, vel_start:vel_end].detach()
+        estimate = next_critic_obs[:, vel_start:vel_end].detach()
         next_obs = next_critic_obs[:, target_start:target_end].detach()
 
         parts = self.encoder(obs_history)
-        pred_vel, z_s = parts[..., :3], parts[..., 3:]
+        pred_estimate, z_s = parts[..., : self.num_estimate], parts[..., self.num_estimate :]
         z_t = self.target(next_obs)
 
         z_s = F.normalize(z_s, dim=-1, p=2)
@@ -143,7 +157,7 @@ class HIMEstimator(nn.Module):
         log_p_t = F.log_softmax(score_t / self.temperature, dim=-1)
 
         swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
-        estimation_loss = F.mse_loss(pred_vel, vel)
+        estimation_loss = F.mse_loss(pred_estimate, estimate)
         loss = estimation_loss + swap_loss
 
         self.optimizer.zero_grad()

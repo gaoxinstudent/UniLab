@@ -22,6 +22,7 @@ from unilab.dr.types import (
     IntervalRandomizationPlan,
     ResetRandomizationPayload,
 )
+from unilab.terrains.terrain_generator import HeightfieldSurfaceSampler
 
 try:
     import motrixsim as mtx
@@ -84,7 +85,9 @@ def _contiguous_slice(indices: np.ndarray) -> slice | None:
 class _MotrixSceneContext:
     model: "mtx.SceneModel"
     terrain_origins: np.ndarray | None = None
-    terrain_surface_sampler: object | None = None
+    terrain_surface_sampler: HeightfieldSurfaceSampler | None = None
+    terrain_type_ids: np.ndarray | None = None
+    terrain_type_names: tuple[str, ...] = ()
     cleanup_handle: object | None = None
 
 
@@ -109,6 +112,7 @@ def _build_motrix_scene_context(
     *,
     add_body_sensors: bool,
     base_name: str,
+    disable_equality: bool,
 ) -> _MotrixSceneContext:
     from unilab.base.backend.motrix.scene import (
         materialize_motrix_hfield_attached_scene,
@@ -126,6 +130,7 @@ def _build_motrix_scene_context(
             fragment_files=scene.fragment_files,
             add_body_sensors=add_body_sensors,
             base_name=base_name,
+            disable_equality=disable_equality,
         )
         return _MotrixSceneContext(model=model)
 
@@ -140,12 +145,15 @@ def _build_motrix_scene_context(
         geom_name=scene.terrain.geom_name or "floor",
         add_body_sensors=add_body_sensors,
         base_name=base_name,
+        disable_equality=disable_equality,
         return_surface_sampler=True,
     )
     return _MotrixSceneContext(
         model=model,
         terrain_origins=terrain_origins,
         terrain_surface_sampler=terrain_surface_sampler,
+        terrain_type_ids=terrain_surface_sampler.terrain_type_ids,
+        terrain_type_names=terrain_surface_sampler.terrain_type_names,
     )
 
 
@@ -162,6 +170,7 @@ class MotrixBackend(SimBackend):
         add_body_sensors: bool = False,
         max_iterations: int | None = DEFAULT_MOTRIX_MAX_ITERATIONS,
         push_body_name: str | None = None,
+        disable_equality: bool = False,
     ):
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
@@ -170,6 +179,7 @@ class MotrixBackend(SimBackend):
             scene,
             add_body_sensors=add_body_sensors,
             base_name=base_name,
+            disable_equality=disable_equality,
         )
         self._scene = scene
         self.scene_artifacts_dir = None
@@ -183,8 +193,10 @@ class MotrixBackend(SimBackend):
                 sample_height=(
                     None
                     if self.terrain_surface_sampler is None
-                    else cast(Any, self.terrain_surface_sampler).sample_height
+                    else self.terrain_surface_sampler.sample_height
                 ),
+                terrain_type_ids=scene_context.terrain_type_ids,
+                terrain_type_names=scene_context.terrain_type_names,
             )
         )
         self._scene_cleanup_handle = scene_context.cleanup_handle
@@ -196,6 +208,7 @@ class MotrixBackend(SimBackend):
         }
 
         self._model.options.timestep = sim_dt
+        self._sim_dt = float(sim_dt)
         if max_iterations is None:
             max_iterations = DEFAULT_MOTRIX_MAX_ITERATIONS
         self._model.options.max_iterations = int(max_iterations)
@@ -256,6 +269,17 @@ class MotrixBackend(SimBackend):
             if self._actuator_joint_pos_indices is not None
             else None
         )
+        selected_dof_vel_count = (
+            len(self._actuator_joint_vel_indices)
+            if self._actuator_joint_vel_indices is not None
+            else len(self._joint_dof_vel_indices)
+        )
+        # MotrixSim does not expose generalized accelerations. Cache the
+        # velocity finite difference inside the backend step owner; WheelBipe
+        # uses the pre-step callback path below, so this is updated after each
+        # physics substep rather than once per control interval.
+        self._dof_acc = np.zeros((self._num_envs, selected_dof_vel_count), dtype=self._np_dtype)
+        self._dof_vel_before_step = np.zeros_like(self._dof_acc)
         self._default_actuator_kp = np.zeros((self.num_actuators,), dtype=np.float32)
         self._default_actuator_kd = np.zeros((self.num_actuators,), dtype=np.float32)
         for actuator in self._position_actuators:
@@ -275,7 +299,12 @@ class MotrixBackend(SimBackend):
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
         )
+        self._supports_external_torque = all(
+            callable(getattr(link, "add_external_torque", None))
+            for link in self._links_by_id.values()
+        )
         self._applied_body_forces: dict[int, np.ndarray] = {}
+        self._applied_body_torques: dict[int, np.ndarray] = {}
         self._geoms_by_id: dict[int, "mtx.Geom"] = {
             int(geom.index): geom for geom in self._model.geoms
         }
@@ -306,6 +335,18 @@ class MotrixBackend(SimBackend):
                 link.get_center_of_mass_override(self._data),
                 dtype=np.float32,
             ).reshape(self._num_envs, 3)[0]
+        self._model_num_dof_vel = int(
+            getattr(self._model, "num_dof_vel", len(self._joint_dof_vel_indices))
+        )
+        model_joints = tuple(getattr(self._model, "joints", ()))
+        self._supports_joint_friction_override = all(
+            callable(getattr(joint, "set_frictionloss_override", None)) for joint in model_joints
+        )
+        self._default_dof_frictionloss = np.zeros((self._model_num_dof_vel,), dtype=np.float32)
+        for joint in model_joints:
+            start = int(joint.dof_vel_index)
+            stop = start + int(joint.num_dof_vel)
+            self._default_dof_frictionloss[start:stop] = float(joint.frictionloss)
         self._default_geom_friction = np.zeros((int(self._model.num_geoms), 3), dtype=np.float32)
         if self._supports_geom_friction_override:
             for geom_id in self._geom_friction_override_ids:
@@ -409,6 +450,11 @@ class MotrixBackend(SimBackend):
             ids.append(int(bid))
         return np.array(ids, dtype=np.int32)
 
+    def get_body_names(self) -> tuple[str, ...]:
+        return tuple(
+            self._body_id_to_name.get(body_id, "") for body_id in range(self._model.num_links)
+        )
+
     def get_site_ids(self, names: Sequence[str]) -> np.ndarray:
         ids: list[int] = []
         for name in names:
@@ -508,6 +554,46 @@ class MotrixBackend(SimBackend):
     def get_body_ipos(self) -> np.ndarray:
         return self._default_body_ipos.copy()
 
+    def get_dof_frictionloss(self) -> np.ndarray:
+        return self._default_dof_frictionloss.astype(np.float64, copy=True)
+
+    def get_dof_damping(self) -> np.ndarray:
+        raise NotImplementedError("Motrix does not expose per-environment joint viscous damping")
+
+    def get_body_contact_force_norm(self, body_ids: np.ndarray) -> np.ndarray:
+        """Read Motrix touch sensors using the shared body-sensor naming contract."""
+
+        ids = np.asarray(body_ids, dtype=np.intp).reshape(-1)
+        if np.any(ids < 0) or np.any(ids >= int(self._model.num_links)):
+            raise ValueError(f"body_ids are outside [0, {int(self._model.num_links) - 1}]")
+        if ids.size == 0:
+            return np.zeros((self._num_envs, 0), dtype=self._np_dtype)
+
+        columns: list[np.ndarray] = []
+        missing: list[str] = []
+        for body_id in ids:
+            body_name = self._body_id_to_name.get(int(body_id))
+            if not body_name:
+                missing.append(f"#{int(body_id)}")
+                continue
+            sensor_name = f"contact_force_{body_name}"
+            try:
+                value = np.asarray(self._model.get_sensor_value(sensor_name, self._data))
+            except (KeyError, RuntimeError, ValueError):
+                missing.append(body_name)
+                continue
+            value = value.reshape(self._num_envs, -1)
+            if value.shape[1] != 1:
+                raise RuntimeError(
+                    f"Motrix touch sensor {sensor_name!r} must be scalar, got {value.shape}"
+                )
+            columns.append(np.maximum(value[:, 0], 0.0))
+        if missing:
+            raise NotImplementedError(
+                "Motrix model is missing scalar touch sensors for bodies: " + ", ".join(missing)
+            )
+        return np.stack(columns, axis=1).astype(self._np_dtype, copy=False)
+
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
         root_id = int(root_body_id)
         if root_id < 0 or root_id >= int(self._model.num_links):
@@ -542,8 +628,11 @@ class MotrixBackend(SimBackend):
         return body_ids
 
     def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
-        contype = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
-        conaffinity = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
+        # Motrix exposes contact masks as 32-bit bitsets.  A fully enabled
+        # mask is therefore ``0xffffffff`` (4294967295), which is a valid
+        # value and must not be narrowed through signed int32.
+        contype = np.zeros((int(self._model.num_geoms),), dtype=np.uint32)
+        conaffinity = np.zeros((int(self._model.num_geoms),), dtype=np.uint32)
         for geom_id in range(int(self._model.num_geoms)):
             geom = self._geoms_by_id[geom_id]
             if not hasattr(geom, "collision_group") or not hasattr(geom, "collision_affinity"):
@@ -572,6 +661,7 @@ class MotrixBackend(SimBackend):
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
+        np.copyto(self._dof_vel_before_step, self.get_dof_vel())
         self._data.actuator_ctrls = np.ascontiguousarray(ctrl)
         set_ctrl_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -580,6 +670,8 @@ class MotrixBackend(SimBackend):
             self._model.step(self._data)
         else:
             self._model.step_n(self._data, nsteps)
+        np.subtract(self.get_dof_vel(), self._dof_vel_before_step, out=self._dof_acc)
+        self._dof_acc /= float(self._sim_dt) * int(nsteps)
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -609,7 +701,10 @@ class MotrixBackend(SimBackend):
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
+            np.copyto(self._dof_vel_before_step, self.get_dof_vel())
             self._model.step(self._data)
+            np.subtract(self.get_dof_vel(), self._dof_vel_before_step, out=self._dof_acc)
+            self._dof_acc /= float(self._sim_dt)
             physics_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
@@ -742,6 +837,8 @@ class MotrixBackend(SimBackend):
 
         t0 = time.perf_counter()
         self._invalidate_link_velocity_cache()
+        self._dof_acc[env_ids_intp] = 0.0
+        self._dof_vel_before_step[env_ids_intp] = self.get_dof_vel()[env_ids_intp]
         timing["set_state_invalidate_velocity_ms"] = (time.perf_counter() - t0) * 1000.0
 
         outer_total_ms = (time.perf_counter() - outer_t0) * 1000.0
@@ -779,56 +876,96 @@ class MotrixBackend(SimBackend):
         return DomainRandomizationCapabilities(
             supported_reset_terms=frozenset(supported_reset_terms),
             supports_interval_push=True,
-            supports_interval_body_velocity_delta=False,
+            supports_interval_body_velocity_delta=True,
             supports_interval_body_force=getattr(self, "_supports_external_force", False),
+            supports_interval_body_torque=getattr(self, "_supports_external_torque", False),
         )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
         if plan.is_empty():
             return
-        model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
-        if model_assignments.shape != (self._num_envs,):
-            raise ValueError(
-                f"model_assignments must have shape ({self._num_envs},), "
-                f"got {model_assignments.shape}"
-            )
-        if np.any(model_assignments < 0) or np.any(model_assignments >= len(plan.model_variants)):
-            raise ValueError(
-                "model_assignments must refer to entries in InitRandomizationPlan.model_variants"
-            )
-
-        geom_size_overrides: dict[int, np.ndarray] = {}
-        for variant_id, variant in enumerate(plan.model_variants):
-            env_indices = np.flatnonzero(model_assignments == variant_id)
-            if env_indices.size == 0:
-                continue
-            for override in variant.geom_size_overrides:
-                geom_id = self.get_geom_id(override.geom_name)
-                geom = _require_not_none(
-                    self._model.get_geom(geom_id),
-                    f"Geom '{override.geom_name}' not found in Motrix model",
+        if plan.model_variants:
+            model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
+            if model_assignments.shape != (self._num_envs,):
+                raise ValueError(
+                    f"model_assignments must have shape ({self._num_envs},), "
+                    f"got {model_assignments.shape}"
                 )
-                override_shape = np.asarray(geom.get_size_override(self._data)).shape
-                if len(override_shape) != 2:
-                    raise ValueError(
-                        f"Motrix geom '{override.geom_name}' size override must be rank-2, "
-                        f"got shape {override_shape}"
-                    )
-                width = int(override_shape[1])
-                size = np.asarray(override.size, dtype=np.float64).reshape(-1)
-                if size.size < width:
-                    raise ValueError(
-                        f"GeomSizeOverride for '{override.geom_name}' has {size.size} values, "
-                        f"but Motrix expects at least {width}"
-                    )
-                values = geom_size_overrides.setdefault(
-                    geom_id,
-                    np.asarray(geom.get_size_override(self._data), dtype=np.float64).copy(),
+            if np.any(model_assignments < 0) or np.any(
+                model_assignments >= len(plan.model_variants)
+            ):
+                raise ValueError(
+                    "model_assignments must refer to entries in InitRandomizationPlan.model_variants"
                 )
-                values[env_indices, :] = size[:width]
 
-        self._init_geom_size_overrides = geom_size_overrides
-        self._apply_init_geom_size_overrides(self._data, np.arange(self._num_envs, dtype=np.int32))
+            geom_size_overrides: dict[int, np.ndarray] = {}
+            for variant_id, variant in enumerate(plan.model_variants):
+                env_indices = np.flatnonzero(model_assignments == variant_id)
+                if env_indices.size == 0:
+                    continue
+                for override in variant.geom_size_overrides:
+                    geom_id = self.get_geom_id(override.geom_name)
+                    geom = _require_not_none(
+                        self._model.get_geom(geom_id),
+                        f"Geom '{override.geom_name}' not found in Motrix model",
+                    )
+                    override_shape = np.asarray(geom.get_size_override(self._data)).shape
+                    if len(override_shape) != 2:
+                        raise ValueError(
+                            f"Motrix geom '{override.geom_name}' size override must be rank-2, "
+                            f"got shape {override_shape}"
+                        )
+                    width = int(override_shape[1])
+                    size = np.asarray(override.size, dtype=np.float64).reshape(-1)
+                    if size.size < width:
+                        raise ValueError(
+                            f"GeomSizeOverride for '{override.geom_name}' has {size.size} values, "
+                            f"but Motrix expects at least {width}"
+                        )
+                    values = geom_size_overrides.setdefault(
+                        geom_id,
+                        np.asarray(geom.get_size_override(self._data), dtype=np.float64).copy(),
+                    )
+                    values[env_indices, :] = size[:width]
+
+            self._init_geom_size_overrides = geom_size_overrides
+            self._apply_init_geom_size_overrides(
+                self._data, np.arange(self._num_envs, dtype=np.int32)
+            )
+        elif np.asarray(plan.model_assignments).size:
+            raise ValueError("model_assignments requires at least one model variant")
+
+        if plan.dof_damping is not None:
+            raise NotImplementedError(
+                "Motrix does not support per-environment joint viscous damping overrides"
+            )
+        if plan.dof_frictionloss is not None:
+            if not self._supports_joint_friction_override:
+                raise NotImplementedError(
+                    "Motrix model does not expose per-environment joint friction overrides"
+                )
+            frictionloss = np.asarray(plan.dof_frictionloss, dtype=np.float32)
+            expected = (self._num_envs, self._model_num_dof_vel)
+            if frictionloss.shape != expected:
+                raise ValueError(
+                    f"dof_frictionloss must have shape {expected}, got {frictionloss.shape}"
+                )
+            if not np.all(np.isfinite(frictionloss)) or np.any(frictionloss < 0.0):
+                raise ValueError("dof_frictionloss must contain finite non-negative values")
+            for joint in self._model.joints:
+                start = int(joint.dof_vel_index)
+                width = int(joint.num_dof_vel)
+                values = frictionloss[:, start : start + width]
+                if width != 1:
+                    if not np.all(values == values[:, :1]):
+                        raise NotImplementedError(
+                            "Motrix joint friction conversion requires one value per joint"
+                        )
+                    values = values[:, :1]
+                joint.set_frictionloss_override(
+                    self._data,
+                    np.ascontiguousarray(values[:, 0]),
+                )
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
@@ -839,6 +976,10 @@ class MotrixBackend(SimBackend):
             if plan.body_ids is None:
                 raise ValueError("Interval body-force perturbation requires body_ids")
             self.apply_body_force(plan.body_ids, plan.body_force)
+        if plan.body_torque is not None:
+            if plan.body_ids is None:
+                raise ValueError("Interval body-torque perturbation requires body_ids")
+            self.apply_body_torque(plan.body_ids, plan.body_torque)
         if plan.body_linear_velocity_delta is not None:
             if plan.body_ids is None:
                 raise ValueError("Interval body-velocity perturbation requires body_ids")
@@ -849,13 +990,24 @@ class MotrixBackend(SimBackend):
         body_ids: np.ndarray,
         velocity_delta: np.ndarray,
     ) -> None:
-        """Apply a world-frame linear-velocity delta to specific bodies.
+        """Apply a world-frame velocity delta to the floating root body."""
 
-        Backend-internal hook for ``apply_interval_randomization``; it is not
-        part of the public ``SimBackend`` surface.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support interval body velocity perturbation"
+        ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+        delta = np.asarray(velocity_delta, dtype=np.float32)
+        expected = (self._num_envs, ids.size, 3)
+        if delta.shape != expected:
+            raise ValueError(f"body velocity delta must have shape {expected}, got {delta.shape}")
+        if ids.shape != (1,) or int(ids[0]) != int(self._body_link.index):
+            raise NotImplementedError(
+                "Motrix interval body velocity supports only the floating base body"
+            )
+        current = np.asarray(
+            self._body_floatingbase.get_global_linear_velocity(self._data),
+            dtype=np.float32,
+        )
+        self._body_floatingbase.set_global_linear_velocity(
+            self._data,
+            np.ascontiguousarray(current + delta[:, 0, :]),
         )
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
@@ -989,6 +1141,9 @@ class MotrixBackend(SimBackend):
             else self._joint_dof_vel_indices
         )
         return self._data.dof_vel[..., indices]  # type: ignore[no-any-return]
+
+    def get_dof_acc(self) -> np.ndarray:
+        return self._dof_acc
 
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                      #
@@ -1290,13 +1445,15 @@ class MotrixBackend(SimBackend):
         env_indices: np.ndarray,
         env_ids_intp: np.ndarray | None = None,
     ) -> None:
-        if not self._applied_body_forces:
+        if not self._applied_body_forces and not self._applied_body_torques:
             return
         env_ids = (
             env_ids_intp if env_ids_intp is not None else np.asarray(env_indices, dtype=np.intp)
         )
         for applied_force in self._applied_body_forces.values():
             applied_force[env_ids, :] = 0.0
+        for applied_torque in self._applied_body_torques.values():
+            applied_torque[env_ids, :] = 0.0
 
     def push_robots(self, force_range):
         ex_force = np.random.rand(self.num_envs, 3) * 2 - 1  # [x_force, y_force, z_force]
@@ -1336,6 +1493,39 @@ class MotrixBackend(SimBackend):
                     local=False,
                 )
                 applied_force[:] = target_force
+
+    def apply_body_torque(
+        self,
+        body_ids: np.ndarray,
+        torque: np.ndarray,
+    ) -> None:
+        """Apply absolute world-frame external torques through Motrix Link API."""
+
+        if not getattr(self, "_supports_external_torque", False):
+            raise NotImplementedError("Motrix link external-torque API is not available")
+        body_ids_np = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+        torque_np = np.asarray(torque, dtype=np.float64)
+        expected_shape = (self._num_envs, body_ids_np.size, 3)
+        if torque_np.shape != expected_shape:
+            raise ValueError(f"body torque must have shape {expected_shape}, got {torque_np.shape}")
+        for body_offset, body_id in enumerate(body_ids_np):
+            link_id = int(body_id)
+            link = self._links_by_id.get(link_id)
+            if link is None:
+                raise ValueError(f"Body id {link_id} not found in Motrix model")
+            target_torque = np.asarray(torque_np[:, body_offset, :], dtype=np.float64)
+            applied_torque = self._applied_body_torques.setdefault(
+                link_id,
+                np.zeros((self._num_envs, 3), dtype=np.float64),
+            )
+            delta_torque = target_torque - applied_torque
+            if np.any(delta_torque):
+                link.add_external_torque(
+                    self._data,
+                    np.ascontiguousarray(delta_torque.astype(np.float32)),
+                    local=False,
+                )
+                applied_torque[:] = target_torque
 
     def create_hfield_scanner(
         self,

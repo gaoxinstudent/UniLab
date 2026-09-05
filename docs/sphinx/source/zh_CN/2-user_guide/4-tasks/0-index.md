@@ -9,7 +9,7 @@
 :::{grid-item-card} 运动控制
 :link: 1-locomotion
 :link-type: doc
-Go1、Go2、Go2W 和 G1 行走 owner。
+Go1、Go2、Go2W、G1 行走和 WheelBipe V14 owner。
 :::
 
 :::{grid-item-card} 动作追踪
@@ -39,4 +39,5 @@ Go2 加 Airbot 机械臂的运动控制与操作。
 2-motion_tracking
 3-manipulation
 4-manip_loco
+5-wheelbipe_v14
 ```

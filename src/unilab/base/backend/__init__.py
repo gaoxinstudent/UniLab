@@ -119,6 +119,7 @@ def create_backend(
 
     position_actuator_gains = kwargs.pop("position_actuator_gains", None)
     motrix_max_iterations = kwargs.pop("motrix_max_iterations", None)
+    motrix_disable_equality = kwargs.pop("motrix_disable_equality", False)
     post_step_forward_sensor = kwargs.pop("post_step_forward_sensor", None)
     iterations = kwargs.pop("iterations", None)
     chunk_size = kwargs.pop("chunk_size", None)
@@ -179,6 +180,7 @@ def create_backend(
             raise ImportError("MotrixSim not available, install motrixsim package")
         if motrix_max_iterations is not None:
             kwargs["max_iterations"] = motrix_max_iterations
+        kwargs["disable_equality"] = bool(motrix_disable_equality)
         return cast(SimBackend, MotrixBackend(scene, num_envs, sim_dt, **kwargs))
     if backend_type == "drake":
         DrakeBackend = _load_drake_backend()

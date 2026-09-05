@@ -31,7 +31,8 @@ Owner YAML 位置：
 - `--render-mode auto` 在 MuJoCo 路径上导出 `play_video.mp4`。
 - `--render-mode auto` 在 Motrix 路径上打开 Motrix 原生交互式渲染。
 - `--render-mode record` 在不打开交互式窗口的情况下录制。
-- `--render-mode none` 禁用回放。
+- `--render-mode none` 禁用 renderer 回放；具有明确数值评估实现的入口仍可能执行
+  有限步无界面 rollout。
 
 ```bash
 uv run eval --algo ppo --task go1_joystick_flat --sim mujoco --load-run -1

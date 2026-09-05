@@ -38,6 +38,8 @@ class BackendTerrainSpawnData:
 
     terrain_origins: np.ndarray
     sample_height: TerrainHeightSampleFn | None = None
+    terrain_type_ids: np.ndarray | None = None
+    terrain_type_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         origins = np.array(self.terrain_origins, copy=True)
@@ -49,6 +51,26 @@ class BackendTerrainSpawnData:
         object.__setattr__(self, "terrain_origins", origins)
         if self.sample_height is not None and not callable(self.sample_height):
             raise TypeError("sample_height must be callable")
+        type_ids = self.terrain_type_ids
+        type_names = tuple(str(name) for name in self.terrain_type_names)
+        if type_ids is None:
+            if type_names:
+                raise ValueError("terrain_type_names requires terrain_type_ids")
+            object.__setattr__(self, "terrain_type_names", ())
+            return
+        ids = np.array(type_ids, dtype=np.int32, copy=True)
+        if ids.shape != origins.shape[:2]:
+            raise ValueError(
+                "terrain_type_ids must match terrain_origins cell grid; "
+                f"got {ids.shape} and {origins.shape[:2]}"
+            )
+        if not type_names or len(set(type_names)) != len(type_names):
+            raise ValueError("terrain_type_names must be non-empty and unique")
+        if np.any(ids < 0) or np.any(ids >= len(type_names)):
+            raise ValueError("terrain_type_ids contains an out-of-range terrain type")
+        ids.setflags(write=False)
+        object.__setattr__(self, "terrain_type_ids", ids)
+        object.__setattr__(self, "terrain_type_names", type_names)
 
 
 @dataclass(frozen=True)
@@ -198,6 +220,10 @@ class SimBackend(abc.ABC):
         """Resolve one body/link name through the backend contract."""
         return int(self.get_body_ids([name])[0])
 
+    def get_body_names(self) -> tuple[str, ...]:
+        """Return backend body/link names in backend id order on the cold path."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose body names")
+
     def get_geom_id(self, name: str) -> int:
         """Resolve one geom name through the backend contract."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose geom ids")
@@ -258,6 +284,14 @@ class SimBackend(abc.ABC):
     def get_dof_armature(self) -> np.ndarray:
         """Return the backend dof-armature table."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose dof armature")
+
+    def get_dof_frictionloss(self) -> np.ndarray:
+        """Return the backend Coulomb-friction table in velocity-DoF order."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose dof friction loss")
+
+    def get_dof_damping(self) -> np.ndarray:
+        """Return the backend viscous-damping table in velocity-DoF order."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose dof damping")
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         """Resolve backend-native body IDs used by motion datasets."""
@@ -383,6 +417,25 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support interval body force perturbation"
+        )
+
+    def apply_body_torque(
+        self,
+        body_ids: np.ndarray,
+        torque: np.ndarray,
+    ) -> None:
+        """Apply a world-frame torque to specific bodies for the upcoming step.
+
+        Args:
+            body_ids: Body ids whose external torques should be perturbed.
+            torque: Torque values with shape ``(num_envs, len(body_ids), 3)``.
+
+        Backends without a body-torque API fail explicitly at the contract
+        boundary instead of silently dropping the rotational disturbance.
+        """
+
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support interval body torque perturbation"
         )
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
@@ -556,6 +609,20 @@ class SimBackend(abc.ABC):
             (num_envs, num_dof)
         """
 
+    def get_dof_acc(self) -> np.ndarray:
+        """Return joint accelerations, excluding the base.
+
+        The column order and width must match :meth:`get_dof_vel`. Backends
+        without a native generalized-acceleration view may cache a finite
+        difference at physics-substep cadence. Environment owners must use
+        this public contract instead of probing backend-private state.
+
+        Returns:
+            (num_envs, num_dof)
+        """
+
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose joint accelerations")
+
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                        #
     # ------------------------------------------------------------------ #
@@ -621,6 +688,28 @@ class SimBackend(abc.ABC):
             self.get_body_quat_w(body_ids),
             self.get_body_lin_vel_w(body_ids),
             self.get_body_ang_vel_w(body_ids),
+        )
+
+    def get_body_contact_force_norm(self, body_ids: np.ndarray) -> np.ndarray:
+        """Return per-body resultant contact-force magnitudes.
+
+        The public contract is intentionally a magnitude rather than a
+        backend-specific contact manifold.  Locomotion owners use it for
+        contact thresholds and short history windows without depending on a
+        simulator's private contact representation.
+
+        Args:
+            body_ids: Body IDs with shape ``(num_bodies,)``.
+
+        Returns:
+            Array with shape ``(num_envs, num_bodies)`` in newtons.
+
+        Backends that cannot expose a vectorized force sensor must fail
+        explicitly.  Task owners may select a separately configured geometric
+        proxy, but must not silently substitute it for this contract.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not expose body contact-force magnitudes"
         )
 
     def copy_body_state_w(

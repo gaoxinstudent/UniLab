@@ -1,0 +1,287 @@
+# @package _global_
+training:
+  task_name: WheelbipeV14Flat
+  sim_backend: mujoco
+
+algo:
+  num_envs: 4096
+  max_iterations: 20000
+  # Match the seed recorded in the upstream V14 PPO run.  Keeping it in the
+  # owner YAML makes source-vs-UniLab short regressions reproducible without
+  # relying on an external CLI override.
+  seed: 66
+  empirical_normalization: false
+  obs_normalization: false
+  obs_groups:
+    actor: [actor]
+    critic: [critic]
+  policy:
+    # Match the source Wheelbipe V14 flat PPO training profile recorded in
+    # pretrained/.../flat_and_rotation/.../params/agent.yaml.
+    # The verified 2026-07-19 source run and the frozen ROS2 remote_model_500
+    # both use the 256-128-64 actor/critic contract.
+    actor_hidden_dims: [256, 128, 64]
+    critic_hidden_dims: [256, 128, 64]
+    init_noise_std: 1.0
+    activation: elu
+  algorithm:
+    learning_rate: 1.0e-4
+    schedule: adaptive
+    clip_param: 0.2
+    use_clipped_value_loss: true
+    max_grad_norm: 1.0
+    normalize_advantage_per_mini_batch: false
+    entropy_coef: 5.0e-3
+    value_loss_coef: 4.0
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+
+env:
+  training_semantics: source_v14
+  # The source runner calls ``learn(..., init_at_random_ep_len=True)``.  Keep
+  # that lifecycle and consume the randomized age in every absolute reset
+  # envelope before the first rollout action.
+  source_episode_age_sync: true
+  # Keep the canonical PPO owner on the source V14 training contract.  The
+  # frozen sim2sim/ROS loop is a deployment adapter and must not redefine the
+  # training dynamics or sensor/action timing.  The deployment-aligned 1 ms,
+  # delay-free profile remains available only as an explicit diagnostic
+  # ``local_physics`` override.
+  sim_dt: 0.005
+  ctrl_dt: 0.02
+  sampling_mode: start
+  delay_profile: source_v14_physics
+  delay_range_semantics: exclusive
+  use_obs_delay: true
+  obs_delay_step_unit: physics
+  obs_history_len: 10
+  obs_default_time_lag: 1
+  obs_delay_cfg:
+    root_ang_vel_b: [1, 4]
+    projected_gravity_b: [1, 4]
+    joint_pos: [1, 4]
+    joint_vel: [1, 4]
+  use_act_delay: true
+  act_history_len: 5
+  act_delay_cfg:
+    leg_actions: [1, 3]
+    wheel_actions: [1, 3]
+  ctrl_mode_obs_enabled: true
+  ctrl_mode_obs_dim: 7
+  ctrl_mode_obs_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0]
+  motrix_disable_equality: false
+  noise_config:
+    level: 1.0
+    scale_joint_angle: 0.025
+    # Effective source checkpoint profile: both leg and wheel velocity noise
+    # use unit magnitude (see params/env.yaml in the source run).
+    scale_joint_vel: 1.0
+    scale_gyro: 0.25
+    scale_gravity: 0.05
+    scale_wheel_vel: 1.0
+  gimbal:
+    enabled: true
+    control_mode: velocity
+  control_config:
+    action_scale: 0.5
+    wheel_action_scale: 10.0
+    Kp: 60.0
+    Kd: 2.0
+    wheel_Kd: 0.2
+    spring_mode: linear
+    spring_force: 240.0
+    spring_random_force: [-50.0, 50.0]
+    spring_linear_up: 600.0
+    spring_linear_down: 400.0
+    spring_linear_length: 0.07
+    spring_offset: 0.06076
+    spring_damping: 50.0
+    leg_torque_limit: 40.0
+    wheel_torque_limit: 5.0
+    spring_torque_limit: 1000.0
+    # Pinned RSL-RL owner records ``clip_actions: null``.  Preserve raw policy
+    # actions for the action-history observation/reward terms and clamp only
+    # the decoded physical targets in the environment owner.
+    clip_actions: .inf
+    leg_position_target_limit: [-3.14, 3.14]
+    # Source env.py applies max_wheel_vel * 1.5 in wheel-velocity mode.
+    wheel_velocity_target_limit: 150.0
+    simulate_action_latency: false
+  commands:
+    vel_limit:
+      - [-2.7, 0.0, -6.283185307179586]
+      - [2.7, 0.0, 6.283185307179586]
+    resampling_time: 5.0
+    resampling_time_range: [5.0, 15.0]
+    heading_command: true
+    heading_range: [-3.141592653589793, 3.141592653589793]
+    heading_control_stiffness: 5.0
+    rel_standing_envs: 0.1
+    rel_heading_envs: 0.5
+    source_curriculum_enabled: true
+    special_mode_min_episode_time: 5.0
+    special_mode_start_iterations: [3000, 4000, 2000]
+    special_mode_probabilities: [0.15, 0.15, 0.30]
+    gimbal_mode_probability: 0.0
+    gimbal_mode_start_iteration: 0
+    zero_command_probability: 0.0
+    zero_command_start_iteration: 0
+    training_progress_steps_per_iteration: 24
+    # Runtime anchor used when a resumed RSL-RL checkpoint restores a
+    # non-zero learning iteration while the fresh env step counter is zero.
+    training_iteration_offset: 0
+  height_range: [0.20, 0.42]
+  # Effective source checkpoint profile (params/env.yaml) enables the
+  # velocity-height gate for the verified V14 flat training run.
+  vel_height_gate_enabled: true
+  vel_height_gate_mode: linear_band
+  vel_height_gate_full_error: 0.05
+  vel_height_gate_zero_error: 0.10
+  vel_height_gate_tracker_sigma: 0.02
+  termination_duration_enabled: true
+  termination_duration_steps: 20
+  termination_roll_deg: 40.0
+  termination_pitch_deg: 40.0
+  domain_rand:
+    randomize_kp: true
+    kp_multiplier_range: [0.75, 1.25]
+    randomize_kd: true
+    kd_multiplier_range: [0.75, 1.25]
+    randomize_base_mass: false
+    randomize_body_mass: true
+    base_mass_multiplier_range: [0.9, 1.3]
+    leg_mass_multiplier_range: [0.9, 1.1]
+    wheel_mass_multiplier_range: [0.9, 1.1]
+    random_com: true
+    com_offset_x: [-0.04, 0.04]
+    com_offset_y: [-0.02, 0.02]
+    com_offset_z: [-0.02, 0.02]
+    randomize_body_material: true
+    base_static_friction_range: [0.01, 0.1]
+    base_dynamic_friction_range: [0.01, 0.1]
+    base_restitution_range: [0.02, 0.2]
+    wheel_static_friction_range: [0.5, 1.2]
+    wheel_dynamic_friction_range: [0.4, 1.0]
+    wheel_restitution_range: [0.02, 0.2]
+    material_num_buckets: 64
+    material_make_consistent: true
+    source_guide_material_requested: true
+    source_guide_material_missing_target_status: not_applicable_missing_target
+    guide_static_friction_range: [0.1, 0.7]
+    guide_dynamic_friction_range: [0.1, 0.7]
+    guide_restitution_range: [0.01, 0.1]
+    guide_material_num_buckets: 8
+    joint_friction:
+      enabled: true
+      front_static_range: [0.25, 1.0]
+      front_dynamic_range: [0.25, 1.0]
+      front_viscous_range: [0.05, 0.2]
+      rear_static_range: [0.25, 1.0]
+      rear_dynamic_range: [0.25, 1.0]
+      rear_viscous_range: [0.05, 0.2]
+      wheel_static_range: [0.05, 0.25]
+      wheel_viscous_range: [0.0, 0.01]
+      inactive_static_range: [0.05, 0.1]
+      inactive_viscous_range: [0.01, 0.025]
+      gimbal_static_range: [0.002, 0.01]
+      gimbal_viscous_range: [0.002, 0.01]
+      coulomb_backend_mode: static_to_frictionloss_dynamic_collapsed
+      viscous_backend_mode: dof_damping
+    spring_damping_multiplier_range: [0.5, 1.5]
+    leg_effort_multiplier_range: [0.8, 1.1]
+    wheel_effort_multiplier_range: [0.9, 1.1]
+    control_randomization_min_steps: 720
+    source_passive_gain_conversion_status: unsupported_unmaterialized_actuator
+    randomize_init_yaw: true
+    init_roll_range: [-0.15, 0.15]
+    init_pitch_range: [-0.15, 0.15]
+    init_yaw_range: [-3.14, 3.14]
+    use_leg_random_start: true
+    use_predefined_leg_random_start: true
+    leg_length_range: [0.13, 0.32]
+    leg_angle_range: [-1.5707963267948966, 2.356194490192345]
+    wheel_angle_range: [-6.283185307179586, 6.283185307179586]
+    leg_joint_vel_range: [-1.5707963267948966, 1.5707963267948966]
+    wheel_joint_vel_range: [-50.0, 50.0]
+    # The source reset implementation samples the nested positive/negative
+    # mode probabilities when a modes mapping is present (0.3 + 0.2 = 0.5).
+    # Its legacy top-level ``prob: 0.2`` is only used by the fallback single
+    # mode path and is therefore not the effective V14 training probability.
+    predefined_ground_probability: 0.5
+    predefined_ground_root_height: 0.25
+    predefined_ground_zero_torque_seconds: 0.2
+    predefined_ground_command_seconds: 1.5
+    predefined_ground_command_x_range: [-1.0, 1.0]
+    predefined_ground_command_y_range: [0.0, 0.0]
+    predefined_ground_command_yaw_range: [-1.0, 1.0]
+    predefined_air_command_seconds: 3.0
+    predefined_air_command_x_range: [-2.5, 2.5]
+    predefined_air_command_y_range: [0.0, 0.0]
+    predefined_air_command_yaw_range: [-1.5707963267948966, 1.5707963267948966]
+    predefined_air_height_range: [0.18, 0.43]
+    source_push_velocity_enabled: true
+    source_push_interval_range: [5.0, 10.0]
+    source_push_velocity_range:
+      - [-0.25, 0.25]
+      - [-0.25, 0.25]
+      - [0.0, 0.0]
+    source_external_force_enabled: true
+    source_external_force_interval_range: [5.0, 10.0]
+    source_external_force_range: [-10.0, 10.0]
+    source_external_torque_range: [-1.0, 1.0]
+    randomize_gravity: false
+    randomize_ground_friction: false
+    push_robots: false
+
+reward:
+  # Source flat_and_rotation disables the command deadzone; keep the raw
+  # command in the tracking reward while retaining the source threshold for
+  # owners that explicitly enable it (rough).
+  stand_still_deadzone_enabled: false
+  scales:
+    termination: -200.0
+    leg_joint_acc: -5.0e-7
+    leg_joint_vel: -5.0e-3
+    leg_joint_pair_pos_diff: 0.0
+    joint_torque: -1.0e-4
+    wheel_acc: -1.0e-8
+    wheel_vel: -1.0e-5
+    wheel_power: -1.0e-4
+    wheel_air_spin: 0.0
+    lin_vel_z: -0.5
+    ang_vel_xy: -0.05
+    action_smoothness_leg: -0.05
+    action_rate: -0.01
+    action_smoothness_wheel: -0.01
+    flat_orientation_y: 0.0
+    flat_orientation_y_v: -2.0
+    flat_orientation_y_exp: 1.0
+    flat_orientation_x: 0.0
+    flat_orientation_x_v: -2.0
+    flat_orientation_x_exp: 1.0
+    track_lin_vel_xy: 1.0
+    track_lin_vel_xy_tight: 0.0
+    track_lin_vel_xy_square: -0.1
+    track_ang_vel_z: 1.0
+    track_ang_vel_z_square: -0.1
+    stand_still_lin_vel: -2.0
+    stand_still: 0.0
+    track_height_exp: 0.0
+    track_height_exp_soft: 0.0
+    track_height_exp_tight: 1.0
+    track_height_square: -1.0
+    track_height_exp_both_wheels_contact: 0.0
+    no_fork: -1.0
+    no_fork_square: -1.0
+    no_fork_exp: 0.0
+    no_fork_z_exp: 0.0
+    undesired_contact: -2.0
+  base_height_target: 0.22
+
+play_profile:
+  enabled: true
+  env:
+    render_spacing: 2.0

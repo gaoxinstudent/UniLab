@@ -1,0 +1,118 @@
+# @package _global_
+defaults:
+  - /task/wheelbipe_v14_flat/mujoco
+  - _self_
+
+training:
+  task_name: WheelbipeV14Rough
+  sim_backend: mujoco
+  # The default recording keeps four vectorized envs in view; callers can
+  # select another primary terrain with cam_tracking_env_idx.
+  play_env_num: 16
+  cam_tracking: true
+  cam_tracking_extra_envs: 3
+
+algo:
+  # The rough owner shares the 256-128-64 source contract of the released
+  # rough_rotation_stair run (2026-07-23), which itself warm-starts from the
+  # flat model_8000.  This is the policy family that demonstrably crosses the
+  # cliff/stair play terrain.  The later compact 128-64-32 rough_rotation_stair
+  # run remains loadable only via an explicit dims override; it is not the
+  # canonical training contract.
+  policy:
+    actor_hidden_dims: [256, 128, 64]
+    critic_hidden_dims: [256, 128, 64]
+  algorithm:
+    value_loss_coef: 2.0
+
+env:
+  # Match the source V14 rough checkpoint's policy input scaling.  The
+  # height-target mode bit is intentionally scaled by five; changing this to
+  # an all-ones vector changes the 35D actor input without changing its shape.
+  ctrl_mode_obs_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0]
+  gimbal:
+    enabled: true
+    control_mode: heading_pd
+    pitch_target: -0.5
+    yaw_kp: 20.0
+    yaw_kd: 0.1
+    randomize_heading: true
+  gimbal_spin_translate:
+    # The released source rough checkpoint and ROS2 controller are
+    # normal-only: the last 7 policy inputs are the generic state flags, not
+    # the v2 continuous gimbal-spin feature vector.
+    enabled: false
+    relative_envs: 0.20
+    min_episode_time_s: 5.0
+    yaw_rate_ranges:
+      - [7.5398223686155035, 11.309733552923255]
+      - [-11.309733552923255, -7.5398223686155035]
+    speed_ranges:
+      - [0.0, 0.75]
+    speed_deadzone: 0.05
+    heading_range: [-3.141592653589793, 3.141592653589793]
+    height_range: [0.20, 0.40]
+    project_to_body_command: false
+  commands:
+    # Pinned rough V14 enables all three velocity-command special modes from
+    # the first training iteration.
+    special_mode_start_iterations: [0, 0, 0]
+    special_mode_probabilities: [0.15, 0.15, 0.30]
+    gimbal_mode_probability: 0.0
+    gimbal_mode_start_iteration: 0
+  # The source rough checkpoint does not gate velocity tracking by height;
+  # this must override the flat owner's training-only gate.
+  vel_height_gate_enabled: false
+  terrain_curriculum:
+    enabled: false
+  rough_terrain_boundary_reset:
+    enabled: true
+    margin: 0.5
+    use_inner_terrain_area: false
+
+reward:
+  # Source rough_rotation_stair enables the 0.1 command deadzone.
+  stand_still_deadzone_enabled: true
+  scales:
+    joint_torque: -1.0e-5
+    wheel_power: -1.0e-5
+    stand_still_lin_vel: -1.0
+    # The source rough run (2026-07-23) pins both squared tracking penalties
+    # at -1.0, ten times stronger than the flat owner's -0.1.  These terms
+    # carry most of the pressure to track velocity/yaw-rate precisely on rough
+    # terrain; inheriting the flat values visibly degrades crossing behavior
+    # during fine-tuning (forwardness drifts from ~0.93 to ~0.7).
+    track_lin_vel_xy_square: -1.0
+    track_ang_vel_z_square: -1.0
+
+play_profile:
+  enabled: true
+  env:
+    render_spacing: 2.0
+    # Playback is a deterministic terrain showcase, not a second training
+    # distribution.  Keep the running-terrain generator and source terrain
+    # command profiles, but make the vectorized batch cover every generated
+    # column and start at a visible mid-level difficulty.
+    terrain_curriculum:
+      type_col_assignment: round_robin
+      initial_level: 5
+    terrain_commands:
+      force_forward: true
+    commands:
+      heading_command: false
+      vel_limit: [[1.8, 0.0, 0.0], [1.8, 0.0, 0.0]]
+      rel_standing_envs: 0.0
+      rel_heading_envs: 0.0
+      special_mode_probabilities: [0.0, 0.0, 0.0]
+      gimbal_mode_probability: 0.0
+      zero_command_probability: 0.0
+    domain_rand:
+      predefined_air_enabled: false
+      predefined_air_probability: 0.0
+      source_push_velocity_enabled: false
+      source_external_force_enabled: false
+      randomize_init_yaw: false
+      init_roll_range: [0.0, 0.0]
+      init_pitch_range: [0.0, 0.0]
+    state_machine:
+      reset_airborne_probability: 0.0

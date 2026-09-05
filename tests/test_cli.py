@@ -131,6 +131,516 @@ def test_train_profile_routes_to_owner_variant(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize("sim", ["mujoco", "motrix"])
+def test_wheelbipe_ppo_sim_selects_registered_owner_yaml(
+    sim: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public ``--sim`` flag must select Wheelbipe's matching owner config."""
+
+    # This is a pure routing contract test; optional simulator packages are not
+    # needed to verify the generated Hydra task selection.
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    command = cli.build_command(
+        mode="train",
+        algo="ppo",
+        task="wheelbipe_v14_flat",
+        sim=sim,
+        overrides=[],
+        root=cli.repo_root(),
+    )
+
+    assert command[1:] == [
+        str(cli.repo_root() / "scripts" / "train_rsl_rl.py"),
+        f"task=wheelbipe_v14_flat/{sim}",
+    ]
+
+
+def test_upstream_wheelbipe_cli_table_covers_all_published_ids() -> None:
+    """The migration table must not silently drop a source Gym identifier."""
+
+    expected = {
+        "Robotics-Wheelbipe-V14-Flat-v0",
+        "Robotics-Wheelbipe-V14-Flat-v1",
+        "Robotics-Wheelbipe-V14-Flat-v2",
+        "Robotics-Wheelbipe-V14-Flat-Play-v0",
+        "Robotics-Wheelbipe-V14-Flat-Play-v2",
+        "Robotics-Wheelbipe-V14-Rough-v0",
+        "Robotics-Wheelbipe-V14-Rough-v1",
+        "Robotics-Wheelbipe-V14-Rough-Play-v0",
+        "Robotics-Wheelbipe-V14-Rough-Play-v1",
+        "Robotics-Wheelbipe-V14-Flat-DreamWaQ-v0",
+        "Robotics-Wheelbipe-V14-Flat-DreamWaQ-Play-v0",
+        "Robotics-Wheelbipe-V14-Flat-HIM-v0",
+        "Robotics-Wheelbipe-V14-Flat-HIM-Play-v0",
+        "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-v0",
+        "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-Play-v0",
+    }
+    assert set(cli.UPSTREAM_WHEELBIPE_CLI_ROUTES) == expected
+
+
+@pytest.mark.parametrize(
+    ("task", "algo", "owner_task", "script"),
+    [
+        (
+            "Robotics-Wheelbipe-V14-Flat-v0",
+            "ppo",
+            "wheelbipe_v14_flat/mujoco.yaml",
+            "train_rsl_rl.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-Play-v0",
+            "ppo",
+            "wheelbipe_v14_flat/mujoco.yaml",
+            "train_rsl_rl.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-v0",
+            "dreamwaq",
+            "wheelbipe_v14_flat_dreamwaq/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-Play-v0",
+            "dreamwaq",
+            "wheelbipe_v14_flat_dreamwaq/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-HIM-v0",
+            "him_ppo",
+            "wheelbipe_v14_flat_him/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-HIM-Play-v0",
+            "him_ppo",
+            "wheelbipe_v14_flat_him/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-v0",
+            "np3o",
+            "wheelbipe_v14_flat_np3o/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-Play-v0",
+            "np3o",
+            "wheelbipe_v14_flat_np3o/mujoco.yaml",
+            "train_custom_ppo.py",
+        ),
+    ],
+)
+def test_supported_upstream_wheelbipe_ids_route_to_owner_yaml(
+    task: str,
+    algo: str,
+    owner_task: str,
+    script: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+
+    source = cli.UPSTREAM_WHEELBIPE_CLI_ROUTES[task]
+    route = cli.build_route(algo, task, "mujoco")
+    assert route.source_task_id == task
+    assert route.owner_task == owner_task
+    assert route.script_name == script
+    assert route.play_only is source.play_only
+
+    mode = "eval" if source.play_only else "train"
+    command = cli.build_command(
+        mode=mode,
+        algo=algo,
+        task=task,
+        sim="mujoco",
+        overrides=[],
+        load_run="-1" if source.play_only else None,
+        root=cli.repo_root(),
+    )
+    assert command[1] == str(cli.repo_root() / "scripts" / script)
+    assert f"task={owner_task.removesuffix('.yaml')}" in command
+    if source.play_only:
+        assert command.count("training.play_only=true") == 1
+
+
+@pytest.mark.parametrize(
+    ("task", "owner", "required_override"),
+    [
+        (
+            "Robotics-Wheelbipe-V14-Flat-v1",
+            "WheelbipeV14FlatV1",
+            "+env.state_machine.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-v2",
+            "WheelbipeV14FlatV2",
+            "env.gimbal.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-Play-v2",
+            "WheelbipeV14FlatPlayV2",
+            "env.gimbal.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Rough-v0",
+            "WheelbipeV14RoughV0",
+            "env.gimbal.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Rough-v1",
+            "WheelbipeV14RoughV1",
+            "+env.state_machine.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Rough-Play-v0",
+            "WheelbipeV14RoughPlayV0",
+            "env.gimbal.enabled=true",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Rough-Play-v1",
+            "WheelbipeV14RoughPlayV1",
+            "+env.state_machine.enabled=true",
+        ),
+    ],
+)
+def test_implemented_upstream_wheelbipe_ids_route_to_named_owner(
+    task: str, owner: str, required_override: str
+) -> None:
+    source = cli.UPSTREAM_WHEELBIPE_CLI_ROUTES[task]
+    assert source.supported is True
+    route = cli.build_route(source.algorithm, task, "mujoco")
+    assert f"training.task_name={owner}" in route.generated_overrides
+    assert required_override in route.generated_overrides
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "Robotics-Wheelbipe-V14-Rough-v1",
+        "Robotics-Wheelbipe-V14-Rough-Play-v1",
+    ],
+)
+def test_exact_rough_v1_removes_canonical_v0_gimbal_command_bucket(task: str) -> None:
+    route = cli.build_route("ppo", task, "mujoco")
+
+    assert "env.gimbal_spin_translate.enabled=false" in route.generated_overrides
+    assert "env.commands.special_mode_probabilities=[0.15,0.15,0.20]" in route.generated_overrides
+    assert "env.commands.gimbal_mode_probability=0.0" in route.generated_overrides
+
+
+@pytest.mark.parametrize(
+    ("task", "algorithm", "owner"),
+    [
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-v0",
+            "dreamwaq",
+            "WheelbipeV14FlatDreamWaQ",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-Play-v0",
+            "dreamwaq",
+            "WheelbipeV14FlatDreamWaQPlay",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-HIM-v0",
+            "him_ppo",
+            "WheelbipeV14FlatHIM",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-HIM-Play-v0",
+            "him_ppo",
+            "WheelbipeV14FlatHIMPlay",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-v0",
+            "np3o",
+            "WheelbipeV14FlatNP3OBarlow",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-Play-v0",
+            "np3o",
+            "WheelbipeV14FlatNP3OBarlowPlay",
+        ),
+    ],
+)
+def test_exact_custom_wheelbipe_ids_select_named_registry_owner(
+    task: str, algorithm: str, owner: str
+) -> None:
+    route = cli.build_route(algorithm, task, "mujoco")
+
+    assert f"training.task_name={owner}" in route.generated_overrides
+    if task.endswith("NP3OBarlow-Play-v0"):
+        assert "env.np3o_tilt_limit_deg=15.0" in route.generated_overrides
+
+
+def test_upstream_wheelbipe_id_rejects_algorithm_mismatch() -> None:
+    with pytest.raises(SystemExit, match="requires --algo 'ppo'"):
+        cli.build_route("him_ppo", "Robotics-Wheelbipe-V14-Flat-v0", "mujoco")
+
+
+def test_upstream_wheelbipe_id_rejects_profile_override() -> None:
+    with pytest.raises(SystemExit, match="--profile cannot be combined"):
+        cli.build_route(
+            "ppo",
+            "Robotics-Wheelbipe-V14-Flat-v0",
+            "mujoco",
+            profile="debug",
+        )
+
+
+@pytest.mark.parametrize("algo", ["him_ppo", "dreamwaq", "np3o"])
+def test_wheelbipe_custom_algorithm_routes_to_explicit_custom_runtime(
+    algo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Custom algorithms must use the dedicated runtime script, not vanilla PPO."""
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    command = cli.build_command(
+        mode="train",
+        algo=algo,
+        task="wheelbipe_v14_flat",
+        sim="mujoco",
+        overrides=[],
+        root=cli.repo_root(),
+    )
+    assert command[1] == str(cli.repo_root() / "scripts" / "train_custom_ppo.py")
+    assert "algo.algorithm_name=" + algo in command
+    if algo == "np3o":
+        assert "env.num_costs=5" in command
+
+
+@pytest.mark.parametrize(
+    ("algo", "profile"),
+    [
+        ("him_ppo", "source_him_long"),
+        ("dreamwaq", "source_dreamwaq_long"),
+        ("np3o", "source_np3o_barlow_long"),
+    ],
+)
+def test_wheelbipe_custom_source_profile_is_hydra_group_not_owner_suffix(
+    algo: str, profile: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source long-run profiles must preserve the backend owner YAML path."""
+
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    route = cli.build_route(algo, "wheelbipe_v14_flat", "mujoco", profile=profile)
+    variant = cli.CUSTOM_ALGO_TASK_VARIANTS[algo]
+    assert route.owner_task == f"{variant}/mujoco.yaml"
+    assert f"task={variant}/mujoco" in route.generated_overrides
+    assert f"profile={profile}" in route.generated_overrides
+    assert f"mujoco_{profile}" not in route.owner_task
+
+
+def test_wheelbipe_custom_source_profile_rejects_cross_algorithm_profile() -> None:
+    with pytest.raises(SystemExit, match="supports --profile 'source_him_long'"):
+        cli.build_route(
+            "him_ppo",
+            "wheelbipe_v14_flat",
+            "mujoco",
+            profile="source_dreamwaq_long",
+        )
+
+
+@pytest.mark.parametrize(
+    ("task", "algo", "profile"),
+    [
+        ("Robotics-Wheelbipe-V14-Flat-HIM-v0", "him_ppo", "source_him_long"),
+        (
+            "Robotics-Wheelbipe-V14-Flat-HIM-Play-v0",
+            "him_ppo",
+            "source_him_long",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-v0",
+            "dreamwaq",
+            "source_dreamwaq_long",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-Play-v0",
+            "dreamwaq",
+            "source_dreamwaq_long",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-v0",
+            "np3o",
+            "source_np3o_barlow_long",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-Play-v0",
+            "np3o",
+            "source_np3o_barlow_long",
+        ),
+    ],
+)
+def test_exact_custom_id_automatically_composes_source_profile(
+    task: str,
+    algo: str,
+    profile: str,
+) -> None:
+    route = cli.build_route(algo, task, "mujoco")
+    assert f"profile={profile}" in route.generated_overrides
+    if algo == "np3o":
+        assert "env.num_costs=5" in route.generated_overrides
+
+
+def test_exact_custom_id_rejects_explicit_profile_and_history_reset_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = "Robotics-Wheelbipe-V14-Flat-HIM-v0"
+    with pytest.raises(SystemExit, match="--profile cannot be combined"):
+        cli.build_route("him_ppo", task, "mujoco", profile="source_him_long")
+
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    with pytest.raises(SystemExit, match="history reset contract"):
+        cli.build_command(
+            mode="train",
+            algo="him_ppo",
+            task=task,
+            sim="mujoco",
+            overrides=["algo.history_reset_mode=repeat"],
+            root=cli.repo_root(),
+        )
+
+
+def test_profile_hydra_passthrough_cannot_bypass_public_profile_flag() -> None:
+    with pytest.raises(SystemExit, match="Route-defining Hydra overrides"):
+        cli.build_command(
+            mode="train",
+            algo="him_ppo",
+            task="wheelbipe_v14_flat",
+            sim="mujoco",
+            overrides=["profile=source_him_long"],
+            root=cli.repo_root(),
+        )
+
+
+@pytest.mark.parametrize("algo", ["him_ppo", "dreamwaq", "np3o"])
+def test_wheelbipe_custom_eval_routes_to_checkpoint_aware_runtime(
+    algo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    command = cli.build_command(
+        mode="eval",
+        algo=algo,
+        task="wheelbipe_v14_flat",
+        sim="mujoco",
+        overrides=[],
+        load_run="-1",
+        root=cli.repo_root(),
+    )
+    assert command[1] == str(cli.repo_root() / "scripts" / "train_custom_ppo.py")
+    assert "training.play_only=true" in command
+    assert "algo.load_run=-1" in command
+
+
+def test_eval_load_run_accepts_absolute_checkpoint_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    checkpoint = tmp_path / "wheelbipe run" / "model_2700.pt"
+
+    command = cli.build_command(
+        mode="eval",
+        algo="ppo",
+        task="wheelbipe_v14_flat",
+        sim="mujoco",
+        overrides=[],
+        load_run=str(checkpoint),
+        root=cli.repo_root(),
+    )
+
+    assert f"algo.load_run={checkpoint}" in command
+
+
+def test_eval_load_run_rejects_relative_checkpoint_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+
+    with pytest.raises(SystemExit, match="absolute run/checkpoint path"):
+        cli.build_command(
+            mode="eval",
+            algo="ppo",
+            task="wheelbipe_v14_flat",
+            sim="mujoco",
+            overrides=[],
+            load_run="relative/model_2700.pt",
+            root=cli.repo_root(),
+        )
+
+
+def test_macos_motrix_custom_train_defaults_to_headless_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    command = cli.build_command(
+        mode="train",
+        algo="him_ppo",
+        task="wheelbipe_v14_flat",
+        sim="motrix",
+        overrides=[],
+        root=cli.repo_root(),
+    )
+
+    assert command[0] == cli.sys.executable
+    assert "training.no_play=true" in command
+
+
+def test_macos_motrix_custom_eval_defaults_to_headless_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    command = cli.build_command(
+        mode="eval",
+        algo="him_ppo",
+        task="wheelbipe_v14_flat",
+        sim="motrix",
+        overrides=[],
+        load_run="-1",
+        root=cli.repo_root(),
+    )
+
+    assert command[0] == cli.sys.executable
+    assert "training.play_render_mode=none" in command
+
+
+def test_train_eval_parser_exposes_custom_algorithms() -> None:
+    parser = cli._train_eval_parser(mode="train")
+    algo_action = next(action for action in parser._actions if action.dest == "algo")
+
+    assert algo_action.choices is not None
+    assert {"him_ppo", "dreamwaq", "np3o"}.issubset(set(algo_action.choices))
+
+
+@pytest.mark.parametrize(
+    ("task", "sim", "message"),
+    [
+        ("wheelbipe_v14_rough", "mujoco", "wheelbipe_v14_flat"),
+        ("wheelbipe_v14_flat_him", "mujoco", "wheelbipe_v14_flat"),
+        ("wheelbipe_v14_flat", "mjwarp", "No owner config exists"),
+    ],
+)
+def test_wheelbipe_custom_route_rejects_unsupported_owner_or_backend(
+    task: str, sim: str, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+
+    with pytest.raises(SystemExit, match=message):
+        cli.build_command(
+            mode="train",
+            algo="np3o",
+            task=task,
+            sim=sim,
+            overrides=[],
+            root=cli.repo_root(),
+        )
+
+
 def test_go2_arm_manip_loco_motrix_train_and_eval_route_to_owner_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -209,6 +719,83 @@ def test_eval_render_mode_generates_training_override(
     assert "training.play_render_mode=record" in command
     assert "training.play_only=true" in command
     assert "algo.load_run=-1" in command
+
+
+def test_ppo_mujoco_interactive_eval_routes_to_dedicated_viewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "train_rsl_rl.py").write_text("", encoding="utf-8")
+    (scripts / "play_interactive.py").write_text("", encoding="utf-8")
+    owner = tmp_path / "conf" / "ppo" / "task" / "wheelbipe_v14_flat"
+    owner.mkdir(parents=True)
+    (owner / "mujoco.yaml").write_text("training:\n  sim_backend: mujoco\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+
+    command = cli.build_command(
+        mode="eval",
+        algo="ppo",
+        task="wheelbipe_v14_flat",
+        sim="mujoco",
+        overrides=["interactive.keyboard=true"],
+        load_run="-1",
+        render_mode="interactive",
+        root=tmp_path,
+    )
+
+    assert command[:8] == [
+        sys.executable,
+        str(scripts / "play_interactive.py"),
+        "--algo",
+        "ppo",
+        "--task",
+        "wheelbipe_v14_flat",
+        "--sim",
+        "mujoco",
+    ]
+    assert "interactive.action_mode=policy" in command
+    assert "interactive.keyboard=true" in command
+    assert "algo.load_run=-1" in command
+    assert "training.play_render_mode=interactive" not in command
+
+
+def test_custom_wheelbipe_interactive_eval_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    with pytest.raises(SystemExit, match="not implemented for custom WheelBipe"):
+        cli.build_command(
+            mode="eval",
+            algo="np3o",
+            task="wheelbipe_v14_flat",
+            sim="mujoco",
+            overrides=[],
+            render_mode="interactive",
+            root=cli.repo_root(),
+        )
+
+
+def test_exact_upstream_play_id_keeps_named_owner_in_interactive_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_check_runtime_requirements", lambda *_args: None)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+
+    command = cli.build_command(
+        mode="eval",
+        algo="ppo",
+        task="Robotics-Wheelbipe-V14-Flat-Play-v0",
+        sim="mujoco",
+        overrides=["interactive.keyboard=true"],
+        load_run="-1",
+        render_mode="interactive",
+        root=cli.repo_root(),
+    )
+
+    assert command[1].endswith("scripts/play_interactive.py")
+    assert command[command.index("--task") + 1] == "wheelbipe_v14_flat"
+    assert "training.task_name=WheelbipeV14FlatPlayV0" in command
+    assert "interactive.action_mode=policy" in command
 
 
 def test_macos_motrix_render_mode_none_does_not_require_mxpython(

@@ -6,7 +6,10 @@ import subprocess
 import sys
 import textwrap
 
+import numpy as np
 import pytest
+
+from unilab.dr import IntervalRandomizationPlan
 
 
 def _module_available(name: str) -> bool:
@@ -14,6 +17,25 @@ def _module_available(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except ModuleNotFoundError:
         return False
+
+
+def test_drake_direct_interval_body_torque_fails_before_force_state_mutation() -> None:
+    from unilab.base.backend.drake.backend import DrakeBackend
+
+    backend = object.__new__(DrakeBackend)
+    backend._pending_body_forces = np.ones((2, 3, 3), dtype=np.float64)
+    before = backend._pending_body_forces.copy()
+
+    with pytest.raises(NotImplementedError, match="body torque perturbation"):
+        backend.apply_interval_randomization(
+            IntervalRandomizationPlan(
+                body_ids=np.asarray([1], dtype=np.int32),
+                body_force=np.zeros((2, 1, 3), dtype=np.float64),
+                body_torque=np.zeros((2, 1, 3), dtype=np.float64),
+            )
+        )
+
+    np.testing.assert_array_equal(backend._pending_body_forces, before)
 
 
 def _drakeuni_package_installed() -> bool:

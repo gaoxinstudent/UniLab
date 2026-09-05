@@ -54,6 +54,9 @@ _TASK_LABELS = {
     "allegro_sac": "Allegro SAC in-hand",
     "sharpa_inhand": "Sharpa in-hand",
     "sharpa_inhand_grasp": "Sharpa in-hand grasp",
+    "wheelbipe_v14_flat_him": "WheelBipe V14 flat (HIM)",
+    "wheelbipe_v14_flat_dreamwaq": "WheelBipe V14 flat (DreamWaQ)",
+    "wheelbipe_v14_flat_np3o": "WheelBipe V14 flat (NP3O + Barlow)",
 }
 
 
@@ -136,6 +139,33 @@ ENTRYPOINT_SPECS: tuple[EntrypointSpec, ...] = (
         task_glob="*/*.yaml",
         generic_tested=True,
     ),
+    # The history-based WheelBipe algorithms have a dedicated runner and
+    # owner group.  Keep one spec per public ``--algo`` value so the matrix
+    # cannot imply that a custom owner is runnable through vanilla PPO.
+    # These rows intentionally remain ``Configured`` until a checked-in
+    # backend-specific training evidence record exists; registry/config
+    # presence alone must not overstate runtime support.
+    EntrypointSpec(
+        entrypoint_id="him_ppo",
+        label="HIM-PPO (custom)",
+        config_dir="conf/custom_ppo/task",
+        task_glob="wheelbipe_v14_flat_him/*.yaml",
+        generic_tested=False,
+    ),
+    EntrypointSpec(
+        entrypoint_id="dreamwaq",
+        label="DreamWaQ (custom)",
+        config_dir="conf/custom_ppo/task",
+        task_glob="wheelbipe_v14_flat_dreamwaq/*.yaml",
+        generic_tested=False,
+    ),
+    EntrypointSpec(
+        entrypoint_id="np3o",
+        label="NP3O + Barlow (custom)",
+        config_dir="conf/custom_ppo/task",
+        task_glob="wheelbipe_v14_flat_np3o/*.yaml",
+        generic_tested=False,
+    ),
 )
 
 
@@ -202,6 +232,16 @@ def _is_tested(spec: EntrypointSpec, task_slug: str, backend: str, root: Path) -
             spec.entrypoint_id,
             task_slug,
         ) in _MAINTAINER_VALIDATED_MJWARP_ENTRYPOINT_TASKS
+    # WheelBipe's standard owners currently have config/registry/contract
+    # coverage and optional asset materialization smoke, but no checked-in
+    # train_rsl_rl owner/backend run or maintainer validation record.  Keep
+    # them at ``Configured`` until that near-risk evidence exists rather than
+    # inheriting the broad generic flag used by legacy task families.
+    if spec.entrypoint_id == "ppo_torch" and task_slug in {
+        "wheelbipe_v14_flat",
+        "wheelbipe_v14_rough",
+    }:
+        return False
     return spec.generic_tested
 
 
@@ -286,7 +326,7 @@ def render_support_matrix(root: Path | None = None) -> str:
         "| 等级 | 仓库事实来源 |",
         "|------|--------------|",
         "| `Registered` | `ensure_registries()` 导入后的 `registry.list_registered_envs()` 中存在该 env/backend。 |",
-        "| `Configured` | 存在对应的 owner YAML：`conf/{ppo,appo,offpolicy}/task/...`。 |",
+        "| `Configured` | 存在对应的 owner YAML：`conf/{ppo,appo,offpolicy,custom_ppo}/task/...`。 |",
         "| `Tested` | `tests/` 中有自动化覆盖该 entrypoint/task owner/backend 组合，或存在显式 maintainer 完整训练验证并具备近风险自动化测试。这里的 `Tested` 不等同于默认推荐路径。 |",
         "| `Benchmarked` | 存在与该组合绑定的已提交 benchmark manifest。 |",
         "| `Recommended` | 仓库中存在显式 recommendation 元数据。 |",
@@ -299,6 +339,12 @@ def render_support_matrix(root: Path | None = None) -> str:
         "mjwarp playback 仅支持显式、有限步数的 `record` 并复用 MuJoCo 离线 renderer，不支持 `auto`、"
         "interactive 或 native playback。其他 entrypoint 中出现的 `Registered` 只表示 env/backend registry "
         "identity，不代表对应算法、terrain、完整 DR 或 production training 支持。",
+        "",
+        "HIM-PPO、DreamWaQ 和 NP3O + Barlow 的 custom WheelBipe 行只表示 owner 配置与 registry "
+        "证据；矩阵中的 task owner slug 是内部 config group 名称，公共 CLI 仍使用 "
+        "`--task wheelbipe_v14_flat` 配合对应的 `--algo`。它们目前仅有 flat 的 "
+        "MuJoCo/Motrix owner，没有 `mjwarp` owner。custom checkpoint 回放和历史策略 "
+        "sim2sim 请使用专用 runner/helper。",
         "",
         benchmark_note,
         recommendation_note,
@@ -322,7 +368,7 @@ def render_support_matrix(root: Path | None = None) -> str:
             "### Source Index",
             "",
             "- Registry bootstrap: `src/unilab/envs/**` decorators via `unilab.base.registry.ensure_registries()`.",
-            "- Owner YAML scan: `conf/ppo/task/**`, `conf/appo/task/**`, `conf/offpolicy/task/**`.",
+            "- Owner YAML scan: `conf/ppo/task/**`, `conf/appo/task/**`, `conf/offpolicy/task/**`, and the dedicated custom owners under `conf/custom_ppo/task/**`.",
             "- Generic compose coverage: `tests/config/test_config_system.py::test_supported_task_composes`.",
             "- Validated mjwarp entrypoints are explicitly recorded in `_MAINTAINER_VALIDATED_MJWARP_ENTRYPOINT_TASKS`; near-risk coverage lives in `tests/base/test_mjwarp_backend.py`, `tests/base/test_backend_conformance.py`, `tests/base/test_mjwarp_differential.py`, and `tests/base/test_mjwarp_playback.py`.",
         ]

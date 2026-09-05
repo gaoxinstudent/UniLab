@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from unilab.utils.support_matrix import BACKENDS, EvidenceLevel, build_support_rows
+from unilab.utils.support_matrix import (
+    BACKENDS,
+    EvidenceLevel,
+    build_support_rows,
+    render_support_matrix,
+)
 
 
 def _row(entrypoint_label: str, task_slug: str):
@@ -67,3 +72,40 @@ def test_support_matrix_marks_sharpa_motrix_phase1_support():
 
     assert allegro_appo_row.cells["mujoco"].level == EvidenceLevel.TESTED
     assert allegro_appo_row.cells["motrix"].level == EvidenceLevel.TESTED
+
+
+def test_support_matrix_scans_custom_wheelbipe_owner_groups() -> None:
+    rows = build_support_rows(Path(__file__).resolve().parents[2])
+    custom = {
+        (row.entrypoint_label, row.task_slug): row
+        for row in rows
+        if row.entrypoint_label.endswith("(custom)")
+    }
+
+    assert set(custom) == {
+        ("HIM-PPO (custom)", "wheelbipe_v14_flat_him"),
+        ("DreamWaQ (custom)", "wheelbipe_v14_flat_dreamwaq"),
+        ("NP3O + Barlow (custom)", "wheelbipe_v14_flat_np3o"),
+    }
+    for row in custom.values():
+        # Config/registry evidence is available for MuJoCo and Motrix; no
+        # custom owner is declared for mjwarp.
+        assert row.cells["mujoco"].level == EvidenceLevel.CONFIGURED
+        assert row.cells["motrix"].level == EvidenceLevel.CONFIGURED
+        assert row.cells["mjwarp"].level == EvidenceLevel.MISSING
+
+
+def test_support_matrix_keeps_standard_wheelbipe_at_configured_until_runtime_evidence() -> None:
+    """Generic PPO coverage must not overstate WheelBipe runtime support."""
+
+    for task_slug in ("wheelbipe_v14_flat", "wheelbipe_v14_rough"):
+        row = _row("PPO (torch)", task_slug)
+        assert row.cells["mujoco"].level == EvidenceLevel.CONFIGURED
+        assert row.cells["motrix"].level == EvidenceLevel.CONFIGURED
+        assert row.cells["mjwarp"].level == EvidenceLevel.MISSING
+
+
+def test_support_matrix_custom_source_index_mentions_dedicated_group() -> None:
+    rendered = render_support_matrix(Path(__file__).resolve().parents[2])
+    assert "HIM-PPO (custom)" in rendered
+    assert "conf/custom_ppo/task/**" in rendered

@@ -221,6 +221,57 @@ class TestMuJoCoBasic:
 
         np.testing.assert_allclose(called["force_range"], limit)
 
+    def test_interval_body_wrench_shape_target_staging_and_step_clear(self, bkd):
+        body_ids = np.asarray([bkd._base_body_id], dtype=np.int32)
+        force = np.asarray([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], dtype=np.float64)
+        torque = np.asarray([[[0.1, 0.2, 0.3]], [[0.4, 0.5, 0.6]]], dtype=np.float64)
+
+        bkd.apply_interval_randomization(
+            IntervalRandomizationPlan(
+                body_ids=body_ids,
+                body_force=force,
+                body_torque=torque,
+            )
+        )
+
+        start = 6 * int(body_ids[0])
+        np.testing.assert_allclose(bkd._pending_xfrc_applied[:, start : start + 3], force[:, 0])
+        np.testing.assert_allclose(
+            bkd._pending_xfrc_applied[:, start + 3 : start + 6], torque[:, 0]
+        )
+        bkd.step(np.zeros((NUM_ENVS, bkd.model.nu), dtype=np.float64), nsteps=1)
+        np.testing.assert_allclose(bkd._pending_xfrc_applied, 0.0)
+
+        with pytest.raises(ValueError, match="body force must have shape"):
+            bkd.apply_body_force(body_ids, np.zeros((NUM_ENVS, 3), dtype=np.float64))
+        with pytest.raises(ValueError, match="body torque must have shape"):
+            bkd.apply_body_torque(body_ids, np.zeros((NUM_ENVS, 3), dtype=np.float64))
+        invalid_body = np.asarray([bkd.model.nbody], dtype=np.int32)
+        with pytest.raises(ValueError, match="not found in MuJoCo model"):
+            bkd.apply_body_force(invalid_body, np.zeros((NUM_ENVS, 1, 3)))
+        with pytest.raises(ValueError, match="not found in MuJoCo model"):
+            bkd.apply_body_torque(invalid_body, np.zeros((NUM_ENVS, 1, 3)))
+
+    def test_set_state_clears_only_target_env_pending_body_wrench(self, bkd):
+        body_ids = np.asarray([bkd._base_body_id], dtype=np.int32)
+        wrench = np.ones((NUM_ENVS, 1, 3), dtype=np.float64)
+        bkd.apply_interval_randomization(
+            IntervalRandomizationPlan(
+                body_ids=body_ids,
+                body_force=wrench,
+                body_torque=wrench * 0.5,
+            )
+        )
+
+        bkd.set_state(
+            np.asarray([0], dtype=np.int32),
+            _identity_qpos_mujoco(bkd.model.nq),
+            np.zeros((1, bkd.model.nv), dtype=np.float64),
+        )
+
+        np.testing.assert_allclose(bkd._pending_xfrc_applied[0], 0.0)
+        assert np.any(bkd._pending_xfrc_applied[1] != 0.0)
+
     def test_step_uses_xfrc_applied_for_interval_push(self, bkd, monkeypatch: pytest.MonkeyPatch):
         mujoco = _mujoco_module()
         sampled = np.array([[0.5, -0.25, 0.1], [-0.1, 0.8, -0.4]], dtype=np.float64)

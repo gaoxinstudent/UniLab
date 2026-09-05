@@ -18,7 +18,7 @@ uv run eval  --algo ppo --task go2_joystick_flat --sim motrix --load-run -1
 
 1. **At train time**: `ExperimentTracker` snapshots the contract fields that define policy I/O into `contract_snapshot` in `run_config.json` (the checkpoint format is untouched, so historical checkpoints stay compatible).
 2. **At replay time**: `eval` loads the **target backend** owner config selected by `--sim` (e.g. `conf/ppo/task/go2_joystick_flat/motrix.yaml`) and injects `training.play_only=true`.
-3. **Before env creation**: the four play entrypoints (rsl_rl / appo / offpolicy / him_ppo) call `resolve_sim2sim_config`, comparing the target config against the source run's contract snapshot field by field.
+3. **Before env creation**: the play entrypoints (rsl_rl / appo / offpolicy / him_ppo / custom_ppo) call `resolve_sim2sim_config`, comparing the target config against the source run's contract snapshot field by field. The custom WheelBipe route additionally validates its algorithm/variant/history/cost contract in `CustomOnPolicyRunner`.
 4. **At weight load**: `policy_load_dim_guard` wraps checkpoint loading, re-raising cryptic tensor shape-mismatch errors as a clear sim2sim diagnostic.
 
 ## What the guard covers
@@ -40,8 +40,30 @@ If the target backend's DENYLIST fields differ from training (e.g. a task whose 
 
 > Legacy runs: if `run_config.json` has no `contract_snapshot` (older training), the guard skips with a warning instead of breaking your workflow.
 
+The standalone `scripts/sim2sim_wheelbipe_custom.py` route accepts a compact
+ONNX graph or the explicit source Barlow ONNX/TorchScript artifact directly, so
+there is no source `run_config.json` to resolve. It therefore uses the graph
+shape plus the optional sidecar as its fail-closed
+algorithm/variant/history/cost contract; a present but malformed sidecar is
+rejected before an environment is created. Use
+`--source-barlow-format torchscript` (or pass `barlow_twins_actor.pt` directly)
+to select the trusted dual-input source archive. Compact `.pt` checkpoints are
+rejected rather than sent to either ONNX Runtime or the source adapter. Legacy
+graph-only exports remain shape-checked for compatibility.
+
+The normal `scripts/sim2sim_wheelbipe.py` helper accepts either the one-input
+ONNX graph or a trusted TorchScript `policy.pt`; both paths enforce the strict
+`float32 [1,35] -> [1,6]` contract before simulator materialization. The ROS2
+adapter `scripts/sim2sim_wheelbipe_ros2.py` remains ONNX-only and applies the
+same shape checks. Neither artifact-only entrypoint receives a Hydra source
+run directory, so the generic `resolve_sim2sim_config` snapshot comparison and
+Torch `policy_load_dim_guard` are not applicable. Use the top-level
+checkpoint-based `eval` path when a source `run_config.json` cross-backend
+snapshot must be enforced; supply only trusted TorchScript archives because
+they deserialize executable code.
+
 ## See also
 
 - {doc}`1-backend_swap`
 - {doc}`4-reward_parity`
-- {doc}`../../4-developer_guide/9-sim2sim_contract_status`
+- {doc}`/zh_CN/4-developer_guide/9-sim2sim_contract_status`

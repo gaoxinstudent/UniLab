@@ -1,0 +1,7 @@
+<mujoco model="wheelbipe V14 ROS2 compatibility task">
+  <keyframe>
+    <key name="home"
+      qpos="0 0 0.38 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+      ctrl="0 0 0 0 0 0 0 0 0 0" />
+  </keyframe>
+</mujoco>

@@ -28,11 +28,45 @@ from unilab.training import (
     resolve_hora_stage2_checkpoint_path,
     resolve_offpolicy_checkpoint_path,
     resolve_task_checkpoint_path,
+    should_run_playback,
 )
 from unilab.visualization.playback import render_play_mode
 
 _ROOT_DIR = Path(__file__).resolve().parents[2]
 _CONF_DIR = _ROOT_DIR / "conf"
+
+
+@pytest.mark.parametrize(
+    ("play_only", "no_play", "render_mode", "numerical_eval", "expected"),
+    [
+        (True, True, "none", True, True),
+        (True, False, "none", True, True),
+        (True, True, "none", False, False),
+        (True, False, "none", False, False),
+        (False, True, "none", True, False),
+        (False, False, "none", True, False),
+        (False, False, "record", False, True),
+        (False, True, "record", False, False),
+    ],
+)
+def test_should_run_playback_distinguishes_eval_from_render_disabled_training(
+    play_only: bool,
+    no_play: bool,
+    render_mode: str,
+    numerical_eval: bool,
+    expected: bool,
+) -> None:
+    """Only an explicit numerical evaluator opts into ``none`` playback."""
+
+    assert (
+        should_run_playback(
+            play_only=play_only,
+            no_play=no_play,
+            play_render_mode=render_mode,
+            numerical_eval=numerical_eval,
+        )
+        is expected
+    )
 
 
 def _resolve_low_level_playback_flags(kwargs: dict[str, object]) -> dict[str, object]:
@@ -412,6 +446,20 @@ def test_backend_adapter_builds_play_scene_override():
     assert captured["ground_texture_file"] == str(
         _ROOT_DIR / "src/unilab/assets/robots/g1/textures/floor.png"
     )
+
+
+def test_backend_adapter_play_profile_deep_merges_nested_owner_fields():
+    cfg = _ppo_cfg(["task=wheelbipe_v14_rough/mujoco", "training.play_only=true"])
+    override = BackendAdapter(cfg, root_dir=_ROOT_DIR).build_play_env_cfg_override()
+
+    # The play profile pins only a few leaves; source owner fields such as the
+    # friction randomizer and command resampling interval must remain present.
+    assert override["commands"]["heading_command"] is False
+    assert override["commands"]["vel_limit"] == [[1.8, 0.0, 0.0], [1.8, 0.0, 0.0]]
+    assert override["commands"]["resampling_time_range"] == [5.0, 15.0]
+    assert override["domain_rand"]["source_external_force_enabled"] is False
+    assert "source_external_force_range" in override["domain_rand"]
+    assert override["terrain_curriculum"]["type_col_assignment"] == "round_robin"
 
 
 def test_render_play_mode_uses_env_interactive_contract():

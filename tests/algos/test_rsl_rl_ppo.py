@@ -13,12 +13,40 @@ from unilab.algos.torch.rsl_rl_ppo import FinalObservationAwarePPO
 from unilab.training.rsl_rl import (
     RslRlVecEnvWrapper,
     apply_rsl_rl_rank_seed,
+    configure_rsl_rl_null_logger,
     finish_rsl_rl_distributed,
     normalize_ppo_train_cfg,
     ppo_samples_per_iteration,
     resolve_rsl_rl_device,
     rsl_rl_single_process_topology,
 )
+
+
+def test_rsl_rl_null_logger_keeps_checkpoint_writer_sentinel() -> None:
+    """``logger=none`` must disable metrics without disabling model saves."""
+
+    logger = type("Logger", (), {})()
+    runner = type("Runner", (), {"logger": logger})()
+
+    configure_rsl_rl_null_logger(runner)
+    logger.init_logging_writer()
+
+    assert logger.logger_type == "none"
+    assert logger.writer is not None
+    logger.writer.add_scalar("unused", 1.0, 0)
+    logger.writer.add_video("unused", 0, 0)
+
+
+def test_rsl_rl_null_logger_preserves_distributed_rank_gate() -> None:
+    """Non-zero workers must not write shared checkpoints."""
+
+    logger = type("Logger", (), {"disable_logs": True})()
+    runner = type("Runner", (), {"logger": logger})()
+
+    configure_rsl_rl_null_logger(runner)
+    logger.init_logging_writer()
+
+    assert logger.writer is None
 
 
 def test_rsl_rl_rank_seed_uses_base_seed_plus_global_rank() -> None:
@@ -237,6 +265,22 @@ def test_normalize_ppo_train_cfg_preserves_unilab_runtime_flags() -> None:
     assert "target_kl_stop" not in train_cfg["algorithm"]
 
 
+def test_normalize_ppo_train_cfg_filters_unilab_flags_for_upstream_ppo() -> None:
+    train_cfg = normalize_ppo_train_cfg(
+        {
+            "algorithm": {
+                "class_name": "rsl_rl.algorithms.ppo:PPO",
+                "enable_compile": False,
+                "target_kl_stop": None,
+            },
+            "policy": {},
+        }
+    )
+
+    assert "enable_compile" not in train_cfg["algorithm"]
+    assert "target_kl_stop" not in train_cfg["algorithm"]
+
+
 def test_rsl_rl_adapter_outputs_combined_dones_and_time_outs_alias():
     class FakeEnv:
         def __init__(self):
@@ -275,3 +319,31 @@ def test_rsl_rl_adapter_outputs_combined_dones_and_time_outs_alias():
 
     assert torch.equal(dones, torch.tensor([True, True, False]))
     assert torch.equal(infos["time_outs"], torch.tensor([False, True, False]))
+
+
+def test_rsl_rl_wrapper_forwards_resumed_training_iteration() -> None:
+    calls: list[int] = []
+
+    class FakeEnv:
+        def __init__(self):
+            self.num_envs = 1
+            self.cfg = type("Cfg", (), {"max_episode_seconds": 10.0, "ctrl_dt": 0.02})()
+            self.observation_space = type("Space", (), {"shape": (2,)})()
+            self.action_space = type("Space", (), {"shape": (1,)})()
+            self.obs_groups_spec = {"obs": 2}
+            self.state = type("State", (), {"obs": {"obs": torch.zeros(1, 2).numpy()}})()
+
+        def init_state(self):
+            pass
+
+        def reset(self, env_indices):
+            del env_indices
+            return {"obs": torch.zeros(1, 2).numpy()}, {}
+
+        def sync_training_iteration(self, iteration: int) -> None:
+            calls.append(iteration)
+
+    wrapper = RslRlVecEnvWrapper(FakeEnv(), device="cpu", policy_obs_mode="actor")
+    wrapper.sync_training_iteration(1498)
+
+    assert calls == [1498]
