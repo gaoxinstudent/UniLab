@@ -56,6 +56,20 @@ training:
   sim_backend: mujoco
   log_root: custom_logs
 """,
+        root / "conf" / "custom_ppo" / "task" / "wheelbipe_v14_flat_him" / "mujoco.yaml": """
+training:
+  task_name: WheelbipeV14FlatHIM
+  sim_backend: mujoco
+algo:
+  algorithm_name: him
+""",
+        root / "conf" / "custom_ppo" / "task" / "wheelbipe_v14_flat_him" / "motrix.yaml": """
+training:
+  task_name: WheelbipeV14FlatHIM
+  sim_backend: motrix
+algo:
+  algorithm_name: him
+""",
     }
     for path, content in owner_files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +81,7 @@ training:
         root / "logs" / "rsl_rl_ppo" / "Go2" / "2026-02-01_00-00-00_mujoco",
         root / "logs" / "hora_ppo" / "Go1" / "2026-03-01_00-00-00_mujoco",
         root / "custom_logs" / "Go3" / "2026-04-01_00-00-00_mujoco",
+        root / "logs" / "custom_ppo" / "WheelbipeV14FlatHIM" / "2026-05-01_00-00-00_mujoco",
     ]:
         path.mkdir(parents=True)
 
@@ -281,6 +296,56 @@ def test_task_completion_respects_selected_profile(tmp_path: Path) -> None:
         10,
         metadata,
     ) == ["go1"]
+
+
+def test_custom_algorithm_completion_uses_public_wheelbipe_task(tmp_path: Path) -> None:
+    """Custom owner slugs stay internal; completion must offer the CLI task."""
+
+    _write_completion_fixture(tmp_path)
+    metadata = build_metadata(tmp_path)
+
+    assert complete_words(
+        [
+            "uv",
+            "run",
+            "train",
+            "--algo",
+            "him_ppo",
+            "--sim",
+            "mujoco",
+            "--task",
+            "",
+        ],
+        8,
+        metadata,
+    ) == [
+        "Robotics-Wheelbipe-V14-Flat-HIM-Play-v0",
+        "Robotics-Wheelbipe-V14-Flat-HIM-v0",
+        "wheelbipe_v14_flat",
+    ]
+
+
+def test_custom_eval_completion_discovers_shared_log_namespace(tmp_path: Path) -> None:
+    _write_completion_fixture(tmp_path)
+    metadata = build_metadata(tmp_path)
+
+    assert complete_words(
+        [
+            "uv",
+            "run",
+            "eval",
+            "--algo",
+            "him_ppo",
+            "--task",
+            "wheelbipe_v14_flat",
+            "--sim",
+            "mujoco",
+            "--load-run",
+            "",
+        ],
+        10,
+        metadata,
+    ) == ["-1", "2026-05-01_00-00-00_mujoco"]
 
 
 def test_demo_positional_completes_all_demo_names(tmp_path: Path) -> None:

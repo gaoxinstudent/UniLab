@@ -91,9 +91,58 @@ def test_terrain_generator_generates_single_merged_hfield():
         cfg.num_rows * tile_x_px + 2 * border_px,
     )
     assert terrain.terrain_origins.shape == (cfg.num_rows, cfg.num_cols, 3)
+    assert terrain.terrain_type_ids.shape == (cfg.num_rows, cfg.num_cols)
+    assert terrain.terrain_type_names == tuple(cfg.sub_terrains)
     assert terrain.to_uint16().dtype == np.uint16
     assert terrain.hfield_size[0] == pytest.approx(terrain.size[0] / 2)
     assert terrain.hfield_size[1] == pytest.approx(terrain.size[1] / 2)
+
+
+def test_random_terrain_identity_is_seeded_and_per_cell():
+    cfg = TerrainGeneratorCfg(
+        seed=23,
+        size=(1.0, 1.0),
+        horizontal_scale=0.1,
+        num_rows=3,
+        num_cols=5,
+        sub_terrains={
+            "first": ALL_TERRAIN_PRESETS["flat"](proportion=0.25),
+            "second": ALL_TERRAIN_PRESETS["flat"](proportion=0.75),
+        },
+    )
+
+    first = TerrainGenerator(copy.deepcopy(cfg)).generate()
+    second = TerrainGenerator(copy.deepcopy(cfg)).generate()
+
+    assert first.terrain_type_names == ("first", "second")
+    assert np.array_equal(first.terrain_type_ids, second.terrain_type_ids)
+    assert first.terrain_type_ids.shape == (3, 5)
+    assert set(np.unique(first.terrain_type_ids)).issubset({0, 1})
+
+
+def test_proportional_curriculum_uses_source_cumulative_column_mapping():
+    cfg = TerrainGeneratorCfg(
+        seed=7,
+        curriculum=True,
+        curriculum_column_allocation="proportional",
+        size=(1.0, 1.0),
+        horizontal_scale=0.1,
+        num_rows=2,
+        num_cols=10,
+        sub_terrains={
+            "a": ALL_TERRAIN_PRESETS["flat"](proportion=0.2),
+            "b": ALL_TERRAIN_PRESETS["flat"](proportion=0.1),
+            "c": ALL_TERRAIN_PRESETS["flat"](proportion=0.3),
+            "d": ALL_TERRAIN_PRESETS["flat"](proportion=0.4),
+        },
+    )
+
+    terrain = TerrainGenerator(cfg).generate()
+
+    expected = np.asarray([0, 0, 1, 2, 2, 2, 3, 3, 3, 3], dtype=np.int32)
+    assert terrain.terrain_type_names == ("a", "b", "c", "d")
+    assert np.array_equal(terrain.terrain_type_ids[0], expected)
+    assert np.array_equal(terrain.terrain_type_ids[1], expected)
 
 
 def test_generated_terrain_surface_sampler_uses_world_xy():

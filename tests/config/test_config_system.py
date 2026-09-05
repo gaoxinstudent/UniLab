@@ -16,6 +16,8 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
+from unilab import cli
+
 CONF_DIR = Path(__file__).parent.parent.parent / "conf"
 _BACKENDS = ("mujoco", "mjwarp", "motrix")
 
@@ -54,6 +56,8 @@ def _normalize_overrides(algo_dir: str, overrides: list[str] | None) -> list[str
     if not task_selected:
         if algo_dir == "offpolicy":
             normalized.append(f"task={algo}/g1_walk_flat/mujoco")
+        elif algo_dir == "custom_ppo":
+            normalized.append("task=wheelbipe_v14_flat_him/mujoco")
         else:
             normalized.append("task=go1_joystick_flat/mujoco")
 
@@ -110,6 +114,27 @@ def _supported_task_cases() -> list[tuple[str, str, str, str, str, list[str]]]:
                     )
                 )
 
+    # WheelBipe's history-policy owners live in their own Hydra config group;
+    # compose them here as first-class task owners so support tooling cannot
+    # report a file that the runtime test suite never resolves.
+    custom_root = CONF_DIR / "custom_ppo" / "task"
+    if custom_root.is_dir():
+        for task_dir in sorted(path for path in custom_root.iterdir() if path.is_dir()):
+            for backend_file in sorted(task_dir.glob("*.yaml")):
+                expected_backend = _expected_backend_from_variant(backend_file.stem)
+                if expected_backend is None:
+                    continue
+                cases.append(
+                    (
+                        "custom_ppo",
+                        "config",
+                        task_dir.name,
+                        expected_backend,
+                        str(backend_file.relative_to(CONF_DIR)),
+                        [f"task={task_dir.name}/{backend_file.stem}"],
+                    )
+                )
+
     return cases
 
 
@@ -119,12 +144,162 @@ def _supported_task_cases() -> list[tuple[str, str, str, str, str, list[str]]]:
         ("offpolicy", "config"),
         ("appo", "config"),
         ("ppo", "config"),
+        ("custom_ppo", "config"),
     ],
 )
 def test_algo_config_composes(algo_dir: str, config_name: str):
     cfg = _compose(algo_dir, config_name)
     assert cfg.training.task_name
     assert cfg.training.sim_backend == "mujoco"
+
+
+@pytest.mark.parametrize(
+    ("task", "algorithm", "history", "costs"),
+    [
+        ("wheelbipe_v14_flat_him", "him", 5, 0),
+        ("wheelbipe_v14_flat_dreamwaq", "dreamwaq", 5, 0),
+        ("wheelbipe_v14_flat_np3o", "np3o", 10, 5),
+    ],
+)
+@pytest.mark.parametrize("backend", ["mujoco", "motrix"])
+def test_custom_wheelbipe_owner_composes_declared_timing_and_cost_contract(
+    task: str, algorithm: str, history: int, costs: int, backend: str
+) -> None:
+    """Custom public routes stay aligned with their owner YAML contracts."""
+
+    cfg = _compose("custom_ppo", overrides=[f"task={task}/{backend}"])
+
+    assert cfg.training.task_name
+    assert cfg.training.sim_backend == backend
+    assert cfg.algo.algorithm_name == algorithm
+    assert cfg.algo.num_actor_history == history
+    assert cfg.algo.num_costs == costs
+    assert cfg.env.num_costs == costs
+    assert cfg.env.sim_dt == pytest.approx(0.005)
+    assert cfg.env.ctrl_dt == pytest.approx(0.02)
+    assert cfg.env.delay_profile == "source_v14_physics"
+    assert cfg.env.delay_range_semantics == "exclusive"
+    assert cfg.env.use_obs_delay is True
+    assert cfg.env.use_act_delay is True
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "motrix"])
+def test_wheelbipe_flat_ppo_owner_defaults_to_long_run_batch(backend: str) -> None:
+    """Both backend owners keep the validated 4096-env long-run default."""
+
+    cfg = _compose("ppo", overrides=[f"task=wheelbipe_v14_flat/{backend}"])
+
+    assert cfg.algo.num_envs == 4096
+    assert cfg.algo.max_iterations == 20000
+    assert cfg.env.sim_dt == pytest.approx(0.005)
+    assert cfg.env.delay_profile == "source_v14_physics"
+    assert cfg.env.delay_range_semantics == "exclusive"
+    assert cfg.env.obs_delay_step_unit == "physics"
+    assert cfg.env.use_obs_delay is True
+    assert cfg.env.use_act_delay is True
+
+
+def test_custom_source_profiles_keep_checked_in_long_run_budgets() -> None:
+    """Source runner budgets are explicit opt-in Hydra profiles."""
+
+    cases = {
+        "source_dreamwaq_long": ("dreamwaq", 4096, 10000, 500),
+        "source_him_long": ("him", 4096, 5000, 500),
+        "source_np3o_barlow_long": ("np3o", 4096, 3000, 500),
+    }
+    for profile, (algorithm, num_envs, iterations, save_interval) in cases.items():
+        cfg = _compose(
+            "custom_ppo",
+            overrides=[
+                f"profile={profile}",
+                f"task=wheelbipe_v14_flat_{'np3o' if algorithm == 'np3o' else algorithm}/mujoco",
+            ],
+        )
+        assert cfg.algo.algorithm_name == algorithm
+        assert cfg.algo.num_envs == num_envs
+        assert cfg.algo.num_steps_per_env == 24
+        assert cfg.algo.max_iterations == iterations
+        assert cfg.algo.save_interval == save_interval
+        assert cfg.algo.history_reset_mode == "source_zero_current"
+        assert list(cfg.algo.policy.actor_hidden_dims) == [512, 256, 128]
+        assert list(cfg.algo.policy.critic_hidden_dims) == [512, 256, 128]
+        assert cfg.algo.policy.init_noise_std == pytest.approx(1.0)
+        assert cfg.algo.policy.activation == "elu"
+        assert cfg.algo.algorithm.value_loss_coef == pytest.approx(4.0)
+        assert cfg.algo.algorithm.use_clipped_value_loss is True
+        assert cfg.algo.algorithm.clip_param == pytest.approx(0.2)
+        assert cfg.algo.algorithm.entropy_coef == pytest.approx(0.005)
+        assert cfg.algo.algorithm.num_learning_epochs == 5
+        assert cfg.algo.algorithm.num_mini_batches == 4
+        assert cfg.algo.algorithm.learning_rate == pytest.approx(1.0e-4)
+        assert cfg.algo.algorithm.schedule == "adaptive"
+        assert cfg.algo.algorithm.gamma == pytest.approx(0.99)
+        assert cfg.algo.algorithm.lam == pytest.approx(0.95)
+        assert cfg.algo.algorithm.desired_kl == pytest.approx(0.01)
+        assert cfg.algo.algorithm.max_grad_norm == pytest.approx(1.0)
+    np3o = _compose(
+        "custom_ppo",
+        overrides=[
+            "profile=source_np3o_barlow_long",
+            "task=wheelbipe_v14_flat_np3o/mujoco",
+        ],
+    )
+    assert np3o.algo.policy_architecture == "source_barlow"
+    assert np3o.algo.policy.source_barlow.num_hist == 10
+    assert np3o.algo.policy.source_barlow.num_priv_latent == 4
+
+    dreamwaq = _compose(
+        "custom_ppo",
+        overrides=[
+            "profile=source_dreamwaq_long",
+            "task=wheelbipe_v14_flat_dreamwaq/mujoco",
+        ],
+    )
+    assert list(dreamwaq.algo.policy.actor_hidden_dims) == [512, 256, 128]
+    assert list(dreamwaq.algo.policy.critic_hidden_dims) == [512, 256, 128]
+    assert list(dreamwaq.algo.policy.cenet_encoder_hidden_dims) == [256, 128, 64]
+    assert list(dreamwaq.algo.policy.cenet_decoder_hidden_dims) == [64, 128, 256]
+
+
+@pytest.mark.parametrize(
+    ("task", "algo", "profile"),
+    [
+        ("Robotics-Wheelbipe-V14-Flat-HIM-v0", "him_ppo", "source_him_long"),
+        (
+            "Robotics-Wheelbipe-V14-Flat-DreamWaQ-v0",
+            "dreamwaq",
+            "source_dreamwaq_long",
+        ),
+        (
+            "Robotics-Wheelbipe-V14-Flat-NP3OBarlow-v0",
+            "np3o",
+            "source_np3o_barlow_long",
+        ),
+    ],
+)
+def test_exact_custom_route_matches_canonical_source_profile(
+    task: str,
+    algo: str,
+    profile: str,
+) -> None:
+    exact_route = cli.build_route(algo, task, "mujoco")
+    canonical_route = cli.build_route(
+        algo,
+        "wheelbipe_v14_flat",
+        "mujoco",
+        profile=profile,
+    )
+    exact = _compose("custom_ppo", overrides=list(exact_route.generated_overrides))
+    canonical = _compose("custom_ppo", overrides=list(canonical_route.generated_overrides))
+
+    assert OmegaConf.to_container(exact.algo, resolve=True) == OmegaConf.to_container(
+        canonical.algo,
+        resolve=True,
+    )
+    assert exact.algo.history_reset_mode == "source_zero_current"
+    if algo == "np3o":
+        assert exact.algo.policy_architecture == "source_barlow"
+        assert exact.algo.policy.architecture == "source_barlow"
 
 
 def test_legacy_config_groups_removed():

@@ -6,10 +6,12 @@ the committed task owner is `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml`.
 
 ## Current Entrypoint
 
-`src/unilab/cli.py` currently exposes `1-ppo`, `2-appo`, `3-sac`, `4-td3`,
-and `flashsac` through the top-level `uv run train` CLI. HIM-PPO is implemented
-by `scripts/train_him_ppo.py`, but it does not yet have a top-level `--algo`
-route.
+The legacy Go2 arm HIM-PPO path is implemented by `scripts/train_him_ppo.py`
+and remains a script-level route. WheelBipe's migrated compact HIM owner is a
+separate flat-task route exposed as
+`uv run train --algo him_ppo --task wheelbipe_v14_flat --sim <backend>` and
+implemented by `scripts/train_custom_ppo.py`. See {doc}`../4-tasks/5-wheelbipe_v14`
+for its history and checkpoint contract.
 
 ## Owner Details
 
@@ -24,5 +26,5 @@ Playback uses the same HIM-PPO implementation entrypoint once a checkpoint is
 available. Keep user-facing PPO examples on the supported top-level CLI shape;
 use the HIM-PPO script path only when debugging that specialized stack.
 
-HIM-PPO is not the default PPO path; use it for the Go2 arm manip-loco owner
-that explicitly selects the HIM-PPO config group.
+Neither path is the default PPO route. Use the legacy path for the Go2 arm
+manip-loco owner and the custom route only for the WheelBipe flat owner.

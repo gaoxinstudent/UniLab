@@ -74,7 +74,28 @@ class BackendAdapter:
         return env_cfg_override
 
     def _apply_env_profile(self, env_cfg_override: dict[str, Any], env_profile: Any) -> None:
-        env_cfg_override.update(self._to_plain_dict(env_profile))
+        """Merge a play-only env profile without dropping owner defaults.
+
+        Play profiles are intentionally partial: they should be able to turn
+        off one reset randomizer or pin one command while retaining the rest of
+        the training owner (including nested dataclass fields).  A shallow
+        ``dict.update`` replaces whole nested mappings and silently restores
+        dataclass defaults for every omitted field, which can change the
+        policy-facing reset/state-machine contract.  Keep the merge at this
+        config owner boundary so all runners receive the same behavior.
+        """
+
+        profile = self._to_plain_dict(env_profile)
+
+        def merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
+            for key, value in overlay.items():
+                current = base.get(key)
+                if isinstance(current, dict) and isinstance(value, dict):
+                    merge(current, value)
+                else:
+                    base[key] = value
+
+        merge(env_cfg_override, profile)
 
     def _resolve_root_relative_path(self, path_value: str) -> str:
         candidate = Path(path_value)

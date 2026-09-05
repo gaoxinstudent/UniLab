@@ -21,6 +21,7 @@ from unilab.training.run import (
     resolve_appo_checkpoint_path,
     resolve_checkpoint_path,
     resolve_hora_stage2_checkpoint_path,
+    resolve_latest_checkpoint_within_runs,
     resolve_offpolicy_checkpoint_path,
     resolve_task_checkpoint_path,
     should_run_playback,
@@ -31,6 +32,25 @@ from unilab.training.seed import (
     apply_training_seed,
     derive_worker_seed,
     resolve_training_seed,
+)
+from unilab.training.sim2sim import (
+    CrossBackendIncompatibleError,
+    hydrate_custom_checkpoint_config,
+)
+from unilab.training.wheelbipe_ros2 import (
+    WHEELBIPE_ROS2_QOS,
+    WheelbipeRos2Controller,
+    WheelbipeRos2ControllerAdapter,
+    WheelbipeRos2ControllerConfig,
+    WheelbipeRos2ControllerState,
+    WheelbipeRos2RobotState,
+    decode_wheelbipe_real_command_packet,
+    decode_wheelbipe_real_state_packet,
+    encode_wheelbipe_real_command_packet,
+    encode_wheelbipe_real_state_packet,
+    wheelbipe_crc16,
+    wheelbipe_ros2_contract_snapshot,
+    wheelbipe_ros2_runtime_available,
 )
 
 __all__ = [
@@ -57,7 +77,23 @@ __all__ = [
     "format_hora_stage2_checkpoint_error",
     "resolve_appo_checkpoint_path",
     "resolve_hora_stage2_checkpoint_path",
+    "resolve_latest_checkpoint_within_runs",
     "resolve_offpolicy_checkpoint_path",
     "resolve_training_seed",
+    "CrossBackendIncompatibleError",
+    "hydrate_custom_checkpoint_config",
     "setup_logger",
+    "WHEELBIPE_ROS2_QOS",
+    "WheelbipeRos2Controller",
+    "WheelbipeRos2ControllerAdapter",
+    "WheelbipeRos2ControllerConfig",
+    "WheelbipeRos2ControllerState",
+    "WheelbipeRos2RobotState",
+    "decode_wheelbipe_real_state_packet",
+    "decode_wheelbipe_real_command_packet",
+    "encode_wheelbipe_real_command_packet",
+    "encode_wheelbipe_real_state_packet",
+    "wheelbipe_crc16",
+    "wheelbipe_ros2_contract_snapshot",
+    "wheelbipe_ros2_runtime_available",
 ]

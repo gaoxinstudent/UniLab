@@ -32,6 +32,7 @@ from unilab.dr.types import (
     ResetRandomizationPayload,
 )
 from unilab.dtype_config import get_global_dtype
+from unilab.terrains.terrain_generator import HeightfieldSurfaceSampler
 
 from ..base import (
     BackendHeightScanner,
@@ -203,11 +204,18 @@ class _MuJoCoSceneContext:
     visual_model_file: str | None = None
     artifacts_dir: str | None = None
     terrain_origins: np.ndarray | None = None
-    terrain_surface_sampler: Any | None = None
+    terrain_surface_sampler: HeightfieldSurfaceSampler | None = None
+    terrain_type_ids: np.ndarray | None = None
+    terrain_type_names: tuple[str, ...] = ()
     cleanup_handle: Any | None = None
 
 
-def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
+def _build_mujoco_scene_context(
+    scene: SceneCfg,
+    *,
+    add_body_sensors: bool = False,
+    base_name: str | None = None,
+) -> _MuJoCoSceneContext:
     from unilab.base.backend.mujoco.xml import (
         materialize_mujoco_hfield_attached_scene,
         materialize_scene_fragments,
@@ -248,6 +256,8 @@ def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
             fragment_files=scene.fragment_files,
             hfield_name=scene.terrain.hfield_name,
             geom_name=scene.terrain.geom_name or "floor",
+            add_body_sensors=add_body_sensors,
+            base_name=base_name,
             return_surface_sampler=True,
         )
     except Exception:
@@ -261,6 +271,8 @@ def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
         artifacts_dir=output_dir.name,
         terrain_origins=terrain_origins,
         terrain_surface_sampler=terrain_surface_sampler,
+        terrain_type_ids=terrain_surface_sampler.terrain_type_ids,
+        terrain_type_names=terrain_surface_sampler.terrain_type_names,
         cleanup_handle=output_dir,
     )
 
@@ -285,7 +297,11 @@ class MuJoCoBackend(SimBackend):
         cpu_ids: Optional[Sequence[int]] = None,
         bench_nsteps: int = 1,
     ):
-        scene_context = _build_mujoco_scene_context(scene)
+        scene_context = _build_mujoco_scene_context(
+            scene,
+            add_body_sensors=add_body_sensors,
+            base_name=base_name,
+        )
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
         self.scene_artifacts_dir = scene_context.artifacts_dir
@@ -301,6 +317,8 @@ class MuJoCoBackend(SimBackend):
                     if self.terrain_surface_sampler is None
                     else self.terrain_surface_sampler.sample_height
                 ),
+                terrain_type_ids=scene_context.terrain_type_ids,
+                terrain_type_names=scene_context.terrain_type_names,
             )
         )
         self._scene_cleanup_handle = scene_context.cleanup_handle
@@ -343,6 +361,8 @@ class MuJoCoBackend(SimBackend):
 
         self._model_variants: tuple[mujoco.MjModel, ...] = (self._model,)
         self._model_assignments = np.zeros((num_envs,), dtype=np.int32)
+        self._init_dof_frictionloss: np.ndarray | None = None
+        self._init_dof_damping: np.ndarray | None = None
         self._pool: BatchEnvPool | None = None
         # State indices.
         self.nq = self._model.nq
@@ -367,6 +387,12 @@ class MuJoCoBackend(SimBackend):
         self._dof_vel_view = self._physics_state[
             :, self._idx_qvel + self._root_qvel_dim : self._idx_qvel + self.nv
         ]
+        # ``mujoco_uni`` returns the final FULLPHYSICS state but does not
+        # expose ``mjData.qacc``. Cache the latest finite difference at the
+        # backend physics boundary so env owners never infer acceleration at
+        # control cadence or inspect pool-private state.
+        self._dof_acc = np.zeros_like(self._dof_vel_view)
+        self._dof_vel_before_step = np.zeros_like(self._dof_vel_view)
         self._qpos_view = self._physics_state[:, self._idx_qpos : self._idx_qpos + self.nq]
         if self._root_qpos_dim == 7:
             self._base_pos_view = self._physics_state[:, self._idx_qpos : self._idx_qpos + 3]
@@ -427,30 +453,89 @@ class MuJoCoBackend(SimBackend):
             self._tracked_angvel_b_all = _get_sensor_view("track_angvel_b", 3)
 
     def _load_base_model(self) -> mujoco.MjModel:
-        if isinstance(self._model_file, mujoco.MjModel):
-            if self.add_body_sensors:
-                raise ValueError("add_body_sensors is not supported for precompiled MuJoCo models")
-            self._tracked_body_ids = []
-            self._valid_bnames = []
-            model = self._model_file
-            self._configure_model(model)
-            return model
+        if self.add_body_sensors and self._base_name is None:
+            raise ValueError("base_name is required when add_body_sensors=True")
 
-        model_path, tmp_paths, tracked_body_ids, valid_bnames = self._prepare_model_xml()
-        try:
-            model = mujoco.MjModel.from_xml_path(model_path)
-        finally:
-            for tmp_path in reversed(tmp_paths):
-                os.remove(tmp_path)
+        if isinstance(self._model_file, mujoco.MjModel):
+            model = self._model_file
+            if self.add_body_sensors:
+                body_pairs = [
+                    (body_id, body_name)
+                    for body_id in range(1, model.nbody)
+                    if (body_name := mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id))
+                    is not None
+                ]
+                tracked_body_ids = [body_id for body_id, _ in body_pairs]
+                valid_bnames = [body_name for _, body_name in body_pairs]
+            else:
+                tracked_body_ids = []
+                valid_bnames = []
+        else:
+            model_path, tmp_paths, tracked_body_ids, valid_bnames = self._prepare_model_xml()
+            try:
+                model = mujoco.MjModel.from_xml_path(model_path)
+            finally:
+                for tmp_path in reversed(tmp_paths):
+                    os.remove(tmp_path)
 
         self._tracked_body_ids = tracked_body_ids
         if self.add_body_sensors:
+            self._validate_tracking_sensor_layout(model, valid_bnames)
             self._body_id_to_tracked_idx = np.full(model.nbody, -1, dtype=int)
             for idx, bid in enumerate(self._tracked_body_ids):
                 self._body_id_to_tracked_idx[bid] = idx
         self._valid_bnames = valid_bnames
         self._configure_model(model)
         return model
+
+    @staticmethod
+    def _validate_tracking_sensor_layout(
+        model: mujoco.MjModel,
+        valid_bnames: list[str],
+    ) -> None:
+        sensor_specs = (
+            ("track_pos_w", 3),
+            ("track_quat_w", 4),
+            ("track_linvel_w", 3),
+            ("track_angvel_w", 3),
+            ("track_pos_b", 3),
+            ("track_quat_b", 4),
+            ("track_linvel_b", 3),
+            ("track_angvel_b", 3),
+        )
+        missing: list[str] = []
+        invalid_layout: list[str] = []
+        for prefix, expected_dim in sensor_specs:
+            sensor_ids = [
+                mujoco.mj_name2id(
+                    model,
+                    mujoco.mjtObj.mjOBJ_SENSOR,
+                    f"{prefix}_{body_name}",
+                )
+                for body_name in valid_bnames
+            ]
+            missing.extend(
+                f"{prefix}_{body_name}"
+                for body_name, sensor_id in zip(valid_bnames, sensor_ids, strict=True)
+                if sensor_id < 0
+            )
+            if any(sensor_id < 0 for sensor_id in sensor_ids):
+                continue
+            addresses = [int(model.sensor_adr[sensor_id]) for sensor_id in sensor_ids]
+            dimensions = [int(model.sensor_dim[sensor_id]) for sensor_id in sensor_ids]
+            if dimensions != [expected_dim] * len(sensor_ids) or any(
+                right - left != expected_dim for left, right in zip(addresses, addresses[1:])
+            ):
+                invalid_layout.append(prefix)
+        if missing:
+            raise ValueError(
+                "MuJoCo model is missing required body tracking sensors: " + ", ".join(missing[:8])
+            )
+        if invalid_layout:
+            raise ValueError(
+                "MuJoCo body tracking sensors are not grouped contiguously: "
+                + ", ".join(invalid_layout)
+            )
 
     def _prepare_model_xml(self) -> tuple[str, list[str], list[int], list[str]]:
         from unilab.base.backend.mujoco.xml import (
@@ -490,7 +575,15 @@ class MuJoCoBackend(SimBackend):
     def _resolve_push_body_force_slice(self, body_id: int) -> slice:
         if body_id < 0:
             return slice(0, 0)
+        if body_id >= self._model.nbody:
+            raise ValueError(f"Body id {body_id} not found in MuJoCo model")
         start = 6 * body_id
+        return slice(start, start + 3)
+
+    def _resolve_body_torque_slice(self, body_id: int) -> slice:
+        if body_id < 0 or body_id >= self._model.nbody:
+            raise ValueError(f"Body id {body_id} not found in MuJoCo model")
+        start = 6 * body_id + 3
         return slice(start, start + 3)
 
     def _sample_push_force(self, force_range: Sequence[float] | np.ndarray) -> np.ndarray:
@@ -621,6 +714,19 @@ class MuJoCoBackend(SimBackend):
         if self._cpu_ids is not None:
             pool_kwargs["cpu_ids"] = list(self._cpu_ids)
         pool = BatchEnvPool(self._current_model_sequence(), **pool_kwargs)
+        frictionloss = self._init_dof_frictionloss
+        damping = self._init_dof_damping
+        if frictionloss is not None or damping is not None:
+            for env_index, model in enumerate(pool.get_all_models()):
+                if frictionloss is not None:
+                    model.dof_frictionloss[:] = frictionloss[env_index]
+                if damping is not None:
+                    model.dof_damping[:] = damping[env_index]
+            # Playback/diagnostic model zero follows the first physical env.
+            if frictionloss is not None:
+                self._model.dof_frictionloss[:] = frictionloss[0]
+            if damping is not None:
+                self._model.dof_damping[:] = damping[0]
         sensor_init = pool.forward(self._physics_state)
         self._sensor_data[:] = sensor_init.astype(self._np_dtype)
         return pool
@@ -722,6 +828,12 @@ class MuJoCoBackend(SimBackend):
             ids.append(bid)
         return np.array(ids, dtype=np.int32)
 
+    def get_body_names(self) -> tuple[str, ...]:
+        return tuple(
+            mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+            for body_id in range(self._model.nbody)
+        )
+
     def get_geom_id(self, name: str) -> int:
         geom_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_GEOM, name)
         if geom_id < 0:
@@ -792,8 +904,42 @@ class MuJoCoBackend(SimBackend):
     def get_body_ipos(self) -> np.ndarray:
         return np.asarray(self._model.body_ipos, dtype=np.float64).copy()
 
+    def get_body_contact_force_norm(self, body_ids: np.ndarray) -> np.ndarray:
+        """Read vectorized MuJoCo touch sensors declared for selected bodies."""
+
+        ids = np.asarray(body_ids, dtype=np.intp).reshape(-1)
+        if np.any(ids < 0) or np.any(ids >= int(self._model.nbody)):
+            raise ValueError(f"body_ids are outside [0, {int(self._model.nbody) - 1}]")
+        if ids.size == 0:
+            return np.zeros((self._num_envs, 0), dtype=self._np_dtype)
+
+        columns: list[np.ndarray] = []
+        missing: list[str] = []
+        for body_id in ids:
+            body_name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, int(body_id))
+            if not body_name:
+                missing.append(f"#{int(body_id)}")
+                continue
+            sensor_name = f"contact_force_{body_name}"
+            sensor = self._sensor_views.get(sensor_name)
+            if sensor is None or sensor.shape[1] != 1:
+                missing.append(body_name)
+                continue
+            columns.append(np.maximum(sensor[:, 0], 0.0))
+        if missing:
+            raise NotImplementedError(
+                "MuJoCo model is missing scalar touch sensors for bodies: " + ", ".join(missing)
+            )
+        return np.stack(columns, axis=1).astype(self._np_dtype, copy=False)
+
     def get_dof_armature(self) -> np.ndarray:
         return np.asarray(self._model.dof_armature, dtype=np.float64).copy()
+
+    def get_dof_frictionloss(self) -> np.ndarray:
+        return np.asarray(self._model.dof_frictionloss, dtype=np.float64).copy()
+
+    def get_dof_damping(self) -> np.ndarray:
+        return np.asarray(self._model.dof_damping, dtype=np.float64).copy()
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         return self.get_body_ids(names)
@@ -848,6 +994,7 @@ class MuJoCoBackend(SimBackend):
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
+        np.copyto(self._dof_vel_before_step, self._dof_vel_view)
         control_traj = np.broadcast_to(ctrl[:, None, :], (self._num_envs, nsteps, ctrl.shape[-1]))
         control_spec = int(mujoco.mjtState.mjSTATE_CTRL)
         if np.any(self._pending_xfrc_applied):
@@ -872,6 +1019,8 @@ class MuJoCoBackend(SimBackend):
         if control_spec & int(mujoco.mjtState.mjSTATE_XFRC_APPLIED):
             self._pending_xfrc_applied.fill(0.0)
         self._physics_state[:] = state_np.astype(self._np_dtype)
+        np.subtract(self._dof_vel_view, self._dof_vel_before_step, out=self._dof_acc)
+        self._dof_acc /= float(self._sim_dt) * int(nsteps)
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -906,6 +1055,7 @@ class MuJoCoBackend(SimBackend):
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
+            np.copyto(self._dof_vel_before_step, self._dof_vel_view)
             state_np, sensor_np = self._pool.step(  # type: ignore[union-attr]
                 self._physics_state,
                 nstep=1,
@@ -916,6 +1066,8 @@ class MuJoCoBackend(SimBackend):
                 post_step_forward_sensor=self._post_step_forward_sensor,
             )
             self._physics_state[:] = state_np.astype(self._np_dtype)
+            np.subtract(self._dof_vel_view, self._dof_vel_before_step, out=self._dof_acc)
+            self._dof_acc /= float(self._sim_dt)
             physics_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
@@ -981,6 +1133,12 @@ class MuJoCoBackend(SimBackend):
         t0 = time.perf_counter()
         self._physics_state[env_indices] = state_out.astype(self._np_dtype)
         self._sensor_data[env_indices] = sensor_np.astype(self._np_dtype)
+        # A reset starts a new episode and must not inherit an interval force
+        # or torque staged before the reset.  Clear only the selected rows so
+        # other vectorized environments preserve their pending perturbation.
+        self._pending_xfrc_applied[np.asarray(env_indices, dtype=np.intp)] = 0.0
+        self._dof_acc[env_indices] = 0.0
+        self._dof_vel_before_step[env_indices] = self._dof_vel_view[env_indices]
         timing["set_state_state_scatter_ms"] = (time.perf_counter() - t0) * 1000.0
 
         outer_total_ms = (time.perf_counter() - outer_t0) * 1000.0
@@ -1010,7 +1168,9 @@ class MuJoCoBackend(SimBackend):
                 }
             ),
             supports_interval_push=self._push_body_id >= 0,
+            supports_interval_body_velocity_delta=self._base_body_id >= 0,
             supports_interval_body_force=True,
+            supports_interval_body_torque=True,
         )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
@@ -1018,9 +1178,36 @@ class MuJoCoBackend(SimBackend):
             return
         if self._pool is not None:
             raise RuntimeError("MuJoCo init randomization must run before pool materialization")
-        model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
-        model_variants = self._compile_model_variants(plan.model_variants)
-        self._apply_model_assignments(model_variants, model_assignments)
+        if plan.model_variants:
+            model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
+            model_variants = self._compile_model_variants(plan.model_variants)
+            self._apply_model_assignments(model_variants, model_assignments)
+        elif np.asarray(plan.model_assignments).size:
+            raise ValueError("model_assignments requires at least one model variant")
+        self._init_dof_frictionloss = self._validate_init_dof_table(
+            plan.dof_frictionloss,
+            name="dof_frictionloss",
+        )
+        self._init_dof_damping = self._validate_init_dof_table(
+            plan.dof_damping,
+            name="dof_damping",
+        )
+
+    def _validate_init_dof_table(
+        self,
+        values: np.ndarray | None,
+        *,
+        name: str,
+    ) -> np.ndarray | None:
+        if values is None:
+            return None
+        table = np.asarray(values, dtype=np.float64)
+        expected = (self._num_envs, self.nv)
+        if table.shape != expected:
+            raise ValueError(f"{name} must have shape {expected}, got {table.shape}")
+        if not np.all(np.isfinite(table)) or np.any(table < 0.0):
+            raise ValueError(f"{name} must contain finite non-negative values")
+        return table.copy()
 
     def materialize(self) -> None:
         if self._pool is not None:
@@ -1054,6 +1241,10 @@ class MuJoCoBackend(SimBackend):
             if plan.body_ids is None:
                 raise ValueError("Interval body-force perturbation requires body_ids")
             self.apply_body_force(plan.body_ids, plan.body_force)
+        if plan.body_torque is not None:
+            if plan.body_ids is None:
+                raise ValueError("Interval body-torque perturbation requires body_ids")
+            self.apply_body_torque(plan.body_ids, plan.body_torque)
         if plan.body_linear_velocity_delta is not None:
             if plan.body_ids is None:
                 raise ValueError("Interval body-velocity perturbation requires body_ids")
@@ -1064,14 +1255,18 @@ class MuJoCoBackend(SimBackend):
         body_ids: np.ndarray,
         velocity_delta: np.ndarray,
     ) -> None:
-        """Apply a world-frame linear-velocity delta to specific bodies.
+        """Apply a world-frame velocity delta to the floating root body."""
 
-        Backend-internal hook for ``apply_interval_randomization``; it is not
-        part of the public ``SimBackend`` surface.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support interval body velocity perturbation"
-        )
+        ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+        delta = np.asarray(velocity_delta, dtype=self._np_dtype)
+        expected = (self._num_envs, ids.size, 3)
+        if delta.shape != expected:
+            raise ValueError(f"body velocity delta must have shape {expected}, got {delta.shape}")
+        if ids.shape != (1,) or int(ids[0]) != self._base_body_id:
+            raise NotImplementedError(
+                "MuJoCo interval body velocity supports only the floating base body"
+            )
+        self._base_lin_vel_view[:] += delta[:, 0, :]
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         self._pending_xfrc_applied.fill(0.0)
@@ -1099,8 +1294,27 @@ class MuJoCoBackend(SimBackend):
         if force_np.shape != expected_shape:
             raise ValueError(f"body force must have shape {expected_shape}, got {force_np.shape}")
         for body_offset, body_id in enumerate(body_ids_np):
+            if int(body_id) < 0:
+                raise ValueError(f"Body id {int(body_id)} not found in MuJoCo model")
             self._pending_xfrc_applied[:, self._resolve_push_body_force_slice(int(body_id))] += (
                 force_np[:, body_offset, :]
+            )
+
+    def apply_body_torque(
+        self,
+        body_ids: np.ndarray,
+        torque: np.ndarray,
+    ) -> None:
+        """Accumulate one external world-frame torque per target body."""
+
+        body_ids_np = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+        torque_np = np.asarray(torque, dtype=np.float64)
+        expected_shape = (self._num_envs, body_ids_np.size, 3)
+        if torque_np.shape != expected_shape:
+            raise ValueError(f"body torque must have shape {expected_shape}, got {torque_np.shape}")
+        for body_offset, body_id in enumerate(body_ids_np):
+            self._pending_xfrc_applied[:, self._resolve_body_torque_slice(int(body_id))] += (
+                torque_np[:, body_offset, :]
             )
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
@@ -1198,6 +1412,9 @@ class MuJoCoBackend(SimBackend):
 
     def get_dof_vel(self) -> np.ndarray:
         return self._dof_vel_view
+
+    def get_dof_acc(self) -> np.ndarray:
+        return self._dof_acc
 
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                      #

@@ -43,6 +43,14 @@ def _backend_adapter(cfg: DictConfig) -> BackendAdapter:
     )
 
 
+def _close_env(env: object) -> None:
+    """Close an environment through its public lifecycle hook when present."""
+
+    close = getattr(env, "close", None)
+    if callable(close):
+        close()
+
+
 def _get_log_root(cfg: DictConfig) -> str:
     return str(get_log_root(ROOT_DIR, cfg))
 
@@ -108,7 +116,10 @@ def play_him_ppo(cfg: DictConfig, device: str) -> str | None:
 
     print(f"Loading latest model: {load_path}")
     _ckpt_keys = set(torch.load(load_path, map_location="cpu", weights_only=True).keys())
-    if "actor_state_dict" not in _ckpt_keys:
+    # UniLab checkpoints use ``actor_state_dict``; upstream WheelBipe HIM
+    # checkpoints use ``model_state_dict``.  The runner accepts both, so play
+    # must not reject a valid source artifact before construction.
+    if not ({"actor_state_dict", "model_state_dict"} & _ckpt_keys):
         print(
             f"Checkpoint at {load_path} is not a HIM-PPO checkpoint "
             f"(found keys: {_ckpt_keys}). Aborting play."
@@ -126,52 +137,55 @@ def play_him_ppo(cfg: DictConfig, device: str) -> str | None:
     )
     env_cfg_override = cast(dict[str, Any], _backend_adapter(cfg).build_play_env_cfg_override())
     env = create_env(cfg, num_envs=cfg.training.play_env_num, env_cfg_override=env_cfg_override)
-    from unilab.training.rsl_rl import RslRlVecEnvWrapper
+    try:
+        from unilab.training.rsl_rl import RslRlVecEnvWrapper
 
-    wrapped_env = RslRlVecEnvWrapper(env, device=device)
-    runner = HIMOnPolicyRunner(wrapped_env, rl_cfg, log_dir=None, device=device)
-    with policy_load_dim_guard(
-        env_obs_dim=getattr(wrapped_env, "num_obs", None),
-        env_action_dim=getattr(wrapped_env, "num_actions", None),
-        algo_name="him_ppo",
-    ):
-        runner.load(str(load_path))
-    policy = runner.get_inference_policy(device=device)
-    if EXPORT_POLICY:
-        runner.export_policy_to_onnx(path=str(load_path_dir))
-        runner.export_policy_to_jit(path=str(load_path_dir))
+        wrapped_env = RslRlVecEnvWrapper(env, device=device)
+        runner = HIMOnPolicyRunner(wrapped_env, rl_cfg, log_dir=None, device=device)
+        with policy_load_dim_guard(
+            env_obs_dim=getattr(wrapped_env, "num_obs", None),
+            env_action_dim=getattr(wrapped_env, "num_actions", None),
+            algo_name="him_ppo",
+        ):
+            runner.load(str(load_path))
+        policy = runner.get_inference_policy(device=device)
+        if EXPORT_POLICY:
+            runner.export_policy_to_onnx(path=str(load_path_dir))
+            runner.export_policy_to_jit(path=str(load_path_dir))
 
-    output_video = Path(load_path_dir) / "play_video.mp4"
-    print(f"Rendering video to {output_video}...")
-    print("Collecting physics states...")
-    with torch.inference_mode():
-        render_play_mode(
-            env,
-            sim_backend=cfg.training.sim_backend,
-            render_spacing=float(
-                getattr(cfg.training, "render_spacing", getattr(env.cfg, "render_spacing", 1.0))
-            ),
-            num_steps=cfg.training.play_steps,
-            output_video=output_video,
-            initialize=lambda: wrapped_env.reset()[0]["actor"],
-            step=lambda obs: wrapped_env.step(policy(obs))[0]["actor"],
-            camera_kwargs={
-                "cam_distance": cfg.training.cam_distance,
-                "cam_elevation": cfg.training.cam_elevation,
-                "cam_azimuth": cfg.training.cam_azimuth,
-                "cam_lookat": getattr(cfg.training, "cam_lookat", None),
-                "cam_tracking": getattr(cfg.training, "cam_tracking", False),
-                "cam_tracking_env_idx": getattr(cfg.training, "cam_tracking_env_idx", 0),
-                "cam_tracking_extra_envs": getattr(cfg.training, "cam_tracking_extra_envs", 2),
-            },
-            extra_data_getter=(
-                (lambda: getattr(env, "curr_ee_goal_world", None))
-                if hasattr(env, "curr_ee_goal_world")
-                else None
-            ),
-        )
-    print("Done.")
-    return str(output_video)
+        output_video = Path(load_path_dir) / "play_video.mp4"
+        print(f"Rendering video to {output_video}...")
+        print("Collecting physics states...")
+        with torch.inference_mode():
+            render_play_mode(
+                env,
+                sim_backend=cfg.training.sim_backend,
+                render_spacing=float(
+                    getattr(cfg.training, "render_spacing", getattr(env.cfg, "render_spacing", 1.0))
+                ),
+                num_steps=cfg.training.play_steps,
+                output_video=output_video,
+                initialize=lambda: wrapped_env.reset()[0]["actor"],
+                step=lambda obs: wrapped_env.step(policy(obs))[0]["actor"],
+                camera_kwargs={
+                    "cam_distance": cfg.training.cam_distance,
+                    "cam_elevation": cfg.training.cam_elevation,
+                    "cam_azimuth": cfg.training.cam_azimuth,
+                    "cam_lookat": getattr(cfg.training, "cam_lookat", None),
+                    "cam_tracking": getattr(cfg.training, "cam_tracking", False),
+                    "cam_tracking_env_idx": getattr(cfg.training, "cam_tracking_env_idx", 0),
+                    "cam_tracking_extra_envs": getattr(cfg.training, "cam_tracking_extra_envs", 2),
+                },
+                extra_data_getter=(
+                    (lambda: getattr(env, "curr_ee_goal_world", None))
+                    if hasattr(env, "curr_ee_goal_world")
+                    else None
+                ),
+            )
+        print("Done.")
+        return str(output_video)
+    finally:
+        _close_env(env)
 
 
 @hydra.main(version_base="1.3", config_path="../conf/ppo_him", config_name="config")
@@ -221,6 +235,7 @@ def main(cfg: DictConfig) -> None:
         )
         tracker.start()
 
+    env: Any | None = None
     try:
         if not cfg.training.play_only:
             env = create_env(cfg, num_envs=cfg.algo.num_envs, env_cfg_override=env_cfg_override)
@@ -281,15 +296,22 @@ def main(cfg: DictConfig) -> None:
             }
             if tracker is not None:
                 tracker.update_summary(train_summary)
-            env.close()
 
         if cfg.training.play_only or not cfg.training.no_play:
             play_video_path = play_him_ppo(cfg, device)
             if tracker is not None:
                 tracker.log_video(play_video_path)
     finally:
-        if tracker is not None:
-            tracker.finish()
+        # Keep tracker finalization independent from environment teardown.  A
+        # backend close failure should remain visible, but must not strand the
+        # experiment tracker in an open state (and a training exception must
+        # never be replaced by a skipped tracker cleanup).
+        try:
+            if env is not None:
+                _close_env(env)
+        finally:
+            if tracker is not None:
+                tracker.finish()
 
 
 if __name__ == "__main__":

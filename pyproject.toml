@@ -115,7 +115,9 @@ required-environments = [
 line-length = 100
 target-version = "py310"
 src = ["src"]
-extend-exclude = [".history"]
+# The native WheelBipe ROS 2 bundle is a byte-for-byte, digest-pinned upstream
+# source snapshot.  Formatting it would invalidate its audited manifest.
+extend-exclude = [".history", "deployment/ros2/wheelbipe_v14_native"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]

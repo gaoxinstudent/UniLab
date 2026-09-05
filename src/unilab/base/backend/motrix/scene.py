@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal, overload
 import numpy as np
 
 from unilab.base.scene import resolve_scene_fragment_path
-from unilab.terrains.terrain_generator import TerrainGeneratorCfg
+from unilab.terrains.terrain_generator import HeightfieldSurfaceSampler, TerrainGeneratorCfg
 
 if TYPE_CHECKING:
     from motrixsim import SceneModel
@@ -152,8 +152,16 @@ def materialize_motrix_scene(
     fragment_files: Sequence[str] = (),
     add_body_sensors: bool = False,
     base_name: str = "base",
+    disable_equality: bool = False,
 ) -> SceneModel:
-    """Build a MotrixSim model through MSD scene composition."""
+    """Build a MotrixSim model through MSD scene composition.
+
+    ``disable_equality`` is deliberately an explicit cold-path option.  A
+    small number of MJCF mechanisms use MuJoCo ``connect`` constraints whose
+    numerical formulation is not stable in every MotrixSim release; callers
+    that select this compatibility profile still retain the same bodies,
+    joints, actuators, and sensors while opting out of those constraints.
+    """
     import motrixsim.msd as msd
 
     model_path = Path(model_file).resolve()
@@ -167,6 +175,8 @@ def materialize_motrix_scene(
             _attach_motrix_scene_fragment(world, fragment_path)
         if add_body_sensors:
             add_motrix_tracking_frame_sensors(world, base_name=base_name)
+        if disable_equality:
+            world.simulate_option.disable_equality = True
         return msd.build(world)
     finally:
         _cleanup_temp_xml(robot_path, model_path)
@@ -182,6 +192,7 @@ def materialize_motrix_hfield_attached_scene(
     geom_name: str = "floor",
     add_body_sensors: bool = False,
     base_name: str = "base",
+    disable_equality: bool = False,
     return_surface_sampler: Literal[False] = False,
 ) -> tuple[SceneModel, np.ndarray]: ...
 
@@ -196,8 +207,9 @@ def materialize_motrix_hfield_attached_scene(
     geom_name: str = "floor",
     add_body_sensors: bool = False,
     base_name: str = "base",
+    disable_equality: bool = False,
     return_surface_sampler: Literal[True],
-) -> tuple[SceneModel, np.ndarray, object]: ...
+) -> tuple[SceneModel, np.ndarray, HeightfieldSurfaceSampler]: ...
 
 
 def materialize_motrix_hfield_attached_scene(
@@ -209,8 +221,9 @@ def materialize_motrix_hfield_attached_scene(
     geom_name: str = "floor",
     add_body_sensors: bool = False,
     base_name: str = "base",
+    disable_equality: bool = False,
     return_surface_sampler: bool = False,
-) -> tuple[SceneModel, np.ndarray] | tuple[SceneModel, np.ndarray, object]:
+) -> tuple[SceneModel, np.ndarray] | tuple[SceneModel, np.ndarray, HeightfieldSurfaceSampler]:
     """Build a MotrixSim model with generated hfield terrain and attached robot."""
     import motrixsim.msd as msd
 
@@ -261,6 +274,8 @@ def materialize_motrix_hfield_attached_scene(
         _attach_motrix_scene_fragment(world, fragment_path)
     if add_body_sensors:
         add_motrix_tracking_frame_sensors(world, base_name=base_name)
+    if disable_equality:
+        world.simulate_option.disable_equality = True
 
     if return_surface_sampler:
         return msd.build(world), generated.terrain_origins, generated.surface_sampler()

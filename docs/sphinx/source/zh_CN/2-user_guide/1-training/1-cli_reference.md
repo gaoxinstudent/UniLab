@@ -12,6 +12,9 @@ Hydra 组合。
 | SAC | `uv run train --algo sac --task <task> --sim <backend>` | `scripts/train_offpolicy.py` |
 | TD3 | `uv run train --algo td3 --task <task> --sim <backend>` | `scripts/train_offpolicy.py` |
 | FlashSAC | `uv run train --algo flashsac --task <task> --sim <backend>` | `scripts/train_offpolicy.py` |
+| HIM-PPO（WheelBipe custom） | `uv run train --algo him_ppo --task wheelbipe_v14_flat --sim <backend>` | `scripts/train_custom_ppo.py` |
+| DreamWaQ（WheelBipe custom） | `uv run train --algo dreamwaq --task wheelbipe_v14_flat --sim <backend>` | `scripts/train_custom_ppo.py` |
+| NP3O + Barlow（WheelBipe custom） | `uv run train --algo np3o --task wheelbipe_v14_flat --sim <backend>` | `scripts/train_custom_ppo.py` |
 
 示例：
 
@@ -20,11 +23,27 @@ uv run train --algo ppo --task go2_joystick_flat --sim mujoco
 uv run train --algo appo --task g1_motion_tracking --sim motrix training.no_play=true
 uv run train --algo sac --task g1_walk_flat --sim mujoco training.no_play=true
 uv run train --algo flashsac --task go2_joystick_flat --sim mujoco
+uv run train --algo him_ppo --task wheelbipe_v14_flat --sim mujoco training.no_play=true
+```
+
+对于迁移的 WheelBipe 历史策略，`--profile` 选择命名的 Hydra profile，同时保持
+backend owner YAML 不变。source profile 提供长时间训练预算和接近上游的网络超参，
+但不声称 Isaac 动力学或资产等价：
+
+```bash
+uv run train --algo him_ppo --task wheelbipe_v14_flat --sim mujoco \
+  --profile source_him_long training.device=cpu
+uv run train --algo dreamwaq --task wheelbipe_v14_flat --sim motrix \
+  --profile source_dreamwaq_long training.device=cpu
+uv run train --algo np3o --task wheelbipe_v14_flat --sim mujoco \
+  --profile source_np3o_barlow_long training.device=cpu
 ```
 
 CLI 会根据 `--algo`、`--task`、`--sim` 以及可选的 `--profile` 构造出 owner YAML
 路径。定义路由的取值必须使用 CLI flag；命令之后的 Hydra override 用于设置诸如
-`algo.max_iterations`、`algo.num_envs` 和 `training.no_play` 等字段。
+`algo.max_iterations`、`algo.num_envs`、`training.device` 和 `training.no_play` 等字段。
+对普通算法，`--profile` 仍表示 owner YAML 后缀（例如
+`sharpa_inhand/mujoco_hora`）；上面三个 custom WheelBipe 名称则表示 Hydra profile group。
 
 ### 各环境的调用方式
 
@@ -77,7 +96,7 @@ source scripts/completions/unilab.zsh
 ## 评估
 
 `uv run eval` 会设置 `training.play_only=true`，并可选地将 `--load-run` 映射到
-`algo.load_run`。
+`algo.load_run`；其值可为 `-1`、run 目录名或 run/checkpoint 的绝对路径。
 
 ```bash
 uv run eval --algo ppo --task go2_joystick_flat --sim mujoco --load-run -1
@@ -86,6 +105,10 @@ uv run eval --algo ppo --task go2_joystick_flat --sim motrix --load-run -1 \
 ```
 
 支持的渲染模式为 `auto`、`interactive`、`record` 和 `none`。
+
+WheelBipe custom 路由使用专用的历史策略 runner，目前仅支持 flat。其 `eval` 路径接受
+与 PPO 相同的 `--load-run` / Hydra checkpoint 选择方式，并在回放前校验算法/variant
+contract；无界面数值评估请使用 `--render-mode none`。
 
 ## 演示
 

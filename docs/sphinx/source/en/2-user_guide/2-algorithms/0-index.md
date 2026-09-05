@@ -12,6 +12,9 @@ lives, and which command shape selects it. For general flags, see
 | TD3 | off-policy | `scripts/train_offpolicy.py` | `conf/offpolicy/algo/td3.yaml` |
 | FlashSAC | off-policy | `scripts/train_offpolicy.py` | `conf/offpolicy/algo/flashsac.yaml` |
 | HIM-PPO | height-estimator PPO path | `scripts/train_him_ppo.py` | `conf/ppo_him/config.yaml` |
+| HIM-PPO (WheelBipe custom) | compact history PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
+| DreamWaQ (WheelBipe custom) | compact history PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
+| NP3O + Barlow (WheelBipe custom) | constrained compact PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
 | HORA | teacher/student distillation path | `scripts/train_hora_distill.py` | `conf/hora_distill/config.yaml` |
 
 ```{toctree}

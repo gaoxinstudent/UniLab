@@ -1,0 +1,257 @@
+defaults:
+  - _self_
+  # Keep direct invocation on the explicitly source-profiled compact HIM owner.
+  # This records the compact dimensions/timing contract only; it does not
+  # claim full source dynamics or asset parity.  The CLI
+  # replaces this group with the DreamWaQ/NP3O owner when requested.
+  - task: wheelbipe_v14_flat_him/mujoco
+  # Optional source-budget profile.  The default remains null so existing
+  # compact commands keep their bounded migration settings.
+  - optional profile: null
+
+algo:
+  # Shared log namespace and checkpoint selectors keep custom playback on the
+  # same resolver contract as the other UniLab entrypoints.
+  algo_log_name: custom_ppo
+  load_run: "-1"
+  checkpoint: -1
+  algorithm_name: him
+  seed: 1
+  num_envs: 128
+  num_steps_per_env: 24
+  max_iterations: 3000
+  save_interval: 300
+  num_actor_history: 5
+  # Bounded/legacy custom routes preserve their existing repeat-current warm
+  # start.  Exact source profiles override this with source_zero_current.
+  history_reset_mode: repeat
+  num_estimate: 4
+  latent_dim: 16
+  # Owner task files override this for NP3O; the runner validates the final
+  # composed value and rejects a zero-cost NP3O configuration.
+  num_costs: 0
+  policy:
+    actor_hidden_dims: [256, 128, 64]
+    critic_hidden_dims: [256, 128, 64]
+    init_noise_std: 1.0
+    activation: elu
+  estimator:
+    enc_hidden_dims: [128, 64, 16]
+    tar_hidden_dims: [128, 64]
+    velocity_target_start: 28
+    # The source HIM target network consumes the observable body slice
+    # (gyro..actions) and appends the privileged velocity/height tail.  In the
+    # compact 32D critic this starts after command[3] + height[1].
+    target_obs_start: 4
+  algorithm:
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 3.0e-4
+    entropy_coef: 1.0e-3
+    value_loss_coef: 1.0
+    use_clipped_value_loss: true
+    cost_value_loss_coef: 1.0
+    cost_viol_loss_coef: 1.0
+    cost_limits: [0.0, 0.0, 0.0, 0.0, 0.0]
+    # Source NP3O initializes five channel multipliers and d-values.  The
+    # runner ignores these fields for HIM/DreamWaQ, but retaining them in the
+    # shared schema keeps NP3O's constraint contract config-first.
+    cost_d_values: [0.0, 0.0, 0.0, 0.0, 0.0]
+    cost_k_initial: [1.0, 1.0, 1.0, 0.5, 0.5]
+    gamma: 0.99
+    lam: 0.95
+    clip_param: 0.2
+    max_grad_norm: 1.0
+    schedule: fixed
+    desired_kl: 0.01
+
+training:
+  task_name: ???
+  sim_backend: mujoco
+  # Explicit torch device (cpu, cuda[:N], mps, or xpu); null auto-detects.
+  device: null
+  # Playback/resume may hydrate architecture-only fields from the selected
+  # run_config.json.  Disable to require the target owner/profile to match
+  # explicitly (mismatches then fail closed in the sim2sim resolver).
+  auto_load_checkpoint_config: true
+  play_only: false
+  no_play: true
+  log_root: null
+  num_timesteps: null
+  play_render_mode: none
+  play_env_num: 1
+  play_steps: 200
+  render_spacing: 1.0
+  cam_distance: 6.0
+  cam_elevation: -20.0
+  cam_azimuth: 90.0
+  cam_lookat: null
+  cam_tracking: false
+  cam_tracking_env_idx: 0
+  cam_tracking_extra_envs: 2
+
+env:
+  num_costs: 0
+  # DreamWaQ/HIM/NP3O source envs all inherit WheelbipeV14FlatEnvCfg.  Keep
+  # that shared environment identity here; task owners below only specialize
+  # compact observation/history and algorithm fields.
+  training_semantics: source_v14
+  sampling_mode: start
+  ctrl_mode_obs_enabled: false
+  ctrl_mode_obs_dim: 0
+  noise_config:
+    level: 1.0
+    scale_joint_angle: 0.025
+    scale_joint_vel: 0.5
+    scale_gyro: 0.25
+    scale_gravity: 0.05
+    scale_wheel_vel: 1.0
+  gimbal:
+    enabled: true
+    control_mode: velocity
+  commands:
+    vel_limit:
+      - [-2.7, 0.0, -6.283185307179586]
+      - [2.7, 0.0, 6.283185307179586]
+    resampling_time: 5.0
+    resampling_time_range: [5.0, 15.0]
+    heading_command: true
+    heading_range: [-3.141592653589793, 3.141592653589793]
+    heading_control_stiffness: 5.0
+    rel_standing_envs: 0.1
+    rel_heading_envs: 0.5
+    source_curriculum_enabled: true
+    special_mode_min_episode_time: 5.0
+    special_mode_start_iterations: [3000, 4000, 2000]
+    special_mode_probabilities: [0.15, 0.15, 0.30]
+    training_progress_steps_per_iteration: 24
+  height_range: [0.20, 0.42]
+  termination_duration_enabled: true
+  termination_duration_steps: 20
+  termination_roll_deg: 40.0
+  termination_pitch_deg: 40.0
+  domain_rand:
+    randomize_kp: true
+    kp_multiplier_range: [0.75, 1.25]
+    randomize_kd: true
+    kd_multiplier_range: [0.75, 1.25]
+    randomize_base_mass: false
+    randomize_body_mass: true
+    base_mass_multiplier_range: [0.9, 1.3]
+    leg_mass_multiplier_range: [0.9, 1.1]
+    wheel_mass_multiplier_range: [0.9, 1.1]
+    random_com: true
+    com_offset_x: [-0.04, 0.04]
+    com_offset_y: [-0.02, 0.02]
+    com_offset_z: [-0.02, 0.02]
+    randomize_body_material: true
+    base_static_friction_range: [0.01, 0.1]
+    base_dynamic_friction_range: [0.01, 0.1]
+    base_restitution_range: [0.02, 0.2]
+    wheel_static_friction_range: [0.5, 1.2]
+    wheel_dynamic_friction_range: [0.4, 1.0]
+    wheel_restitution_range: [0.02, 0.2]
+    material_num_buckets: 64
+    material_make_consistent: true
+    source_guide_material_requested: true
+    source_guide_material_missing_target_status: not_applicable_missing_target
+    guide_static_friction_range: [0.1, 0.7]
+    guide_dynamic_friction_range: [0.1, 0.7]
+    guide_restitution_range: [0.01, 0.1]
+    guide_material_num_buckets: 8
+    joint_friction:
+      enabled: true
+      front_static_range: [0.25, 1.0]
+      front_dynamic_range: [0.25, 1.0]
+      front_viscous_range: [0.05, 0.2]
+      rear_static_range: [0.25, 1.0]
+      rear_dynamic_range: [0.25, 1.0]
+      rear_viscous_range: [0.05, 0.2]
+      wheel_static_range: [0.05, 0.25]
+      wheel_viscous_range: [0.0, 0.01]
+      inactive_static_range: [0.05, 0.1]
+      inactive_viscous_range: [0.01, 0.025]
+      gimbal_static_range: [0.002, 0.01]
+      gimbal_viscous_range: [0.002, 0.01]
+      coulomb_backend_mode: static_to_frictionloss_dynamic_collapsed
+      viscous_backend_mode: dof_damping
+    spring_damping_multiplier_range: [0.5, 1.5]
+    leg_effort_multiplier_range: [0.8, 1.1]
+    wheel_effort_multiplier_range: [0.9, 1.1]
+    control_randomization_min_steps: 720
+    source_passive_gain_conversion_status: unsupported_unmaterialized_actuator
+    randomize_init_yaw: true
+    init_roll_range: [-0.15, 0.15]
+    init_pitch_range: [-0.15, 0.15]
+    init_yaw_range: [-3.14, 3.14]
+    use_leg_random_start: true
+    use_predefined_leg_random_start: true
+    leg_length_range: [0.13, 0.32]
+    leg_angle_range: [-1.5707963267948966, 2.356194490192345]
+    wheel_angle_range: [-6.283185307179586, 6.283185307179586]
+    leg_joint_vel_range: [-1.5707963267948966, 1.5707963267948966]
+    wheel_joint_vel_range: [-50.0, 50.0]
+    predefined_ground_probability: 0.5
+    predefined_ground_root_height: 0.25
+    predefined_ground_zero_torque_seconds: 0.2
+    source_push_velocity_enabled: true
+    source_push_interval_range: [5.0, 10.0]
+    source_push_velocity_range:
+      - [-0.25, 0.25]
+      - [-0.25, 0.25]
+      - [0.0, 0.0]
+    source_external_force_enabled: true
+    source_external_force_interval_range: [5.0, 10.0]
+    source_external_force_range: [-10.0, 10.0]
+    source_external_torque_range: [-1.0, 1.0]
+    randomize_gravity: false
+    randomize_ground_friction: false
+    push_robots: false
+
+reward:
+  scales:
+    termination: -200.0
+    leg_joint_acc: -5.0e-7
+    leg_joint_vel: -5.0e-3
+    leg_joint_pair_pos_diff: 0.0
+    joint_torque: -1.0e-4
+    wheel_acc: -1.0e-8
+    wheel_vel: -1.0e-5
+    wheel_power: -1.0e-4
+    wheel_air_spin: 0.0
+    lin_vel_z: -0.5
+    ang_vel_xy: -0.05
+    action_smoothness_leg: -0.05
+    action_rate: -0.01
+    action_smoothness_wheel: -0.01
+    flat_orientation_y: 0.0
+    flat_orientation_y_v: -2.0
+    flat_orientation_y_exp: 1.0
+    flat_orientation_x: 0.0
+    flat_orientation_x_v: -2.0
+    flat_orientation_x_exp: 1.0
+    track_lin_vel_xy: 1.0
+    track_lin_vel_xy_tight: 0.0
+    track_lin_vel_xy_square: -0.1
+    track_ang_vel_z: 1.0
+    track_ang_vel_z_square: -0.1
+    stand_still_lin_vel: -2.0
+    stand_still: 0.0
+    track_height_exp: 0.0
+    track_height_exp_soft: 0.0
+    track_height_exp_tight: 1.0
+    track_height_square: -1.0
+    track_height_exp_both_wheels_contact: 0.0
+    no_fork: -1.0
+    no_fork_square: -1.0
+    no_fork_exp: 0.0
+    no_fork_z_exp: 0.0
+    undesired_contact: -2.0
+  base_height_target: 0.22
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

@@ -1,0 +1,65 @@
+# @package _global_
+# Source WheelBipe ``WheelbipeV14FlatNP3OBarlowPPORunnerCfg`` profile.
+#
+# This profile selects the explicit source Barlow graph and therefore needs an
+# owner adapter for the 312D ``on_constraint = [policy28, priv_latent4,
+# policy_hist280]`` stream.  The public compact V14 owner emits actor/critic
+# leaves; ``CustomOnPolicyRunner`` materializes the source stream (including
+# zero-warm-start history) at its owner boundary.  A wrapper that exposes
+# neither the complete stream nor the documented leaves still fails closed.
+algo:
+  algorithm_name: np3o
+  policy_architecture: source_barlow
+  num_envs: 4096
+  num_steps_per_env: 24
+  max_iterations: 3000
+  save_interval: 500
+  num_actor_history: 10
+  history_reset_mode: source_zero_current
+  num_estimate: 4
+  num_costs: 5
+  policy:
+    architecture: source_barlow
+    actor_hidden_dims: [512, 256, 128]
+    critic_hidden_dims: [512, 256, 128]
+    # These names mirror the upstream flat policy dictionary.  The source
+    # graph currently treats the two switches as constructor metadata (the
+    # vendored implementation accepts them through ``**kwargs`` without a
+    # forward-path branch), but retaining them keeps checkpoint/config
+    # provenance explicit.
+    source_barlow:
+      class_name: ActorCriticBarlowTwins
+      num_prop: 28
+      num_scan: 0
+      num_state_est: 4
+      num_priv_latent: 4
+      num_hist: 10
+      scan_encoder_dims: [128, 64, 32]
+      priv_encoder_dims: []
+      continue_from_last_std: true
+      tanh_encoder_output: false
+      hist_encoder: false
+      fixed_std: false
+      num_costs: 5
+      teacher_act: true
+      imi_flag: true
+  algorithm:
+    value_loss_coef: 4.0
+    use_clipped_value_loss: true
+    clip_param: 0.2
+    entropy_coef: 0.005
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    learning_rate: 1.0e-4
+    schedule: adaptive
+    gamma: 0.99
+    lam: 0.95
+    desired_kl: 0.01
+    max_grad_norm: 1.0
+    cost_value_loss_coef: 0.1
+    cost_viol_loss_coef: 0.1
+    dagger_update_freq: 20
+    imi_flag: true
+    imi_weight: 1.0
+    cost_k_initial: [1.0, 1.0, 1.0, 0.5, 0.5]
+    cost_d_values: [0.0, 0.0, 0.0, 0.0, 0.0]
