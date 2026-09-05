@@ -11,7 +11,7 @@ from typing import Any, Literal, cast, overload
 import numpy as np
 
 from unilab.base.scene import resolve_scene_fragment_path
-from unilab.terrains.terrain_generator import HeightfieldSurfaceSampler, TerrainGeneratorCfg
+from unilab.terrains.terrain_generator import TerrainGeneratorCfg
 
 
 def _enable_discardvisual(root: ET.Element) -> None:
@@ -86,23 +86,12 @@ def _materialize_spec_xml(spec, model_file: str) -> str:
     fd, output_path = tempfile.mkstemp(
         suffix=".xml", dir=os.path.dirname(os.path.abspath(model_file))
     )
-    os.close(fd)
-    root = ET.fromstring(spec.to_xml())
-    # ``discardvisual`` removes transparent material assets while MjSpec's XML
-    # round-trip can retain a default geom's reference to that material.  The
-    # resulting XML is invalid even though the pre-round-trip physics model was
-    # valid.  At this fully expanded cold-path boundary, remove only references
-    # whose material definition is no longer present.
-    defined_materials = {
-        material.get("name")
-        for material in root.findall(".//asset/material")
-        if material.get("name")
-    }
-    for geom in root.findall(".//geom"):
-        material_name = geom.get("material")
-        if material_name and material_name not in defined_materials:
-            geom.attrib.pop("material")
-    _write_xml_root(root, Path(output_path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(spec.to_xml())
+    except Exception:
+        os.close(fd)
+        raise
     return output_path
 
 
@@ -413,18 +402,7 @@ def _copy_robot_asset_dir(model_file: Path, output_dir: Path) -> None:
         candidates.append(fallback)
 
     for src in candidates:
-        # ``MjSpec.attach`` may retain relative parent traversal in serialized
-        # mesh paths even though the generated scene owns
-        # ``compiler.meshdir = "assets"``. Keep the historical flat copy for
-        # files that serialize as ``mesh.stl`` and also preserve the source
-        # directory as a sibling of ``assets``. For example,
-        # ``assets/../meshes/mesh.stl`` then resolves to ``meshes/mesh.stl``.
-        # Both copies are materialized on this cold path so the on-disk visual
-        # scene can be compiled during record playback; the physics model
-        # continues to use in-memory assets collected below.
-        asset_root = output_dir / "assets"
-        shutil.copytree(src, asset_root, dirs_exist_ok=True)
-        shutil.copytree(src, output_dir / src.name, dirs_exist_ok=True)
+        shutil.copytree(src, output_dir / "assets", dirs_exist_ok=True)
 
 
 def _collect_mujoco_assets(asset_dir: Path) -> dict[str, bytes]:
@@ -440,63 +418,6 @@ def _collect_mujoco_assets(asset_dir: Path) -> dict[str, bytes]:
     return assets
 
 
-def _append_tracking_sensor_elements(
-    root: ET.Element,
-    *,
-    base_name: str,
-) -> tuple[list[int], list[str]]:
-    """Append grouped world/base-frame tracking sensors to expanded MJCF."""
-    valid_bnames = [
-        name for body in root.findall(".//body") if (name := body.get("name")) is not None
-    ]
-    if base_name not in valid_bnames:
-        raise ValueError(
-            f"Tracking-sensor base body '{base_name}' is not present in the materialized model"
-        )
-
-    sensor_root = root.find("sensor")
-    if sensor_root is None:
-        sensor_root = ET.SubElement(root, "sensor")
-    existing_names = {name for sensor in sensor_root if (name := sensor.get("name")) is not None}
-    sensor_specs = (
-        ("framepos", "track_pos_w", False),
-        ("framequat", "track_quat_w", False),
-        ("framelinvel", "track_linvel_w", False),
-        ("frameangvel", "track_angvel_w", False),
-        ("framepos", "track_pos_b", True),
-        ("framequat", "track_quat_b", True),
-        ("framelinvel", "track_linvel_b", True),
-        ("frameangvel", "track_angvel_b", True),
-    )
-    target_names = {
-        f"{prefix}_{body_name}" for _, prefix, _ in sensor_specs for body_name in valid_bnames
-    }
-    duplicates = sorted(existing_names & target_names)
-    if duplicates:
-        raise ValueError(
-            "Materialized model already defines reserved tracking sensors: "
-            + ", ".join(duplicates[:8])
-        )
-
-    for tag, prefix, relative_to_base in sensor_specs:
-        for body_name in valid_bnames:
-            attributes = {
-                "objtype": "xbody",
-                "objname": body_name,
-                "name": f"{prefix}_{body_name}",
-            }
-            if relative_to_base:
-                attributes.update(
-                    {
-                        "reftype": "xbody",
-                        "refname": base_name,
-                    }
-                )
-            ET.SubElement(sensor_root, tag, attributes)
-
-    return list(range(1, len(valid_bnames) + 1)), valid_bnames
-
-
 @overload
 def materialize_mujoco_hfield_attached_scene(
     *,
@@ -506,8 +427,6 @@ def materialize_mujoco_hfield_attached_scene(
     fragment_files: Sequence[str] = (),
     hfield_name: str = "terrain_hfield",
     geom_name: str = "floor",
-    add_body_sensors: bool = False,
-    base_name: str | None = None,
     return_surface_sampler: Literal[False] = False,
 ) -> tuple[Any, np.ndarray]: ...
 
@@ -521,10 +440,8 @@ def materialize_mujoco_hfield_attached_scene(
     fragment_files: Sequence[str] = (),
     hfield_name: str = "terrain_hfield",
     geom_name: str = "floor",
-    add_body_sensors: bool = False,
-    base_name: str | None = None,
     return_surface_sampler: Literal[True],
-) -> tuple[Any, np.ndarray, HeightfieldSurfaceSampler]: ...
+) -> tuple[Any, np.ndarray, Any]: ...
 
 
 def materialize_mujoco_hfield_attached_scene(
@@ -535,10 +452,8 @@ def materialize_mujoco_hfield_attached_scene(
     fragment_files: Sequence[str] = (),
     hfield_name: str = "terrain_hfield",
     geom_name: str = "floor",
-    add_body_sensors: bool = False,
-    base_name: str | None = None,
     return_surface_sampler: bool = False,
-) -> tuple[Any, np.ndarray] | tuple[Any, np.ndarray, HeightfieldSurfaceSampler]:
+) -> tuple[Any, np.ndarray] | tuple[Any, np.ndarray, Any]:
     """Build a MuJoCo model with generated hfield terrain and attached robot spec."""
     import mujoco
 
@@ -580,10 +495,6 @@ def materialize_mujoco_hfield_attached_scene(
     _ensure_generated_hfield_scene_visuals(root, geom_name)
     for fragment_file in fragment_files:
         _merge_scene_fragment(root, resolve_scene_fragment_path(fragment_file, robot_path))
-    if add_body_sensors:
-        if base_name is None:
-            raise ValueError("base_name is required when add_body_sensors=True")
-        _append_tracking_sensor_elements(root, base_name=base_name)
 
     scene_xml = output_path / "scene.xml"
     _write_xml_root(root, scene_xml)

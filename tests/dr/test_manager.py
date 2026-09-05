@@ -23,7 +23,6 @@ from unilab.dr.types import (
     RESET_TERM_GEOM_FRICTION,
     RESET_TERM_GRAVITY,
     RESET_TERM_KP,
-    IntervalRandomizationPlan,
 )
 
 
@@ -123,7 +122,6 @@ class _FakeBackend:
 
     def __post_init__(self) -> None:
         self.last_randomization: ResetRandomizationPayload | None = None
-        self.last_interval_randomization: IntervalRandomizationPlan | None = None
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return self.capabilities
@@ -136,9 +134,6 @@ class _FakeBackend:
         randomization: ResetRandomizationPayload | None = None,
     ) -> None:
         self.last_randomization = randomization
-
-    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        self.last_interval_randomization = plan
 
 
 @dataclass
@@ -188,47 +183,6 @@ class _FakeProvider(DomainRandomizationProvider):
         self, env: Any, env_ids: np.ndarray, info_updates: dict[str, Any]
     ) -> dict[str, np.ndarray]:
         return {"obs": np.zeros((len(env_ids), 1), dtype=np.float32)}
-
-
-class _TorqueIntervalProvider(_FakeProvider):
-    def build_interval_randomization_plan(
-        self, env: Any, step_counter: int
-    ) -> IntervalRandomizationPlan:
-        del env, step_counter
-        return IntervalRandomizationPlan(
-            body_ids=np.asarray([1], dtype=np.int32),
-            body_torque=np.ones((2, 1, 3), dtype=np.float32),
-        )
-
-
-def test_manager_rejects_unsupported_body_torque_before_backend_mutation() -> None:
-    backend = _FakeBackend(capabilities=DomainRandomizationCapabilities())
-    env = SimpleNamespace(_backend=backend)
-    manager = DomainRandomizationManager(env, _TorqueIntervalProvider())
-
-    with pytest.raises(NotImplementedError, match="interval body torque perturbation"):
-        manager.apply_interval_randomization_if_due(7)
-
-    assert backend.last_interval_randomization is None
-
-
-def test_manager_forwards_supported_body_torque_plan_unchanged() -> None:
-    backend = _FakeBackend(
-        capabilities=DomainRandomizationCapabilities(supports_interval_body_torque=True)
-    )
-    env = SimpleNamespace(_backend=backend)
-    manager = DomainRandomizationManager(env, _TorqueIntervalProvider())
-
-    manager.apply_interval_randomization_if_due(7)
-
-    assert backend.last_interval_randomization is not None
-    np.testing.assert_array_equal(
-        backend.last_interval_randomization.body_ids, np.asarray([1], dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        backend.last_interval_randomization.body_torque,
-        np.ones((2, 1, 3), dtype=np.float32),
-    )
 
 
 def test_manager_skips_unsupported_reset_terms_with_warning(caplog):

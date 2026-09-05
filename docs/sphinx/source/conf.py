@@ -276,7 +276,6 @@ _LANGUAGE_ROOT_INDEX = {
 # map is computed below.
 _LANGUAGE_PATH_FORWARD: dict[str, str] = {
     "en/1-getting_started/5-faq": "zh_CN/1-getting_started/5-faq",
-    "en/2-user_guide/4-tasks/5-wheelbipe_v14": "zh_CN/2-user_guide/4-tasks/5-wheelbipe_v14",
 }
 # Keyed by (current_pagename, target_language) → target_pagename.
 _LANGUAGE_PATH_MAP: dict[tuple[str, str], str] = {}

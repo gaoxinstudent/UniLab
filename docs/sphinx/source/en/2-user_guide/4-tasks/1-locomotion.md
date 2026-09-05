@@ -10,8 +10,6 @@ define which algorithm and backend combinations are runnable.
 - Go2: `go2_joystick_flat`, `go2_joystick_rough`, `go2_footstand`
 - Go2W: `go2w_joystick_flat`, `go2w_joystick_rough`
 - G1 walking: `g1_walk_flat`, `g1_walk_rough`
-- WheelBipe V14: `wheelbipe_v14_flat`, `wheelbipe_v14_rough`
-  (custom `him_ppo`, `dreamwaq`, and `np3o` routes are flat-only)
 - G1 motion tracking: `g1_motion_tracking`, `g1_flip_tracking`,
   `g1_wall_flip_tracking`, `g1_climb_tracking`, `g1_box_tracking`
 - Go2 arm: `go2_arm_manip_loco`
@@ -24,12 +22,7 @@ uv run train --algo ppo --task go2_joystick_rough --sim motrix training.no_play=
 uv run train --algo ppo --task go2_footstand --sim mujoco training.no_play=true
 uv run train --algo appo --task g1_motion_tracking --sim mujoco training.no_play=true
 uv run train --algo sac --task g1_walk_flat --sim mujoco
-uv run train --algo ppo --task wheelbipe_v14_flat --sim mujoco training.no_play=true
-uv run train --algo him_ppo --task wheelbipe_v14_flat --sim mujoco training.no_play=true
 ```
-
-For the WheelBipe V14 observation/action contract, ONNX sim2sim command, and
-asset provenance, see {doc}`5-wheelbipe_v14`.
 
 Check the support matrix for evidence grade by entrypoint, task owner, and
 backend: {doc}`../../5-reference/5-support_matrix`.

@@ -11,7 +11,6 @@ identity of the task, backend, reward, scene, and task-specific runtime fields.
 | APPO | `conf/appo/task/<task>/<backend>.yaml` |
 | SAC / TD3 / FlashSAC | `conf/offpolicy/task/<algo>/<task>/<backend>.yaml` |
 | HIM-PPO | `conf/ppo_him/task/<task>/<backend>.yaml` |
-| WheelBipe custom HIM / DreamWaQ / NP3O | `conf/custom_ppo/task/<variant>/<backend>.yaml` |
 | HORA distillation | `conf/hora_distill/task/<task>/<backend>.yaml` |
 
 Examples:
@@ -24,9 +23,6 @@ uv run train --algo sac --task g1_walk_flat --sim mujoco
 
 For off-policy, `--algo` selects the first owner-path segment under
 `conf/offpolicy/task/<algo>/`; do not include the algorithm name in `--task`.
-The custom WheelBipe routes map the public `--task wheelbipe_v14_flat` and
-`--algo` choice to their named variant owner; do not pass the internal variant
-slug as a public task.
 
 ## Safe Overrides
 

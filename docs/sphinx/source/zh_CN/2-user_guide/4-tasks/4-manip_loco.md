@@ -17,10 +17,9 @@ uv run train --algo ppo --task go2_arm_manip_loco --sim mujoco training.no_play=
 
 ## HIM-PPO
 
-Go2 机械臂 HIM-PPO owner 是 `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml`。
-`src/unilab/cli.py` 当前未将这个旧 Go2 owner 作为顶层
-`uv run train --algo ...` 路线暴露。独立的、仅限 flat 的 WheelBipe custom
-`him_ppo` 路由见 {doc}`5-wheelbipe_v14`。
+HIM-PPO owner 是 `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml`。
+`src/unilab/cli.py` 当前未将 HIM-PPO 作为顶层
+`uv run train --algo ...` 路线暴露。
 
 当前已提交的 owner 路径是 MuJoCo。后端选择请保留在
 `--task go2_arm_manip_loco --sim mujoco` 中，不要单独 override

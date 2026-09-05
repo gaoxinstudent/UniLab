@@ -450,10 +450,6 @@ class DrakeBackend(SimBackend):
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
             return
-        if plan.body_torque is not None:
-            raise NotImplementedError(
-                "DrakeUni batch backend does not support interval body torque perturbation"
-            )
         self._pending_body_forces.fill(0.0)
         if plan.push_perturbation_limit is not None:
             raise NotImplementedError(

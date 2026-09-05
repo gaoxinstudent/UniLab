@@ -10,8 +10,7 @@ graph when that path implements ONNX Runtime checking.
 | Algorithm path | Entry script | Export behavior in repo |
 | --- | --- | --- |
 | PPO (torch) | `scripts/train_rsl_rl.py` | `EXPORT_POLICY=True` in the script entrypoint; playback calls `runner.export_policy_to_onnx(...)` and `runner.export_policy_to_jit(...)`. |
-| HIM-PPO (legacy Go2 arm) | `scripts/train_him_ppo.py` | Same script-level export pattern as PPO. |
-| WheelBipe custom HIM / DreamWaQ / NP3O | `scripts/train_custom_ppo.py` | Dedicated runner exports a history-stacked `policy.onnx` and `policy.onnx.json` sidecar at the end of headless training; use the companion history-aware sim-to-sim helper. |
+| HIM-PPO | `scripts/train_him_ppo.py` | Same script-level export pattern as PPO. |
 | APPO | `scripts/train_appo.py` | Playback writes `policy.onnx` and verifies ONNX Runtime output against PyTorch. |
 | SAC / TD3 / FlashSAC | `scripts/train_offpolicy.py` | Playback writes `policy.onnx`; SAC and FlashSAC use `actor.as_export_module()` before export. |
 
@@ -30,18 +29,6 @@ selector used by the routed training script. The exported file is written into
 the selected run directory. For deployment
 prototypes, keep the exported `policy.onnx` together with the deploy-side
 configuration and motion assets used by the runtime.
-
-The custom WheelBipe route is intentionally different from the playback-bound
-paths above. Compact HIM/DreamWaQ/NP3O graphs consume a flattened history
-stack (140D or 280D), not the normal 35D ROS input. The explicit
-`source_barlow` NP3O owner additionally emits a source-compatible
-`barlow_twins_actor.pt`/`.onnx` pair with two inputs (`obs` `[1,28]` and
-`obs_hist` `[1,10,28]`); its runner `policy.onnx` remains a separate one-input
-312D `on_constraint` graph. Sidecars are checked when present and record the
-algorithm, history, dimensions, and NP3O cost channels; they are not evidence
-of source-asset, dynamics, or sim-to-real parity. See
-{doc}`../../2-user_guide/4-tasks/5-wheelbipe_v14` for its executable contracts,
-evidence matrix, and simulator/hardware boundaries.
 
 ## G1 Deployment Prototype
 

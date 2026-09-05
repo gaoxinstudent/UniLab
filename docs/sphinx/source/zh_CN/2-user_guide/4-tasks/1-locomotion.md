@@ -9,8 +9,6 @@
 - Go1：`go1_joystick_flat`、`go1_joystick_rough`
 - Go2：`go2_joystick_flat`、`go2_joystick_rough`、`go2_footstand`
 - Go2W：`go2w_joystick_flat`、`go2w_joystick_rough`
-- WheelBipe V14：`wheelbipe_v14_flat`、`wheelbipe_v14_rough`
-  （`him_ppo`、`dreamwaq`、`np3o` custom 路由目前仅支持 flat）
 - G1 行走：`g1_walk_flat`、`g1_walk_rough`
 - G1 动作追踪：`g1_motion_tracking`、`g1_flip_tracking`、
   `g1_wall_flip_tracking`、`g1_climb_tracking`、`g1_box_tracking`
@@ -24,12 +22,7 @@ uv run train --algo ppo --task go2_joystick_rough --sim motrix training.no_play=
 uv run train --algo ppo --task go2_footstand --sim mujoco training.no_play=true
 uv run train --algo appo --task g1_motion_tracking --sim mujoco training.no_play=true
 uv run train --algo sac --task g1_walk_flat --sim mujoco
-uv run train --algo ppo --task wheelbipe_v14_flat --sim mujoco training.no_play=true
-uv run train --algo him_ppo --task wheelbipe_v14_flat --sim mujoco training.no_play=true
 ```
-
-WheelBipe V14 的观测/动作 contract、ONNX sim2sim 命令和资产来源见
-{doc}`5-wheelbipe_v14`。
 
 查看支持矩阵以了解按 entrypoint、task owner 和 backend 划分的证据分级：
 {doc}`../../5-reference/5-support_matrix`。

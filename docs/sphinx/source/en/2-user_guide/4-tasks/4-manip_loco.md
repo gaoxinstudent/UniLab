@@ -17,10 +17,9 @@ uv run train --algo ppo --task go2_arm_manip_loco --sim mujoco training.no_play=
 
 ## HIM-PPO
 
-The Go2 arm HIM-PPO owner is `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml`.
-`src/unilab/cli.py` does not expose this legacy Go2 owner as a top-level
-`uv run train --algo ...` route. The separate flat-only WheelBipe custom
-`him_ppo` route is documented in {doc}`5-wheelbipe_v14`.
+The HIM-PPO owner is `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml`.
+`src/unilab/cli.py` does not currently expose HIM-PPO as a top-level
+`uv run train --algo ...` route.
 
 The current committed owner path is MuJoCo. Keep backend selection in
 `--task go2_arm_manip_loco --sim mujoco`, and do not override

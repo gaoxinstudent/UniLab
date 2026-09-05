@@ -11,7 +11,6 @@ import importlib.util
 import json
 import sys
 import types
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -1021,7 +1020,6 @@ def _build_rsl_lifecycle_case(
         "summaries": [],
         "tracker_finish": 0,
         "playback": 0,
-        "playback_gate": None,
     }
 
     class FakeEnv:
@@ -1107,14 +1105,7 @@ def _build_rsl_lifecycle_case(
         del args, kwargs
         captured["playback"] += 1
 
-    original_should_run_playback = mod.should_run_playback
-
-    def playback_gate(**kwargs: Any) -> bool:
-        captured["playback_gate"] = kwargs.copy()
-        return original_should_run_playback(**kwargs)
-
     monkeypatch.setattr(mod, "play_rsl_rl", playback)
-    monkeypatch.setattr(mod, "should_run_playback", playback_gate)
     return mod, cfg, captured, learn_exception
 
 
@@ -1153,7 +1144,6 @@ def test_train_rsl_rl_success_keeps_playback_and_single_cleanup(
     assert captured["distributed"] == [True]
     assert captured["tracker_finish"] == 1
     assert captured["playback"] == 1
-    assert captured["playback_gate"]["numerical_eval"] is True
     assert captured["summaries"][0]["status"] == "completed"
     assert captured["summaries"][0]["run_env_steps"] == 8
 
@@ -2498,144 +2488,6 @@ def test_play_wrapper_policy_obs_mode_actor():
     assert obs_td["critic"].shape == (1, 5)
 
 
-def test_rsl_wrapper_episode_length_assignment_syncs_np_env_steps():
-    """RSL-RL random-start lengths must reach NpEnv's truncation counter."""
-    import numpy as np
-    import torch
-
-    from unilab.training.rsl_rl import RslRlVecEnvWrapper
-
-    class FakeEnv:
-        def __init__(self):
-            self.num_envs = 2
-            self.state = type(
-                "State",
-                (),
-                {
-                    "obs": {"obs": np.ones((2, 3), dtype=np.float32)},
-                    "info": {"steps": np.zeros((2,), dtype=np.int32)},
-                },
-            )()
-            self.cfg = type("Cfg", (), {"max_episode_seconds": 10.0, "ctrl_dt": 0.02})()
-            self.observation_space = type("Space", (), {"shape": (3,)})()
-            self.action_space = type("Space", (), {"shape": (2,)})()
-            self.obs_groups_spec = {"obs": 3}
-
-        def init_state(self):
-            pass
-
-        def reset(self, env_indices):
-            self.state.info["steps"][env_indices] = 0
-            return self.state.obs, {}
-
-    env = FakeEnv()
-    wrapper = RslRlVecEnvWrapper(env, device="cpu", policy_obs_mode="flat")
-    wrapper.episode_length_buf = torch.tensor([7.0, 19.0])
-
-    np.testing.assert_array_equal(env.state.info["steps"], np.array([7, 19], dtype=np.int32))
-    assert wrapper.episode_lengths is wrapper.episode_length_buf
-
-
-def test_rsl_wrapper_keeps_source_random_episode_age_before_rollout():
-    """Vanilla source runner consumes the randomized age without an extra reset."""
-    import numpy as np
-    import torch
-
-    from unilab.training.rsl_rl import RslRlVecEnvWrapper
-
-    class FakeEnv:
-        def __init__(self):
-            self.num_envs = 2
-            self.reset_calls = 0
-            self.state = type(
-                "State",
-                (),
-                {
-                    "obs": {"obs": np.ones((2, 3), dtype=np.float32)},
-                    "info": {"steps": np.zeros((2,), dtype=np.int32)},
-                },
-            )()
-            self.cfg = type("Cfg", (), {"max_episode_seconds": 10.0, "ctrl_dt": 0.02})()
-            self.observation_space = type("Space", (), {"shape": (3,)})()
-            self.action_space = type("Space", (), {"shape": (2,)})()
-            self.obs_groups_spec = {"obs": 3}
-            self.synced_episode_ages = []
-
-        def init_state(self):
-            return self.state
-
-        def reset(self, env_indices):
-            self.reset_calls += 1
-            # The constructor reset is the only reset before the runner's
-            # first rollout.  OnPolicyRunner then assigns episode_length_buf
-            # and calls get_observations(), without resetting the env.
-            return self.state.obs, self.state.info
-
-        def sync_source_episode_length(self, ages):
-            self.synced_episode_ages.append(np.asarray(ages).copy())
-
-    env = FakeEnv()
-    wrapper = RslRlVecEnvWrapper(env, device="cpu", policy_obs_mode="flat")
-    wrapper.episode_length_buf = torch.tensor([7.0, 19.0])
-
-    assert env.reset_calls == 1
-    obs = wrapper.get_observations()
-    assert env.reset_calls == 1
-    assert obs["actor"].shape == (2, 3)
-    np.testing.assert_array_equal(env.state.info["steps"], np.array([7, 19], dtype=np.int32))
-    np.testing.assert_array_equal(env.synced_episode_ages[-1], np.array([7, 19], dtype=np.int32))
-
-
-def test_rsl_wrapper_source_age_optout_keeps_np_env_counter_untouched():
-    """Owners can keep RSL-RL's random-start buffer learner-local."""
-    import numpy as np
-    import torch
-
-    from unilab.training.rsl_rl import RslRlVecEnvWrapper
-
-    class FakeEnv:
-        def __init__(self):
-            self.num_envs = 2
-            self.state = type(
-                "State",
-                (),
-                {
-                    "obs": {"obs": np.ones((2, 3), dtype=np.float32)},
-                    "info": {"steps": np.array([3, 5], dtype=np.int32)},
-                },
-            )()
-            self.cfg = type(
-                "Cfg",
-                (),
-                {
-                    "max_episode_seconds": 10.0,
-                    "ctrl_dt": 0.02,
-                    "source_episode_age_sync": False,
-                },
-            )()
-            self.observation_space = type("Space", (), {"shape": (3,)})()
-            self.action_space = type("Space", (), {"shape": (2,)})()
-            self.obs_groups_spec = {"obs": 3}
-            self.synced_episode_ages = []
-
-        def init_state(self):
-            return self.state
-
-        def reset(self, env_indices):
-            del env_indices
-            return self.state.obs, self.state.info
-
-        def sync_source_episode_length(self, ages):
-            self.synced_episode_ages.append(np.asarray(ages).copy())
-
-    env = FakeEnv()
-    wrapper = RslRlVecEnvWrapper(env, device="cpu", policy_obs_mode="flat")
-    wrapper.episode_length_buf = torch.tensor([17.0, 19.0])
-
-    np.testing.assert_array_equal(env.state.info["steps"], np.array([3, 5], dtype=np.int32))
-    assert env.synced_episode_ages == []
-
-
 def test_play_wrapper_flat_policy_excludes_critic_only_group():
     import numpy as np
 
@@ -2960,8 +2812,8 @@ def test_train_rsl_rl_get_log_root_uses_algo_log_name(monkeypatch: pytest.Monkey
     assert "logs/test_rsl_rl_ppo" in log_root.replace("\\", "/")
 
 
-def test_train_rsl_rl_play_missing_checkpoint_skips_env_creation_and_raises_context(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_train_rsl_rl_play_missing_checkpoint_skips_env_creation_and_prints_context(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ):
     monkeypatch.delenv("UNILAB_TEST_LOG_ROOT", raising=False)
     mod = _train_rsl_rl(monkeypatch)
@@ -2979,22 +2831,22 @@ def test_train_rsl_rl_play_missing_checkpoint_skips_env_creation_and_raises_cont
             ),
         )
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            mod.play_rsl_rl(cfg, device="cpu")
+        result = mod.play_rsl_rl(cfg, device="cpu")
     finally:
         mod.ROOT_DIR = original_root
 
-    message = str(exc_info.value)
+    captured = capsys.readouterr().out
     expected_task_log_root = tmp_path / "logs" / "custom_ppo" / cfg.training.task_name
 
-    assert "Could not resolve a checkpoint for play mode." in message
-    assert "Task log root does not exist." in message
-    assert f"task_log_root={expected_task_log_root}" in message
-    assert "algo.load_run='-1'" in message
+    assert result is None
+    assert "Could not resolve a checkpoint for play mode." in captured
+    assert "Task log root does not exist." in captured
+    assert f"task_log_root={expected_task_log_root}" in captured
+    assert "algo.load_run='-1'" in captured
 
 
-def test_train_rsl_rl_play_raises_for_missing_requested_checkpoint_in_resolved_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_train_rsl_rl_play_reports_missing_requested_checkpoint_in_resolved_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ):
     monkeypatch.delenv("UNILAB_TEST_LOG_ROOT", raising=False)
     mod = _train_rsl_rl(monkeypatch)
@@ -3019,16 +2871,16 @@ def test_train_rsl_rl_play_raises_for_missing_requested_checkpoint_in_resolved_r
             ),
         )
 
-        with pytest.raises(FileNotFoundError) as exc_info:
-            mod.play_rsl_rl(cfg, device="cpu")
+        result = mod.play_rsl_rl(cfg, device="cpu")
     finally:
         mod.ROOT_DIR = original_root
 
-    message = str(exc_info.value)
+    captured = capsys.readouterr().out
 
-    assert "Could not resolve a checkpoint for play mode." in message
-    assert f"resolved_run={run_dir}" in message
-    assert "algo.checkpoint=12" in message
+    assert result is None
+    assert "Could not resolve a checkpoint for play mode." in captured
+    assert f"resolved_run={run_dir}" in captured
+    assert "algo.checkpoint=12" in captured
 
 
 def test_train_rsl_rl_motrix_auto_play_is_interactive(
@@ -3207,163 +3059,6 @@ def test_train_rsl_rl_record_play_uses_backend_plan(
     assert captured["record_video"] is True
     assert captured["num_steps"] == 37
     assert captured["output_video"] == run_dir / "play_video.mp4"
-
-
-def test_train_rsl_rl_none_play_runs_finite_numerical_rollout(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-):
-    """``eval --render-mode none`` loads the policy and steps the VecEnv."""
-
-    mod = _train_rsl_rl(monkeypatch)
-    cfg = _ppo_cfg(
-        [
-            "task=go2_joystick_rough/mujoco",
-            "training.play_only=true",
-            "training.play_render_mode=none",
-            "training.play_steps=3",
-        ]
-    )
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    checkpoint = run_dir / "model_3.pt"
-    mod.torch.save({"actor_state_dict": {}}, checkpoint)
-
-    class FakeEnv:
-        def __init__(self):
-            self.cfg = types.SimpleNamespace(render_spacing=1.0, render_offset_mode="grid")
-            self.closed = False
-            self.steps = 0
-
-        def close(self):
-            self.closed = True
-
-    class FakeWrapper:
-        num_obs = 35
-        num_actions = 6
-
-        def __init__(self, env, device):
-            self.env = env
-            self.device = device
-
-        def reset(self):
-            return np.zeros((2, 35), dtype=np.float32), {}
-
-        def step(self, actions):
-            del actions
-            self.env.steps += 1
-            dones = np.asarray([False, self.env.steps == 3], dtype=np.bool_)
-            return (
-                np.zeros((2, 35), dtype=np.float32),
-                np.ones((2,), dtype=np.float32),
-                dones,
-                {},
-            )
-
-    class FakeRunner:
-        def __init__(self, wrapped_env, train_cfg, log_dir, device):
-            del train_cfg, log_dir, device
-            self.wrapped_env = wrapped_env
-            self.loaded = None
-
-        def load(self, path, **kwargs):
-            self.loaded = (path, kwargs)
-
-        def get_inference_policy(self, device):
-            del device
-            return lambda obs: np.zeros((obs.shape[0], 6), dtype=np.float32)
-
-    env = FakeEnv()
-    captured: dict[str, Any] = {}
-
-    def create_env(*args, **kwargs):
-        del args, kwargs
-        captured["runner_env"] = env
-        return env
-
-    monkeypatch.setattr(mod, "EXPORT_POLICY", False, raising=False)
-    monkeypatch.setattr(mod, "parse_checkpoint_path", lambda *args, **kwargs: (checkpoint, run_dir))
-    monkeypatch.setattr(mod, "resolve_sim2sim_config", lambda *args, **kwargs: cfg)
-    monkeypatch.setattr(mod, "build_ppo_play_env_cfg_override", lambda cfg: {})
-    monkeypatch.setattr(mod, "create_env", create_env)
-    monkeypatch.setattr(mod, "_resolve_ppo_wrapper_cls", lambda rl_cfg: FakeWrapper)
-    monkeypatch.setattr(mod, "normalize_ppo_train_cfg", lambda rl_cfg: {})
-    monkeypatch.setattr(mod, "OnPolicyRunner", FakeRunner)
-
-    result = mod.play_rsl_rl(cfg, device="cpu")
-
-    assert result is None
-    assert env.steps == 3
-    assert env.closed is True
-    assert "PPO numerical playback complete: steps=3" in capsys.readouterr().out
-
-
-def test_train_rsl_rl_play_closes_env_when_playback_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
-    """Resource teardown must not mask the renderer/runner exception."""
-
-    mod = _train_rsl_rl(monkeypatch)
-    cfg = _ppo_cfg(
-        [
-            "task=go2_joystick_rough/motrix",
-            "training.play_only=true",
-            "training.play_steps=1",
-        ]
-    )
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    checkpoint = run_dir / "model_1.pt"
-
-    class FakeEnv:
-        def __init__(self):
-            self.cfg = types.SimpleNamespace(render_spacing=1.0, render_offset_mode="grid")
-            self.closed = False
-
-        def run_playback_mode(self, **kwargs):
-            del kwargs
-            raise RuntimeError("renderer boom")
-
-        def close(self):
-            self.closed = True
-
-    class FakeWrapper:
-        num_obs = 35
-        num_actions = 6
-
-        def __init__(self, env, device):
-            self.env = env
-            self.device = device
-
-    class FakeRunner:
-        def __init__(self, wrapped_env, train_cfg, log_dir, device):
-            del wrapped_env, train_cfg, log_dir, device
-
-        def load(self, path, **kwargs):
-            del path, kwargs
-
-        def get_inference_policy(self, device):
-            del device
-            return lambda obs: obs
-
-    env = FakeEnv()
-    monkeypatch.setattr(mod, "normalize_ppo_train_cfg", lambda cfg: {})
-    monkeypatch.setattr(mod, "apply_ppo_runtime_flags", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mod, "policy_load_dim_guard", lambda **kwargs: nullcontext())
-    monkeypatch.setattr(mod, "OnPolicyRunner", FakeRunner)
-
-    with pytest.raises(RuntimeError, match="renderer boom"):
-        mod._play_rsl_rl_with_env(
-            cfg,
-            "cpu",
-            env,
-            FakeWrapper,
-            {},
-            checkpoint,
-            run_dir,
-        )
-    assert env.closed is True
 
 
 def test_train_appo_get_log_root_uses_algo_log_name(monkeypatch: pytest.MonkeyPatch):

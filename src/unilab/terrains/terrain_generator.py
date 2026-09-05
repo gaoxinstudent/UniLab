@@ -3,7 +3,6 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 
@@ -77,10 +76,6 @@ class GeneratedTerrain:
     z_max: float
     base_thickness: float
     terrain_origins: np.ndarray
-    terrain_type_ids: np.ndarray
-    """Per-cell indices into :attr:`terrain_type_names`, shape ``(rows, cols)``."""
-    terrain_type_names: tuple[str, ...]
-    """Stable sub-terrain names in configuration insertion order."""
 
     @property
     def size(self) -> tuple[float, float]:
@@ -113,8 +108,6 @@ class GeneratedTerrain:
             horizontal_scale=float(self.horizontal_scale),
             z_min=float(self.z_min),
             height_extent=float(self.height_extent),
-            terrain_type_ids=self.terrain_type_ids.copy(),
-            terrain_type_names=self.terrain_type_names,
         )
 
     def write_png(self, path: Path) -> None:
@@ -134,8 +127,6 @@ class HeightfieldSurfaceSampler:
     horizontal_scale: float
     z_min: float
     height_extent: float
-    terrain_type_ids: np.ndarray | None = None
-    terrain_type_names: tuple[str, ...] = ()
 
     @property
     def size(self) -> tuple[float, float]:
@@ -166,10 +157,9 @@ class SubTerrainCfg(abc.ABC):
     proportion: float = 1.0
     """Robot spawning weight for this terrain type.
 
-    In curriculum mode, the effect depends on the generator's column-allocation
-    policy. Historical ``one_per_type`` generators use it only for downstream
-    spawn weighting, while ``proportional`` generators map columns from
-    normalized cumulative proportions.
+    In curriculum mode, controls how many robots are spawned on this terrain's
+    column relative to other terrain types. Each terrain type always gets
+    exactly one column; proportion only affects spawning distribution.
 
     In random mode, controls the sampling probability for each patch.
     """
@@ -195,20 +185,13 @@ class TerrainGeneratorCfg:
     curriculum: bool = False
     """Controls terrain allocation mode:
 
-    - curriculum=True: Terrain type is fixed within each column and difficulty
-        increases along rows. ``curriculum_column_allocation`` selects either
-        historical one-column-per-type behavior or normalized proportional
-        source-compatible mapping across ``num_cols``.
+    - curriculum=True: Each terrain type gets exactly ONE column. The generator uses
+        ``len(sub_terrains)`` columns regardless of ``num_cols``. Difficulty increases
+        along rows. The ``proportion`` field controls how many robots are spawned per
+        column, not column count.
 
     - curriculum=False: Every patch is randomly sampled from all terrain types.
         Proportions control sampling probability. Use this for random variety.
-    """
-    curriculum_column_allocation: Literal["one_per_type", "proportional"] = "one_per_type"
-    """Column allocation used when :attr:`curriculum` is enabled.
-
-    ``one_per_type`` preserves UniLab's historical behavior. ``proportional``
-    keeps :attr:`num_cols` and uses the source Isaac cumulative-proportion
-    column mapping.
     """
     size: tuple[float, float]
     """Width and length of each sub-terrain patch, in meters. Both components
@@ -234,8 +217,8 @@ class TerrainGeneratorCfg:
     num_cols: int = 1
     """Number of sub-terrain columns in the grid.
 
-    Used as-is in random mode and proportional curriculum mode. Historical
-    ``one_per_type`` curriculum mode uses ``len(sub_terrains)`` instead."""
+    In curriculum mode the generator ignores this value and uses one column per terrain
+    type (``len(sub_terrains)``). In random mode it is used as-is."""
     sub_terrains: dict[str, SubTerrainCfg] = field(default_factory=dict)
     """Named sub-terrain configurations to populate the grid."""
     difficulty_range: tuple[float, float] = (0.0, 1.0)
@@ -254,9 +237,10 @@ class TerrainGenerator:
         terrain type weighted by proportions. Results in random variety across
         all patches.
 
-    - **Curriculum mode** (curriculum=True): Terrain type is fixed per column
-        and difficulty increases along rows. Column identity is either one per
-        terrain type or allocated from normalized cumulative proportions.
+    - **Curriculum mode** (curriculum=True): Each terrain type gets exactly one column
+        (the generator uses ``len(sub_terrains)`` columns regardless of ``num_cols``).
+        Difficulty increases along rows. The ``proportion`` field controls robot spawning
+        distribution, not column count.
 
     Terrain types are weighted by proportion and their geometry is generated
     based on a difficulty value in the configured range. The grid is centered
@@ -271,20 +255,11 @@ class TerrainGenerator:
         self.cfg = cfg
         self.device = device
 
-        # Preserve historical allocation unless an owner explicitly opts into
-        # source-compatible proportional columns.
-        if self.cfg.curriculum and self.cfg.curriculum_column_allocation == "one_per_type":
+        # In curriculum mode, one column per terrain type.
+        if self.cfg.curriculum:
             self._num_cols = len(self.cfg.sub_terrains)
-        elif self.cfg.curriculum and self.cfg.curriculum_column_allocation == "proportional":
-            self._num_cols = int(self.cfg.num_cols)
         else:
             self._num_cols = self.cfg.num_cols
-        if self._num_cols <= 0:
-            raise ValueError("TerrainGeneratorCfg.num_cols must be positive")
-        if self.cfg.curriculum_column_allocation not in {"one_per_type", "proportional"}:
-            raise ValueError(
-                "curriculum_column_allocation must be 'one_per_type' or 'proportional'"
-            )
 
         for sub_cfg in self.cfg.sub_terrains.values():
             sub_cfg.size = self.cfg.size
@@ -299,9 +274,6 @@ class TerrainGenerator:
         self.np_rng = np.random.default_rng(seed)
 
         self.terrain_origins = np.zeros((self.cfg.num_rows, self._num_cols, 3))
-        self.terrain_type_ids = np.full((self.cfg.num_rows, self._num_cols), -1, dtype=np.int32)
-        self.terrain_type_names = tuple(self.cfg.sub_terrains)
-        self._curriculum_terrain_type_ids = self._allocate_curriculum_columns()
 
         # Pre-allocate flat patch storage by scanning all sub-terrain configs.
         self.flat_patches: dict[str, np.ndarray] = {}
@@ -333,14 +305,8 @@ class TerrainGenerator:
 
         max_base_thickness = _BORDER_BASE_THICKNESS if self.cfg.border_width > 0.0 else 0.0
         self.terrain_origins.fill(0.0)
-        self.terrain_type_ids.fill(-1)
 
-        def place_output(
-            output: TerrainOutput,
-            sub_row: int,
-            sub_col: int,
-            terrain_type_id: int,
-        ) -> None:
+        def place_output(output: TerrainOutput, sub_row: int, sub_col: int) -> None:
             nonlocal max_base_thickness
             patch_heights_xy = output.heightfield.physical_heights_xy()
             if patch_heights_xy.shape != (tile_x_px, tile_y_px):
@@ -356,7 +322,6 @@ class TerrainGenerator:
             world_position = self._get_sub_terrain_position(sub_row, sub_col)
             spawn_origin = output.origin + world_position
             self.terrain_origins[sub_row, sub_col] = spawn_origin
-            self.terrain_type_ids[sub_row, sub_col] = int(terrain_type_id)
             for name, arr in self.flat_patches.items():
                 if output.flat_patches is not None and name in output.flat_patches:
                     patches = output.flat_patches[name]
@@ -368,13 +333,12 @@ class TerrainGenerator:
         if self.cfg.curriculum:
             sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
             for sub_col in range(self._num_cols):
-                sub_type_id = int(self._curriculum_terrain_type_ids[sub_col])
                 for sub_row in range(self.cfg.num_rows):
                     lower, upper = self.cfg.difficulty_range
                     difficulty = (sub_row + self.np_rng.uniform()) / self.cfg.num_rows
                     difficulty = lower + (upper - lower) * difficulty
-                    output = sub_terrains_cfgs[sub_type_id].function(difficulty, self.np_rng)
-                    place_output(output, sub_row, sub_col, sub_type_id)
+                    output = sub_terrains_cfgs[sub_col].function(difficulty, self.np_rng)
+                    place_output(output, sub_row, sub_col)
         else:
             proportions = np.array(
                 [sub_cfg.proportion for sub_cfg in self.cfg.sub_terrains.values()]
@@ -388,7 +352,7 @@ class TerrainGenerator:
                 sub_index = self.np_rng.choice(len(proportions), p=proportions)
                 difficulty = self.np_rng.uniform(*self.cfg.difficulty_range)
                 output = sub_terrains_cfgs[sub_index].function(difficulty, self.np_rng)
-                place_output(output, sub_row, sub_col, int(sub_index))
+                place_output(output, sub_row, sub_col)
 
         z_min = float(np.min(heights_yx))
         z_max = float(np.max(heights_yx))
@@ -399,34 +363,7 @@ class TerrainGenerator:
             z_max=z_max,
             base_thickness=max(max_base_thickness, 1e-3),
             terrain_origins=self.terrain_origins.copy(),
-            terrain_type_ids=self.terrain_type_ids.copy(),
-            terrain_type_names=self.terrain_type_names,
         )
-
-    def _allocate_curriculum_columns(self) -> np.ndarray:
-        if not self.cfg.curriculum:
-            return np.zeros((0,), dtype=np.int32)
-        if self.cfg.curriculum_column_allocation == "one_per_type":
-            return np.arange(len(self.cfg.sub_terrains), dtype=np.int32)
-
-        proportions = np.asarray(
-            [sub_cfg.proportion for sub_cfg in self.cfg.sub_terrains.values()],
-            dtype=np.float64,
-        )
-        if not np.all(np.isfinite(proportions)) or np.any(proportions < 0.0):
-            raise ValueError("sub-terrain proportions must be finite and non-negative")
-        total = float(np.sum(proportions))
-        if total <= 0.0:
-            raise ValueError("at least one sub-terrain proportion must be positive")
-        cumulative = np.cumsum(proportions / total)
-        allocation = np.empty((self._num_cols,), dtype=np.int32)
-        for column in range(self._num_cols):
-            fraction = column / self._num_cols + 1.0e-3
-            matching = np.flatnonzero(fraction < cumulative)
-            allocation[column] = int(matching[0]) if matching.size else cumulative.size - 1
-        if allocation.shape != (self._num_cols,):
-            raise RuntimeError("proportional terrain column allocation produced the wrong size")
-        return allocation
 
     def write_png(self, path: Path) -> GeneratedTerrain:
         terrain = self.generate()

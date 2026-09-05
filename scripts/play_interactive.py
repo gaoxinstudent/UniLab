@@ -64,7 +64,6 @@ from unilab.visualization.interactive_playback import (
     _HORA_DISTILL_CHECKPOINT_UNAVAILABLE,
     KeyboardCommander,
     PlaybackControls,
-    PlaybackSession,
     RslRlPlaybackConfig,
     create_appo_playback_session,
     create_hora_distill_playback_session,
@@ -74,7 +73,6 @@ from unilab.visualization.interactive_playback import (
     prepare_motion_overlay_selection,
     select_torch_device,
 )
-from unilab.visualization.wheelbipe_keyboard import WheelbipeKeyboardController
 
 _KEY_ENTER, _KEY_KP_ENTER = 257, 335
 _KEY_BACKSPACE = 259
@@ -860,15 +858,7 @@ def _build_playback_config(args, *, num_envs: int = 1) -> RslRlPlaybackConfig:
     )
 
 
-def _is_wheelbipe_env(env: Any) -> bool:
-    """Identify the owner without probing backend-private capabilities."""
-
-    return type(env).__module__.startswith("unilab.envs.locomotion.wheelbipe_v14")
-
-
-def _build_keyboard_commander(
-    env: Any, args
-) -> KeyboardCommander | WheelbipeKeyboardController | None:
+def _build_keyboard_commander(env: Any, args) -> KeyboardCommander | None:
     """Set up keyboard velocity teleop, or return None when unsupported/disabled."""
     if not bool(getattr(args, "keyboard", False)):
         return None
@@ -883,36 +873,12 @@ def _build_keyboard_commander(
     cmds_cfg.heading_command = False
     cmds_cfg.resampling_time = 0.0
 
-    assert state is not None
-    commander: KeyboardCommander | WheelbipeKeyboardController
-    if _is_wheelbipe_env(env):
-        height_commands = state.info.get("height_commands")
-        if (
-            not isinstance(height_commands, np.ndarray)
-            or height_commands.ndim != 1
-            or height_commands.shape[0] != command_arr.shape[0]
-        ):
-            print(
-                "[play_interactive] interactive.keyboard ignored: WheelBipe owner has no "
-                "batched 'height_commands'."
-            )
-            return None
-        height_range = tuple(float(value) for value in env.cfg.height_range)
-        if len(height_range) != 2:
-            raise ValueError("WheelBipe env.height_range must contain two values")
-        commander = WheelbipeKeyboardController.from_vel_limit(
-            cmds_cfg.vel_limit,
-            default_height=float(height_commands[0]),
-            height_range=height_range,
-        )
-        commander.apply(env.state.info)
-    else:
-        commander = KeyboardCommander.from_vel_limit(
-            cmds_cfg.vel_limit,
-            step_lin=float(getattr(args, "keyboard_step_lin", 0.1)),
-            step_ang=float(getattr(args, "keyboard_step_ang", 0.2)),
-        )
-        env.state.info["commands"][:] = commander.command
+    commander = KeyboardCommander.from_vel_limit(
+        cmds_cfg.vel_limit,
+        step_lin=float(getattr(args, "keyboard_step_lin", 0.1)),
+        step_ang=float(getattr(args, "keyboard_step_ang", 0.2)),
+    )
+    env.state.info["commands"][:] = commander.command
     return commander
 
 
@@ -1010,22 +976,7 @@ def _policy_obs_contains_command(env: Any, *, reset_fn) -> bool:
         reset_fn()
 
 
-def _handle_command_key(
-    commander: KeyboardCommander | WheelbipeKeyboardController, keycode: int
-) -> None:
-    if isinstance(commander, WheelbipeKeyboardController):
-        if not 0 <= keycode <= 0x10FFFF:
-            return
-        key = chr(keycode)
-        if keycode in (_KEY_ENTER, _KEY_KP_ENTER):
-            key = "L"
-        try:
-            handled = commander.viewer_key(key)
-        except ValueError:
-            return
-        if handled:
-            print(f"[play_interactive] {commander.describe()}")
-        return
+def _handle_command_key(commander: KeyboardCommander, keycode: int) -> None:
     if keycode == _KEY_UP:
         commander.nudge(commander.AXIS_VX, +1.0)
     elif keycode == _KEY_DOWN:
@@ -1041,17 +992,7 @@ def _handle_command_key(
     print(f"[play_interactive] {commander.describe()}")
 
 
-def _print_keyboard_legend(
-    args, commander: KeyboardCommander | WheelbipeKeyboardController
-) -> None:
-    if isinstance(commander, WheelbipeKeyboardController):
-        print("[play_interactive] WheelBipe keyboard teleop ENABLED:")
-        print("  W / S : set forward / backward velocity (latched in MuJoCo viewer)")
-        print("  A / D : set left / right yaw rate (latched in MuJoCo viewer)")
-        print("  Z / X : raise / lower height by one safe increment")
-        print("  Q     : queue one jump_takeoff_request for the owner state machine")
-        print("  L / Enter : reset velocity and height")
-        return
+def _print_keyboard_legend(args) -> None:
     print("[play_interactive] Keyboard teleop ENABLED (drive style):")
     print("  Up / Down    : forward / backward (vx)")
     print("  Left / Right : turn left / right  (vyaw)")
@@ -1104,7 +1045,6 @@ def play_interactive(args, cfg: DictConfig | None = None, *, algo: str | None = 
 
     try:
         playback_cfg = _build_playback_config(args, num_envs=1)
-        session: tuple[PlaybackSession, str, str | None]
         if algo == "ppo":
             wrapper_cls = RslRlVecEnvWrapper
             if cfg is not None:
@@ -1260,8 +1200,6 @@ def play_interactive(args, cfg: DictConfig | None = None, *, algo: str | None = 
         elif commander is not None and keycode == _KEY_BACKSPACE:
             playback_session.reset()
             commander.zero()
-            if isinstance(commander, WheelbipeKeyboardController):
-                commander.apply(env.state.info)
             print("[play_interactive] reset (backspace)")
         elif commander is not None:
             _handle_command_key(commander, keycode)
@@ -1269,7 +1207,7 @@ def play_interactive(args, cfg: DictConfig | None = None, *, algo: str | None = 
     print("[play_interactive] Opening viewer — close the window or press Esc to quit.")
     print("[play_interactive] Controls: Space=pause/resume, N=single-step, +/-=speed")
     if commander is not None:
-        _print_keyboard_legend(args, commander)
+        _print_keyboard_legend(args)
 
     with mujoco.viewer.launch_passive(mj_model, viz_data, key_callback=_on_key) as viewer:
         focus_body_id = _resolve_focus_body_id(
@@ -1298,11 +1236,7 @@ def play_interactive(args, cfg: DictConfig | None = None, *, algo: str | None = 
 
                 # Write the command before stepping so this step's obs follow it.
                 if commander is not None and env.state is not None:
-                    if isinstance(commander, WheelbipeKeyboardController):
-                        commander.advance(ctrl_dt)
-                        commander.apply(env.state.info)
-                    else:
-                        env.state.info["commands"][:] = commander.command
+                    env.state.info["commands"][:] = commander.command
 
                 playback_session.advance(controls)
 

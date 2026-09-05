@@ -31,10 +31,8 @@ playback mode:
 uv run eval --algo ppo --task go2_joystick_flat --sim mujoco --load-run -1
 ```
 
-`--load-run` accepts `-1`, a run-directory name, or an absolute path to a run
-directory/checkpoint. Relative paths with separators remain rejected so their
-meaning cannot depend on Hydra's working directory. The direct
-`algo.load_run=...` override remains available, but do not pass both forms.
+Some script paths accept a checkpoint path through `algo.load_run`; the unified
+CLI validates `--load-run` as a run id and does not accept path separators.
 
 ## Seeds
 

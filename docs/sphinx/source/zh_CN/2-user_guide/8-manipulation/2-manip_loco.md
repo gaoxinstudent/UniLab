@@ -10,10 +10,7 @@ uv run train --algo ppo --task go2_arm_manip_loco --sim mujoco training.no_play=
 
 ## HIM-PPO
 
-Go2 机械臂 HIM-PPO owner 由 `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml` 配置，
-由 `scripts/train_him_ppo.py` 实现；这个旧 owner 尚未在 `src/unilab/cli.py` 中声明为
-顶层 `uv run train --algo ...` 路由。它与文档
-{doc}`../4-tasks/5-wheelbipe_v14` 中仅限 flat 的 WheelBipe custom `him_ppo` 路由不同。
+HIM-PPO 由 `conf/ppo_him/task/go2_arm_manip_loco/mujoco.yaml` 配置，由 `scripts/train_him_ppo.py` 实现。它目前没有在 `src/unilab/cli.py` 中声明为顶层 `uv run train --algo ...` 路由。
 
 如果用 MuJoCo 以外的后端构造该 env，它目前会抛出异常。请将后端选择保持在 `--task go2_arm_manip_loco --sim mujoco`，不要单独覆盖 `training.sim_backend`。
 

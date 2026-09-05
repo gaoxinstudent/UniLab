@@ -31,7 +31,6 @@ class _FakeMotrixLink:
         self.mass_override: np.ndarray | None = None
         self.com_override: np.ndarray | None = None
         self.external_force_calls: list[tuple[np.ndarray, bool]] = []
-        self.external_torque_calls: list[tuple[np.ndarray, bool]] = []
 
     def get_mass_override(self, data: Any) -> np.ndarray:
         return np.ones((int(getattr(data, "num_envs", 1)),), dtype=np.float64)
@@ -57,16 +56,6 @@ class _FakeMotrixLink:
     ) -> None:
         del data, point
         self.external_force_calls.append((np.asarray(force), bool(local)))
-
-    def add_external_torque(
-        self,
-        data: Any,
-        torque: np.ndarray,
-        *,
-        local: bool = True,
-    ) -> None:
-        del data
-        self.external_torque_calls.append((np.asarray(torque), bool(local)))
 
 
 class _FakeMotrixBody:
@@ -523,15 +512,12 @@ def test_motrix_backend_interval_body_force_uses_link_external_force_delta() -> 
     backend._data = object()
     backend._links_by_id = {0: link}
     backend._supports_external_force = True
-    backend._supports_external_torque = True
     backend._applied_body_forces = {}
-    backend._applied_body_torques = {}
 
     backend.apply_interval_randomization(
         IntervalRandomizationPlan(
             body_ids=np.asarray([0], dtype=np.int32),
             body_force=np.asarray([[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]], dtype=np.float64),
-            body_torque=np.asarray([[[0.1, 0.2, 0.3]], [[0.4, 0.5, 0.6]]], dtype=np.float64),
         )
     )
     backend.apply_body_force(
@@ -546,59 +532,6 @@ def test_motrix_backend_interval_body_force_uses_link_external_force_delta() -> 
     assert second_local is False
     np.testing.assert_allclose(first_force, [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     np.testing.assert_allclose(second_force, [[1.0, 1.0, 1.0], [-3.0, -4.0, -5.0]])
-    assert len(link.external_torque_calls) == 1
-    first_torque, first_torque_local = link.external_torque_calls[0]
-    assert first_torque_local is False
-    np.testing.assert_allclose(first_torque, [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-
-    # Reapplying the same absolute wrench is persistent without accumulating
-    # another Motrix delta; clearing one reset row preserves the other env.
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            body_ids=np.asarray([0], dtype=np.int32),
-            body_force=np.asarray([[[2.0, 3.0, 4.0]], [[1.0, 1.0, 1.0]]], dtype=np.float64),
-            body_torque=np.asarray([[[0.1, 0.2, 0.3]], [[0.4, 0.5, 0.6]]], dtype=np.float64),
-        )
-    )
-    assert len(link.external_torque_calls) == 1
-    backend._clear_applied_body_forces(  # noqa: SLF001
-        np.asarray([0], dtype=np.int32), np.asarray([0], dtype=np.intp)
-    )
-    np.testing.assert_allclose(backend._applied_body_forces[0][0], 0.0)  # noqa: SLF001
-    np.testing.assert_allclose(backend._applied_body_torques[0][0], 0.0)  # noqa: SLF001
-    np.testing.assert_allclose(backend._applied_body_forces[0][1], [1.0, 1.0, 1.0])  # noqa: SLF001
-    np.testing.assert_allclose(backend._applied_body_torques[0][1], [0.4, 0.5, 0.6])  # noqa: SLF001
-
-
-def test_motrix_body_wrench_rejects_shape_target_and_missing_torque_capability() -> None:
-    import unilab.base.backend.motrix.backend as mod
-
-    link = _FakeMotrixLink()
-    backend = object.__new__(mod.MotrixBackend)
-    backend._num_envs = 2
-    backend._data = object()
-    backend._links_by_id = {0: link}
-    backend._supports_external_force = True
-    backend._supports_external_torque = True
-    backend._applied_body_forces = {}
-    backend._applied_body_torques = {}
-
-    with pytest.raises(ValueError, match="body torque must have shape"):
-        backend.apply_body_torque(
-            np.asarray([0], dtype=np.int32), np.zeros((2, 3), dtype=np.float64)
-        )
-    with pytest.raises(ValueError, match="Body id 2 not found"):
-        backend.apply_body_torque(
-            np.asarray([2], dtype=np.int32), np.zeros((2, 1, 3), dtype=np.float64)
-        )
-    backend._supports_external_torque = False
-    with pytest.raises(NotImplementedError, match="external-torque API"):
-        backend.apply_interval_randomization(
-            IntervalRandomizationPlan(
-                body_ids=np.asarray([0], dtype=np.int32),
-                body_torque=np.zeros((2, 1, 3), dtype=np.float64),
-            )
-        )
 
 
 def test_motrix_backend_defaults_max_iterations_to_three(monkeypatch, tmp_path) -> None:

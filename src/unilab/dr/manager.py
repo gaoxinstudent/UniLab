@@ -110,10 +110,6 @@ class DomainRandomizationManager:
             raise NotImplementedError(
                 f"{self._env._backend.backend_type} backend does not support interval body force perturbation"
             )
-        if plan.body_torque is not None and not self._capabilities.supports_interval_body_torque:
-            raise NotImplementedError(
-                f"{self._env._backend.backend_type} backend does not support interval body torque perturbation"
-            )
         self._env._backend.apply_interval_randomization(plan)
 
     def _log_unsupported_reset_terms(self, unsupported: frozenset[str]) -> None:

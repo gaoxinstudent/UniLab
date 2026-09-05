@@ -33,8 +33,7 @@ The selected owner YAML sets `training.sim_backend` as an identity field.
 - `--render-mode auto` opens Motrix native interactive rendering on Motrix
   paths.
 - `--render-mode record` records without opening an interactive window.
-- `--render-mode none` disables renderer playback. An entrypoint with an
-  explicit numerical evaluator may still execute a finite headless rollout.
+- `--render-mode none` disables playback.
 
 ```bash
 uv run eval --algo ppo --task go1_joystick_flat --sim mujoco --load-run -1

@@ -241,51 +241,6 @@ def test_handle_command_key_maps_drive_style_keys():
     assert commander.command.tolist() == [0.0, 0.0, 0.0]
 
 
-def test_play_interactive_builds_wheelbipe_source_keyboard_and_queues_jump():
-    mod = _load_script("play_interactive")
-
-    class FakeEnv:
-        __module__ = "unilab.envs.locomotion.wheelbipe_v14.joystick"
-
-        def __init__(self) -> None:
-            commands_cfg = type(
-                "Commands",
-                (),
-                {
-                    "vel_limit": [[-2.7, 0.0, -6.3], [2.7, 0.0, 6.3]],
-                    "heading_command": True,
-                    "resampling_time": 5.0,
-                },
-            )()
-            self.cfg = type(
-                "Cfg",
-                (),
-                {"commands": commands_cfg, "height_range": [0.20, 0.42]},
-            )()
-            self.state = type(
-                "State",
-                (),
-                {
-                    "info": {
-                        "commands": np.zeros((1, 3), dtype=np.float32),
-                        "height_commands": np.asarray([0.22], dtype=np.float32),
-                    }
-                },
-            )()
-
-    env = FakeEnv()
-    commander = mod._build_keyboard_commander(env, type("Args", (), {"keyboard": True})())
-
-    assert isinstance(commander, mod.WheelbipeKeyboardController)
-    mod._handle_command_key(commander, ord("W"))
-    mod._handle_command_key(commander, ord("Z"))
-    mod._handle_command_key(commander, ord("Q"))
-    commander.apply(env.state.info)
-    np.testing.assert_allclose(env.state.info["commands"], [[0.8, 0.0, 0.0]])
-    np.testing.assert_allclose(env.state.info["height_commands"], [0.32])
-    assert env.state.info["jump_takeoff_request"].tolist() == [True]
-
-
 def test_play_interactive_viewer_model_uses_shared_render_playback_resolver(
     tmp_path: Path, monkeypatch
 ):

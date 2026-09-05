@@ -23,13 +23,6 @@ RUN_PATH_IGNORED_PARTS = ("__pycache__", "outputs")
 SCRIPT_ASSIGNMENT_PATTERN = re.compile(r'^([A-Za-z0-9_.-]+)\s*=\s*"([^"]+)"\s*(?:#.*)?$')
 DEFAULT_ALGO_LOG_NAMES = {
     "ppo": "rsl_rl_ppo",
-    # The three custom WheelBipe algorithms share the dedicated runtime's
-    # log namespace.  Keep these defaults here because owner YAMLs only need
-    # to declare task/backend identity; completion must still discover runs
-    # before Hydra composes the root config.
-    "him_ppo": "custom_ppo",
-    "dreamwaq": "custom_ppo",
-    "np3o": "custom_ppo",
     "appo": "appo",
     "sac": "fast_sac",
     "td3": "fast_td3",
@@ -177,80 +170,11 @@ def _task_entries_for_offpolicy(root: Path) -> list[TaskCompletionEntry]:
     return entries
 
 
-def _task_entries_for_custom(root: Path) -> list[TaskCompletionEntry]:
-    """Return completion entries for the public custom WheelBipe routes.
-
-    Custom owner directories contain the algorithm in their name (for
-    example ``wheelbipe_v14_flat_him``), while the public CLI deliberately
-    exposes the stable task ``wheelbipe_v14_flat`` plus ``--algo``.  Mapping
-    back to that public spelling here keeps task completion aligned with
-    :func:`unilab.cli.build_route` and avoids suggesting an internal Hydra
-    owner slug that the CLI rejects.
-    """
-
-    entries: list[TaskCompletionEntry] = []
-    task_root = root / "conf" / "custom_ppo" / "task"
-    if not task_root.is_dir():
-        return entries
-    for algo, variant in sorted(cli.CUSTOM_ALGO_TASK_VARIANTS.items()):
-        task_dir = task_root / variant
-        if not task_dir.is_dir():
-            continue
-        for owner_yaml in sorted(task_dir.glob("*.yaml")):
-            sim = _sim_from_owner(owner_yaml.stem)
-            if sim is None:
-                continue
-            entries.append(
-                TaskCompletionEntry(
-                    algo=algo,
-                    task=cli.CUSTOM_ONPOLICY_TASK,
-                    sim=sim,
-                    owner=owner_yaml.stem,
-                )
-            )
-    return entries
-
-
-def _task_entries_for_upstream_aliases(root: Path) -> list[TaskCompletionEntry]:
-    """Expose executable upstream ids without advertising unported profiles.
-
-    The exact SCUT Gym ids are accepted by :func:`unilab.cli.build_route`,
-    but their owner YAML lives under the canonical UniLab task/algorithm
-    directory.  Completion therefore checks the resolved owner path before
-    adding an alias.  Unsupported source profiles remain intentionally absent
-    and are still diagnosed if typed explicitly.
-    """
-
-    entries: list[TaskCompletionEntry] = []
-    for task, source_route in sorted(cli.UPSTREAM_WHEELBIPE_CLI_ROUTES.items()):
-        if not source_route.supported:
-            continue
-        for sim in cli.SUPPORTED_SIMS:
-            try:
-                route = cli.build_route(source_route.algorithm, task, sim)
-            except SystemExit:
-                continue
-            owner_path = root / "conf" / route.config_group / "task" / route.owner_task
-            if not owner_path.is_file():
-                continue
-            entries.append(
-                TaskCompletionEntry(
-                    algo=source_route.algorithm,
-                    task=task,
-                    sim=sim,
-                    owner=sim,
-                )
-            )
-    return entries
-
-
 def _task_entries(root: Path) -> tuple[TaskCompletionEntry, ...]:
     entries = [
         *_task_entries_for_group(root, "ppo", ("ppo",)),
         *_task_entries_for_group(root, "appo", ("appo",)),
-        *_task_entries_for_custom(root),
         *_task_entries_for_offpolicy(root),
-        *_task_entries_for_upstream_aliases(root),
     ]
     return tuple(
         sorted(entries, key=lambda entry: (entry.task, entry.algo, entry.sim, entry.owner))

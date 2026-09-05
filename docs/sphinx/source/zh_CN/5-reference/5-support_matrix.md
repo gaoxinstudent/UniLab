@@ -22,8 +22,7 @@
 - `motrix`: `--render-mode auto` 会打开交互式 renderer 窗口，不录制视频，不受 `play_steps` 限制
 - `mjwarp`: 仅支持显式、有限步数的 `record`，通过 task owner 的 MuJoCo visual model 离线录制；不支持 `auto`、interactive 或 native renderer
 - `--render-mode record`: MuJoCo、mjwarp 和 Motrix 都只录制视频
-- `--render-mode none`: 不进行 renderer 回放；明确实现无界面数值评估的入口
-  （例如 WheelBipe PPO 和 custom 历史策略路由）仍可能执行有限步 rollout。
+- `--render-mode none`: 不回放
 
 ## Support Matrix
 
@@ -39,7 +38,7 @@ uv run scripts/generate_support_matrix.py --write
 | 等级 | 仓库事实来源 |
 |------|--------------|
 | `Registered` | `ensure_registries()` 导入后的 `registry.list_registered_envs()` 中存在该 env/backend。 |
-| `Configured` | 存在对应的 owner YAML：`conf/{ppo,appo,offpolicy,custom_ppo}/task/...`。 |
+| `Configured` | 存在对应的 owner YAML：`conf/{ppo,appo,offpolicy}/task/...`。 |
 | `Tested` | `tests/` 中有自动化覆盖该 entrypoint/task owner/backend 组合，或存在显式 maintainer 完整训练验证并具备近风险自动化测试。这里的 `Tested` 不等同于默认推荐路径。 |
 | `Benchmarked` | 存在与该组合绑定的已提交 benchmark manifest。 |
 | `Recommended` | 仓库中存在显式 recommendation 元数据。 |
@@ -47,8 +46,6 @@ uv run scripts/generate_support_matrix.py --write
 `Tested` 只描述仓库中已有自动化覆盖或显式 maintainer 训练验证，不代表该组合具备同名 MuJoCo owner 的全部 backend capability；例如 phase-1 Motrix owner 可能只覆盖训练 smoke 和明确启用的 DR 子集。
 
 `mjwarp` 只支持 `g1_walk_flat` host adapter。PPO (torch) 与 SAC (torch) owner 已完成训练验证，并有 backend、contract 与 playback 自动化覆盖，因此标记为 `Tested`。mjwarp playback 仅支持显式、有限步数的 `record` 并复用 MuJoCo 离线 renderer，不支持 `auto`、interactive 或 native playback。其他 entrypoint 中出现的 `Registered` 只表示 env/backend registry identity，不代表对应算法、terrain、完整 DR 或 production training 支持。
-
-HIM-PPO、DreamWaQ 和 NP3O + Barlow 的 custom WheelBipe 行只表示 owner 配置与 registry 证据；矩阵中的 task owner slug 是内部 config group 名称，公共 CLI 仍使用 `--task wheelbipe_v14_flat` 配合对应的 `--algo`。它们目前仅有 flat 的 MuJoCo/Motrix owner，没有 `mjwarp` owner。custom checkpoint 回放和历史策略 sim2sim 请使用专用 runner/helper。
 
 未检测到与这些组合绑定的已提交 benchmark manifest，因此当前不会自动提升到 `Benchmarked`。
 仓库中目前也没有单独的 recommendation 元数据，因此当前不会自动提升到 `Recommended`。
@@ -87,8 +84,6 @@ HIM-PPO、DreamWaQ 和 NP3O + Barlow 的 custom WheelBipe 行只表示 owner 配
 | PPO (torch) | `go2w_joystick_flat` (go2w joystick flat) | Tested | - | Tested |
 | PPO (torch) | `go2w_joystick_rough` (go2w joystick rough) | Tested | - | Tested |
 | PPO (torch) | `stewart_balance` (stewart balance) | Tested | - | Tested |
-| PPO (torch) | `wheelbipe_v14_flat` (wheelbipe v14 flat) | Configured | - | Configured |
-| PPO (torch) | `wheelbipe_v14_rough` (wheelbipe v14 rough) | Configured | - | Configured |
 | APPO (torch) | `go1_joystick_flat` (Go1 joystick) | Tested | - | Tested |
 | APPO (torch) | `go2_joystick_flat` (Go2 joystick) | Tested | - | Tested |
 | APPO (torch) | `g1_walk_flat` (G1 walk flat) | Tested | Registered | Registered |
@@ -122,14 +117,11 @@ HIM-PPO、DreamWaQ 和 NP3O + Barlow 的 custom WheelBipe 行只表示 owner 配
 | FlashSAC (torch) | `go2_joystick_flat` (Go2 joystick) | Tested | - | Registered |
 | FlashSAC (torch) | `g1_walk_flat` (G1 walk flat) | Tested | Configured | Tested |
 | FlashSAC (torch) | `g1_23dof_walk_flat` (g1 23dof walk flat) | Tested | - | Tested |
-| HIM-PPO (custom) | `wheelbipe_v14_flat_him` (WheelBipe V14 flat (HIM)) | Configured | - | Configured |
-| DreamWaQ (custom) | `wheelbipe_v14_flat_dreamwaq` (WheelBipe V14 flat (DreamWaQ)) | Configured | - | Configured |
-| NP3O + Barlow (custom) | `wheelbipe_v14_flat_np3o` (WheelBipe V14 flat (NP3O + Barlow)) | Configured | - | Configured |
 
 ### Source Index
 
 - Registry bootstrap: `src/unilab/envs/**` decorators via `unilab.base.registry.ensure_registries()`.
-- Owner YAML scan: `conf/ppo/task/**`, `conf/appo/task/**`, `conf/offpolicy/task/**`, and the dedicated custom owners under `conf/custom_ppo/task/**`.
+- Owner YAML scan: `conf/ppo/task/**`, `conf/appo/task/**`, `conf/offpolicy/task/**`.
 - Generic compose coverage: `tests/config/test_config_system.py::test_supported_task_composes`.
 - Validated mjwarp entrypoints are explicitly recorded in `_MAINTAINER_VALIDATED_MJWARP_ENTRYPOINT_TASKS`; near-risk coverage lives in `tests/base/test_mjwarp_backend.py`, `tests/base/test_backend_conformance.py`, `tests/base/test_mjwarp_differential.py`, and `tests/base/test_mjwarp_playback.py`.
 <!-- END GENERATED SUPPORT MATRIX -->

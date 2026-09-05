@@ -9,7 +9,7 @@ owner YAMLs under `conf/` and summarized in {doc}`../../5-reference/5-support_ma
 :::{grid-item-card} Locomotion
 :link: 1-locomotion
 :link-type: doc
-Go1, Go2, Go2W, G1 walking, and WheelBipe V14 owners.
+Go1, Go2, Go2W, and G1 walking owners.
 :::
 
 :::{grid-item-card} Motion tracking
@@ -39,5 +39,4 @@ Go2 plus Airbot arm locomotion and manipulation.
 2-motion_tracking
 3-manipulation
 4-manip_loco
-5-wheelbipe_v14
 ```

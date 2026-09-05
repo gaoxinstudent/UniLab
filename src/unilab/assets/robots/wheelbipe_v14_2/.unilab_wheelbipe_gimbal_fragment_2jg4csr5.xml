@@ -1,6 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<mujoco model="wheelbipe V14 locomotion task">
-  <keyframe>
-    <key name="home" qpos="0 0 0.38 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0" ctrl="0 0 0 0 0 0 0 0 0 0" />
-  </keyframe>
-</mujoco>

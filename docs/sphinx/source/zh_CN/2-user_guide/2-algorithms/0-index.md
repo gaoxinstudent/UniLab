@@ -11,9 +11,6 @@
 | TD3 | off-policy | `scripts/train_offpolicy.py` | `conf/offpolicy/algo/td3.yaml` |
 | FlashSAC | off-policy | `scripts/train_offpolicy.py` | `conf/offpolicy/algo/flashsac.yaml` |
 | HIM-PPO | 高度估计器 PPO 路径 | `scripts/train_him_ppo.py` | `conf/ppo_him/config.yaml` |
-| HIM-PPO（WheelBipe custom） | 紧凑历史 PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
-| DreamWaQ（WheelBipe custom） | 紧凑历史 PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
-| NP3O + Barlow（WheelBipe custom） | 带约束的紧凑 PPO | `scripts/train_custom_ppo.py` | `conf/custom_ppo/config.yaml` |
 | HORA | teacher/student 蒸馏路径 | `scripts/train_hora_distill.py` | `conf/hora_distill/config.yaml` |
 
 ```{toctree}

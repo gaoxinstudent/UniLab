@@ -9,14 +9,12 @@ import pytest
 
 from unilab.assets import ASSETS_ROOT_PATH
 from unilab.base.backend import (
-    create_discardvisual_xml,
     inject_mujoco_tracking_sensors,
     materialize_motrix_hfield_attached_scene,
     materialize_motrix_scene,
     materialize_mujoco_hfield_attached_scene,
     materialize_scene_fragments,
 )
-from unilab.base.scene import SceneCfg, TerrainSceneCfg
 
 
 def _g1_scene() -> str:
@@ -61,14 +59,6 @@ def _sharpa_robot() -> str:
 
 def _go2w_locomotion_task() -> str:
     return str(ASSETS_ROOT_PATH / "robots" / "go2w" / "locomotion_task.xml")
-
-
-def _wheelbipe_robot() -> str:
-    return str(ASSETS_ROOT_PATH / "robots" / "wheelbipe_v14_2" / "mjcf" / "wheelbipeV14_2.xml")
-
-
-def _wheelbipe_locomotion_task() -> str:
-    return str(ASSETS_ROOT_PATH / "robots" / "wheelbipe_v14_2" / "locomotion_task.xml")
 
 
 def _geom_id(model, mujoco, name: str) -> int:
@@ -121,33 +111,6 @@ def test_inject_mujoco_tracking_sensors_uses_mjspec_and_preserves_contract() -> 
             assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, sensor_name) >= 0
     finally:
         os.remove(tmp_xml)
-
-
-def test_inject_mujoco_tracking_sensors_removes_discarded_material_reference() -> None:
-    mujoco = pytest.importorskip("mujoco")
-
-    scene = str(ASSETS_ROOT_PATH / "robots" / "wheelbipe_v14_2" / "mjcf" / "scene_flat.xml")
-    physics_xml = create_discardvisual_xml(scene)
-    tracked_xml: str | None = None
-    try:
-        tracked_xml, _, _ = inject_mujoco_tracking_sensors(
-            physics_xml,
-            baselink_name="base_link",
-        )
-        model = mujoco.MjModel.from_xml_path(tracked_xml)
-        assert model.nmat == 0
-        assert (
-            mujoco.mj_name2id(
-                model,
-                mujoco.mjtObj.mjOBJ_SENSOR,
-                "track_pos_b_base_link",
-            )
-            >= 0
-        )
-    finally:
-        if tracked_xml is not None:
-            os.remove(tracked_xml)
-        os.remove(physics_xml)
 
 
 def test_materialize_motrix_scene_adds_tracking_frame_sensors() -> None:
@@ -326,79 +289,6 @@ def test_materialize_mujoco_hfield_attached_scene_preserves_go1_collision_xml(
         friction=(0.0, 0.0, 0.0),
     )
     assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "FL_foot_contact") >= 0
-
-
-def test_materialize_mujoco_hfield_scene_reloads_wheelbipe_visual_meshes(tmp_path) -> None:
-    mujoco = pytest.importorskip("mujoco")
-
-    from unilab.terrains import TerrainGeneratorCfg, flat
-
-    cfg = TerrainGeneratorCfg(
-        size=(4.0, 4.0),
-        horizontal_scale=0.2,
-        border_width=0.0,
-        num_rows=1,
-        num_cols=1,
-        sub_terrains={"flat": flat()},
-    )
-
-    materialize_mujoco_hfield_attached_scene(
-        model_file=_wheelbipe_robot(),
-        terrain_cfg=cfg,
-        output_dir=tmp_path,
-        fragment_files=[_wheelbipe_locomotion_task()],
-    )
-
-    scene_xml = tmp_path / "scene.xml"
-    visual_model = mujoco.MjModel.from_xml_path(str(scene_xml))
-    assert (
-        mujoco.mj_name2id(
-            visual_model,
-            mujoco.mjtObj.mjOBJ_MESH,
-            "left_spring1_link.STL",
-        )
-        >= 0
-    )
-
-
-def test_mujoco_hfield_scene_supports_precompiled_body_tracking_sensors() -> None:
-    mujoco = pytest.importorskip("mujoco")
-
-    from unilab.base.backend.mujoco.backend import MuJoCoBackend
-    from unilab.terrains import TerrainGeneratorCfg, flat
-
-    cfg = TerrainGeneratorCfg(
-        size=(4.0, 4.0),
-        horizontal_scale=0.2,
-        border_width=0.0,
-        num_rows=1,
-        num_cols=1,
-        sub_terrains={"flat": flat()},
-    )
-    backend = MuJoCoBackend(
-        SceneCfg(
-            model_file=_go2_mujoco_robot(),
-            fragment_files=[_go2_locomotion_task()],
-            terrain=TerrainSceneCfg(generator=cfg),
-        ),
-        num_envs=2,
-        sim_dt=0.005,
-        base_name="base",
-        add_body_sensors=True,
-    )
-    backend.materialize()
-
-    body_ids = backend.get_body_ids(["base", "FL_calf"])
-    assert backend.get_body_pos_w(body_ids).shape == (2, 2, 3)
-    assert backend.get_body_quat_b(body_ids).shape == (2, 2, 4)
-    assert (
-        mujoco.mj_name2id(
-            backend.model,
-            mujoco.mjtObj.mjOBJ_SENSOR,
-            "track_pos_b_base",
-        )
-        >= 0
-    )
 
 
 def test_materialize_mujoco_hfield_attached_scene_preserves_go2w_collision_xml(

@@ -13,24 +13,9 @@ from unilab.base.backend.base import BackendPlayRenderPlan, normalize_play_rende
 _TEST_LOG_ROOT_ENV = "UNILAB_TEST_LOG_ROOT"
 
 
-def should_run_playback(
-    *,
-    play_only: bool,
-    no_play: bool,
-    play_render_mode: str | None,
-    numerical_eval: bool = False,
-) -> bool:
-    """Return whether a caller should enter its playback lifecycle.
-
-    ``play_render_mode=none`` normally suppresses playback (including the
-    optional post-training path).  Entrypoints that implement a renderer-free
-    numerical evaluator may opt in explicitly with ``numerical_eval=True``;
-    this keeps ``play_only`` evaluation active without making unrelated
-    playbacks allocate an environment only to return from a backend no-op.
-    """
-
-    mode = normalize_play_render_mode(play_render_mode)
-    if mode == "none" and not (bool(play_only) and bool(numerical_eval)):
+def should_run_playback(*, play_only: bool, no_play: bool, play_render_mode: str | None) -> bool:
+    """Return whether train/eval should enter playback for the configured mode."""
+    if normalize_play_render_mode(play_render_mode) == "none":
         return False
     return bool(play_only) or not bool(no_play)
 
@@ -112,44 +97,6 @@ def get_latest_checkpoint(run_dir: str | Path, *, suffix: str = ".pt") -> Path |
     if not model_files:
         return None
     return max(model_files, key=_iteration)
-
-
-def resolve_latest_checkpoint_within_runs(
-    base_log_dir: str | Path,
-    *,
-    checkpoint: str | int | None = None,
-    suffix: str = ".pt",
-) -> tuple[Path | None, Path | None]:
-    """Find the newest run containing a usable model checkpoint.
-
-    This is intentionally separate from :func:`get_latest_run` and
-    :func:`resolve_checkpoint_path`: their established ``-1`` semantics pick
-    the lexicographically newest run even when that run is incomplete.  A few
-    compatibility aliases need a narrow fallback search across older runs;
-    callers opt into that behavior explicitly without changing generic
-    resume/playback resolution.
-    """
-
-    base_dir = Path(base_log_dir)
-    if not base_dir.is_dir():
-        return None, None
-    selected_checkpoint = None if checkpoint in (None, "", -1, "-1") else str(checkpoint)
-    run_dirs = sorted((path for path in base_dir.iterdir() if path.is_dir()), reverse=True)
-    for run_dir in run_dirs:
-        if selected_checkpoint is None:
-            candidate = get_latest_checkpoint(run_dir, suffix=suffix)
-        else:
-            filename = (
-                f"model_{selected_checkpoint}{suffix}"
-                if selected_checkpoint.isdigit()
-                else selected_checkpoint
-            )
-            candidate = run_dir / filename
-            if not candidate.is_file():
-                candidate = None
-        if candidate is not None and candidate.is_file():
-            return candidate, run_dir
-    return None, None
 
 
 def _normalize_load_run(load_run: str | int | PathLike[str]) -> str:

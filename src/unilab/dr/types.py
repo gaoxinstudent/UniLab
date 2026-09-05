@@ -39,7 +39,6 @@ class DomainRandomizationCapabilities:
     supports_interval_push: bool = False
     supports_interval_body_velocity_delta: bool = False
     supports_interval_body_force: bool = False
-    supports_interval_body_torque: bool = False
 
     def supports_reset_term(self, term: str) -> bool:
         return term in self.supported_reset_terms
@@ -138,30 +137,22 @@ class IntervalRandomizationPlan:
     body_ids: np.ndarray | None = None
     body_linear_velocity_delta: np.ndarray | None = None
     body_force: np.ndarray | None = None
-    body_torque: np.ndarray | None = None
 
     def is_empty(self) -> bool:
         return (
             self.push_perturbation_limit is None
             and self.body_linear_velocity_delta is None
             and self.body_force is None
-            and self.body_torque is None
         )
 
 
 @dataclass
 class InitRandomizationPlan:
-    model_assignments: np.ndarray = field(default_factory=lambda: np.zeros((0,), dtype=np.int32))
-    model_variants: tuple[ModelVariantSpec, ...] = field(default_factory=tuple)
-    dof_frictionloss: np.ndarray | None = None
-    dof_damping: np.ndarray | None = None
+    model_assignments: np.ndarray
+    model_variants: tuple[ModelVariantSpec, ...]
 
     def is_empty(self) -> bool:
-        return (
-            len(self.model_variants) == 0
-            and self.dof_frictionloss is None
-            and self.dof_damping is None
-        )
+        return len(self.model_variants) == 0
 
 
 @dataclass

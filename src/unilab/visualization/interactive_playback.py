@@ -385,7 +385,6 @@ def create_rsl_rl_playback_session(
 
     policy_obs_mode = playback_cfg.policy_obs_mode
     checkpoint_path: str | None = None
-    torchscript_archive = False
     if playback_cfg.action_mode == "policy":
         checkpoint_path = checkpoint_resolver(
             playback_cfg.task,
@@ -394,27 +393,20 @@ def create_rsl_rl_playback_session(
             playback_cfg.algo_log_name,
             playback_cfg.log_root,
         )
-        if checkpoint_path is not None:
-            from unilab.training.wheelbipe import is_wheelbipe_torchscript_archive
-
-            torchscript_archive = is_wheelbipe_torchscript_archive(checkpoint_path)
         if policy_obs_mode == "auto" and checkpoint_path is not None:
-            if torchscript_archive:
+            ckpt_dim = checkpoint_input_dim_reader(checkpoint_path)
+            if ckpt_dim == actor_obs_dim:
                 policy_obs_mode = "actor"
+            elif ckpt_dim == flat_obs_dim:
+                policy_obs_mode = "flat"
+            elif ckpt_dim is not None:
+                raise RuntimeError(
+                    "Checkpoint actor input dim mismatch: "
+                    f"ckpt={ckpt_dim}, actor_obs={actor_obs_dim}, flat_obs={flat_obs_dim}. "
+                    "Please pass --policy_obs_mode actor|flat explicitly if needed."
+                )
             else:
-                ckpt_dim = checkpoint_input_dim_reader(checkpoint_path)
-                if ckpt_dim == actor_obs_dim:
-                    policy_obs_mode = "actor"
-                elif ckpt_dim == flat_obs_dim:
-                    policy_obs_mode = "flat"
-                elif ckpt_dim is not None:
-                    raise RuntimeError(
-                        "Checkpoint actor input dim mismatch: "
-                        f"ckpt={ckpt_dim}, actor_obs={actor_obs_dim}, flat_obs={flat_obs_dim}. "
-                        "Please pass --policy_obs_mode actor|flat explicitly if needed."
-                    )
-                else:
-                    policy_obs_mode = "flat"
+                policy_obs_mode = "flat"
 
     wrapped_env = wrapper_cls(env, device=device_name, policy_obs_mode=policy_obs_mode)
     log(f"Policy obs mode: {policy_obs_mode} (actor_obs={actor_obs_dim}, flat_obs={flat_obs_dim})")
@@ -431,92 +423,35 @@ def create_rsl_rl_playback_session(
         else:
             if sim2sim_preflight is not None:
                 sim2sim_preflight(str(Path(checkpoint_path).parent))
+            log_dir = str(
+                entrypoint_log_root(
+                    Path(root_dir),
+                    algo_log_name=playback_cfg.algo_log_name,
+                    log_root=playback_cfg.log_root,
+                )
+                / playback_cfg.task
+                / "play_temp"
+            )
+            runner = runner_cls(wrapped_env, train_cfg, log_dir=log_dir, device=device_name)
             policy_obs_dim = actor_obs_dim if policy_obs_mode == "actor" else flat_obs_dim
             action_shape = env.action_space.shape
             policy_action_dim = int(action_shape[0]) if action_shape is not None else None
-            if torchscript_archive:
-                from unilab.training.wheelbipe import WheelbipeTorchScriptPolicy
-
-                policy = WheelbipeTorchScriptPolicy(checkpoint_path, device=device_name)
-                if policy_obs_dim != policy.contract.input_dim:
-                    raise ValueError(
-                        "Wheelbipe TorchScript policy requires a 35D actor observation, "
-                        f"but interactive play exposes {policy_obs_dim}"
-                    )
-                if policy_action_dim != policy.contract.output_dim:
-                    raise ValueError(
-                        "Wheelbipe TorchScript policy requires six actions, "
-                        f"but interactive play exposes {policy_action_dim}"
-                    )
-                log("Loaded upstream Wheelbipe TorchScript policy for interactive playback.")
-            else:
-                log_dir = str(
-                    entrypoint_log_root(
-                        Path(root_dir),
-                        algo_log_name=playback_cfg.algo_log_name,
-                        log_root=playback_cfg.log_root,
-                    )
-                    / playback_cfg.task
-                    / "play_temp"
+            with policy_load_dim_guard(
+                env_obs_dim=policy_obs_dim,
+                env_action_dim=policy_action_dim,
+                algo_name=playback_cfg.algo_log_name,
+            ):
+                runner.load(
+                    checkpoint_path,
+                    load_cfg={
+                        "actor": True,
+                        "critic": False,
+                        "optimizer": False,
+                        "iteration": False,
+                        "rnd": False,
+                    },
                 )
-                runner = runner_cls(wrapped_env, train_cfg, log_dir=log_dir, device=device_name)
-                checkpoint_payload = (
-                    torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-                    if Path(checkpoint_path).is_file()
-                    else None
-                )
-                source_checkpoint = (
-                    isinstance(checkpoint_payload, Mapping)
-                    and "actor_state_dict" not in checkpoint_payload
-                    and "model_state_dict" in checkpoint_payload
-                )
-                with policy_load_dim_guard(
-                    env_obs_dim=policy_obs_dim,
-                    env_action_dim=policy_action_dim,
-                    algo_name=playback_cfg.algo_log_name,
-                ):
-                    if source_checkpoint:
-                        from unilab.training.rsl_rl import (
-                            is_wheelbipe_source_ppo_checkpoint,
-                            load_wheelbipe_source_ppo_checkpoint,
-                        )
-
-                        if not is_wheelbipe_source_ppo_checkpoint(checkpoint_payload):
-                            raise ValueError(
-                                "Interactive checkpoint contains model_state_dict but is not "
-                                "a valid upstream Wheelbipe vanilla-PPO checkpoint"
-                            )
-                        assert isinstance(checkpoint_payload, Mapping)
-                        try:
-                            source_actor = runner.alg.actor
-                            source_critic = runner.alg.critic
-                        except AttributeError as exc:
-                            raise RuntimeError(
-                                "Upstream Wheelbipe interactive playback requires an RSL-RL "
-                                "runner exposing alg.actor and alg.critic"
-                            ) from exc
-                        load_wheelbipe_source_ppo_checkpoint(
-                            source_actor,
-                            source_critic,
-                            checkpoint_payload,
-                            map_location=device_name,
-                        )
-                        log(
-                            "Loaded upstream Wheelbipe PPO model_state_dict for interactive "
-                            "playback."
-                        )
-                    else:
-                        runner.load(
-                            checkpoint_path,
-                            load_cfg={
-                                "actor": True,
-                                "critic": False,
-                                "optimizer": False,
-                                "iteration": False,
-                                "rnd": False,
-                            },
-                        )
-                policy = runner.get_inference_policy(device=device_name)
+            policy = runner.get_inference_policy(device=device_name)
 
     log(f"Action mode: {playback_cfg.action_mode}")
     session = RslRlPlaybackSession(

@@ -19,7 +19,6 @@ if str(ROOT_DIR) not in sys.path:
 
 from unilab.algos.torch.rsl_rl_runtime import resolve_rsl_rl_ppo_runtime
 from unilab.base.backend import RenderClosedError, materialize_scene_visual_override
-from unilab.base.backend.base import normalize_play_render_mode
 from unilab.base.run_control import RunComplete
 from unilab.ipc.dp_launcher import (
     UNILAB_DP_LOG_DIR,
@@ -40,7 +39,6 @@ from unilab.training import (
     get_log_root,
     log_playback_plan,
     parse_checkpoint_path,
-    resolve_latest_checkpoint_within_runs,
     should_run_playback,
 )
 from unilab.training.experiment import (
@@ -52,30 +50,14 @@ from unilab.training.experiment import (
 from unilab.training.rsl_rl import (
     RslRlVecEnvWrapper,
     apply_rsl_rl_rank_seed,
-    configure_rsl_rl_null_logger,
     finish_rsl_rl_distributed,
-    is_wheelbipe_source_ppo_checkpoint,
-    load_wheelbipe_source_ppo_checkpoint,
-    maybe_load_wheelbipe_source_ppo_checkpoint,
     normalize_ppo_train_cfg,
     ppo_samples_per_iteration,
     resolve_rsl_rl_device,
     rsl_rl_single_process_topology,
 )
 from unilab.training.sim2sim import policy_load_dim_guard, resolve_sim2sim_config
-from unilab.training.wheelbipe import (
-    WheelbipeTorchScriptPolicy,
-    hydrate_wheelbipe_play_config,
-    is_wheelbipe_torchscript_archive,
-    wheelbipe_play_checkpoint_task_candidates,
-)
 from unilab.utils.device import get_default_device
-
-# Playback exports the policy when this file is executed as the CLI entrypoint.
-# Keep the module importable for tests and embedding callers, where ``__main__``
-# is not evaluated and a missing global would otherwise raise ``NameError``.
-EXPORT_POLICY = False
-
 
 try:
     from rsl_rl.runners import OnPolicyRunner
@@ -253,210 +235,6 @@ def _resolve_play_num_steps(cfg: DictConfig) -> int | None:
     return int(play_steps)
 
 
-def _run_rsl_rl_numerical_playback(
-    wrapped_env: Any,
-    policy: Any,
-    *,
-    num_steps: int | None,
-) -> tuple[float, int]:
-    """Execute finite headless policy evaluation without a renderer.
-
-    Backend ``run_playback_mode`` intentionally treats ``none`` as a request
-    to skip rendering and therefore returns before calling ``initialize`` or
-    ``step``.  The eval lifecycle still needs a concrete rollout for a
-    checkpoint-only, headless validation, so this helper drives the public
-    VecEnv wrapper directly.  It is deliberately renderer/backend agnostic.
-    """
-
-    if num_steps is None or int(num_steps) < 1:
-        raise ValueError(
-            "PPO numerical playback requires a positive finite training.play_steps value."
-        )
-    steps = int(num_steps)
-    observations = wrapped_env.reset()[0]
-    reward_sum = 0.0
-    done_count = 0
-    with torch.inference_mode():
-        for _ in range(steps):
-            next_observations, rewards, dones, _infos = wrapped_env.step(policy(observations))
-            reward_tensor = (
-                rewards if isinstance(rewards, torch.Tensor) else torch.as_tensor(rewards)
-            )
-            done_tensor = dones if isinstance(dones, torch.Tensor) else torch.as_tensor(dones)
-            reward_sum += float(reward_tensor.detach().float().mean().item())
-            done_count += int(torch.count_nonzero(done_tensor).item())
-            observations = next_observations
-    return reward_sum / float(steps), done_count
-
-
-def _close_play_env(env: Any) -> None:
-    """Close a playback environment when it exposes the public lifecycle hook.
-
-    A few lightweight embedding/test environments intentionally implement only
-    ``run_playback_mode`` and do not need a resource owner.  Treating ``close``
-    as an optional *public* lifecycle hook keeps those adapters usable while
-    ensuring every real UniLab environment is closed on success and failure.
-    This is deliberately not a backend capability probe.
-    """
-
-    close = getattr(env, "close", None)
-    if callable(close):
-        close()
-
-
-def _play_rsl_rl_with_env(
-    cfg: DictConfig,
-    device: str,
-    env: Any,
-    wrapper_cls: Any,
-    rl_cfg: dict[str, Any],
-    load_path: Path,
-    load_path_dir: Path,
-    *,
-    source_checkpoint: bool = False,
-    torchscript_policy: WheelbipeTorchScriptPolicy | None = None,
-) -> str | None:
-    """Run the post-materialization playback lifecycle with guaranteed close.
-
-    Keeping setup and playback inside this helper makes the ``finally`` cover
-    wrapper/runner construction, checkpoint loading, export, and renderer
-    failures—not only the final ``run_playback_mode`` call.
-    """
-
-    try:
-        wrapped_env = wrapper_cls(env, device=device)
-        runner: Any | None = None
-        if torchscript_policy is None:
-            train_cfg = normalize_ppo_train_cfg(rl_cfg)
-            apply_ppo_runtime_flags(train_cfg, cfg, training_enabled=False)
-            if "runner" not in train_cfg:
-                train_cfg["runner"] = {}
-            train_cfg["runner"]["logger"] = "none"
-
-            runner = cast(
-                Any,
-                OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=None, device=device),
-            )
-            # ``runner`` is assigned in this branch and remains absent only
-            # for the separate TorchScript path below.  Make that invariant
-            # explicit for static analyzers before invoking runner methods.
-            assert runner is not None
-            with policy_load_dim_guard(
-                env_obs_dim=getattr(wrapped_env, "num_obs", None),
-                env_action_dim=getattr(wrapped_env, "num_actions", None),
-                algo_name="ppo",
-            ):
-                if source_checkpoint:
-                    try:
-                        source_algorithm = runner.alg
-                        source_actor = source_algorithm.actor
-                        source_critic = source_algorithm.critic
-                    except AttributeError as exc:
-                        raise RuntimeError(
-                            "Upstream Wheelbipe PPO playback requires an RSL-RL runner "
-                            "exposing alg.actor and alg.critic"
-                        ) from exc
-                    load_wheelbipe_source_ppo_checkpoint(
-                        source_actor,
-                        source_critic,
-                        load_path,
-                        map_location=device,
-                    )
-                    print(
-                        "Loaded upstream Wheelbipe PPO model_state_dict "
-                        "(actor/critic weights only; optimizer state is not resumed)."
-                    )
-                else:
-                    runner.load(str(load_path), map_location=device)
-            policy = runner.get_inference_policy(device=device)
-            if EXPORT_POLICY:
-                runner.export_policy_to_onnx(path=str(load_path_dir))
-                runner.export_policy_to_jit(path=str(load_path_dir))
-        else:
-            # A source ``policy.pt`` is already an inference-only actor.  Do
-            # not instantiate a second RSL-RL network: its configured hidden
-            # dimensions may differ from the serialized source graph.  Keep
-            # the environment-facing dimensions strict before any rollout.
-            env_obs_dim = int(getattr(wrapped_env, "num_obs", -1))
-            env_action_dim = int(getattr(wrapped_env, "num_actions", -1))
-            if env_obs_dim != torchscript_policy.contract.input_dim:
-                raise ValueError(
-                    "Wheelbipe TorchScript policy requires a 35D actor observation, "
-                    f"but the play environment exposes {env_obs_dim}"
-                )
-            if env_action_dim != torchscript_policy.contract.output_dim:
-                raise ValueError(
-                    "Wheelbipe TorchScript policy requires six actions, "
-                    f"but the play environment exposes {env_action_dim}"
-                )
-            policy = torchscript_policy
-        num_steps = _resolve_play_num_steps(cfg)
-        play_render_mode = normalize_play_render_mode(
-            getattr(cfg.training, "play_render_mode", "auto")
-        )
-        if play_render_mode == "none":
-            mean_reward, done_count = _run_rsl_rl_numerical_playback(
-                wrapped_env,
-                policy,
-                num_steps=num_steps,
-            )
-            print(
-                "PPO numerical playback complete: "
-                f"steps={int(num_steps) if num_steps is not None else 0} "
-                f"mean_reward={mean_reward:.6f} done_count={done_count}"
-            )
-            return None
-        output_video = Path(load_path_dir) / "play_video.mp4"
-        playback_mode: str | None = None
-
-        def _log_plan(plan) -> None:
-            nonlocal playback_mode
-            playback_mode = plan.mode
-            log_playback_plan(plan)
-
-        play_video_path: str | None = None
-        try:
-            with torch.inference_mode():
-                play_video_path = env.run_playback_mode(
-                    play_render_mode=getattr(cfg.training, "play_render_mode", "auto"),
-                    play_steps=num_steps,
-                    output_video=output_video,
-                    render_spacing=float(
-                        getattr(
-                            cfg.training, "render_spacing", getattr(env.cfg, "render_spacing", 1.0)
-                        )
-                    ),
-                    render_offset_mode=str(getattr(env.cfg, "render_offset_mode", "grid")),
-                    initialize=lambda: wrapped_env.reset()[0],
-                    step=lambda obs: wrapped_env.step(policy(obs))[0],
-                    camera_kwargs={
-                        "cam_distance": cfg.training.cam_distance,
-                        "cam_elevation": cfg.training.cam_elevation,
-                        "cam_azimuth": cfg.training.cam_azimuth,
-                        "cam_lookat": getattr(cfg.training, "cam_lookat", None),
-                        "cam_tracking": getattr(cfg.training, "cam_tracking", False),
-                        "cam_tracking_env_idx": getattr(cfg.training, "cam_tracking_env_idx", 0),
-                        "cam_tracking_extra_envs": getattr(
-                            cfg.training, "cam_tracking_extra_envs", 2
-                        ),
-                    },
-                    on_plan=_log_plan,
-                    extra_data_getter=(
-                        (lambda: getattr(env, "curr_ee_goal_world", None))
-                        if hasattr(env, "curr_ee_goal_world")
-                        else None
-                    ),
-                )
-        except RenderClosedError:
-            # Interface-level signal: the user closed the backend render window.
-            print("Render window closed.")
-        if playback_mode != "none" and num_steps is not None:
-            print("Done.")
-        return play_video_path
-    finally:
-        _close_play_env(env)
-
-
 def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
     """Play mode for RSL-RL."""
     rl_cfg = _algo_config_dict(cfg)
@@ -464,31 +242,8 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
 
     task_log_root = get_log_root(ROOT_DIR, cfg) / str(cfg.training.task_name)
     load_path, load_path_dir = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
-    # Exact upstream PPO Play aliases keep a named environment variant (for
-    # example ``WheelbipeV14FlatPlayV0``), while ordinary training writes its
-    # latest checkpoint under the canonical non-Play owner.  For the default
-    # latest-run sentinel only, search those non-Play roots after the variant
-    # root.  Explicit run ids and absolute paths retain their original,
-    # fail-closed behavior.
-    play_checkpoint_fallbacks = wheelbipe_play_checkpoint_task_candidates(
-        str(cfg.training.task_name)
-    )
-    if load_path is None and str(OmegaConf.select(cfg, "algo.load_run", default="-1")) == "-1":
-        for fallback_task in play_checkpoint_fallbacks:
-            fallback_root = get_log_root(ROOT_DIR, cfg) / fallback_task
-            fallback_path, fallback_dir = resolve_latest_checkpoint_within_runs(
-                fallback_root,
-                checkpoint=OmegaConf.select(cfg, "algo.checkpoint", default=-1),
-            )
-            if fallback_path is not None and fallback_dir is not None:
-                load_path, load_path_dir = fallback_path, fallback_dir
-                print(
-                    "Using latest non-Play checkpoint for exact Wheelbipe Play owner: "
-                    f"task={fallback_task}"
-                )
-                break
     if load_path is None or load_path_dir is None or not load_path.exists():
-        raise FileNotFoundError(
+        print(
             _format_play_checkpoint_error(
                 cfg,
                 task_log_root=task_log_root,
@@ -496,46 +251,16 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
                 load_path_dir=load_path_dir,
             )
         )
-
-    # A canonical task can have checkpoints produced by an exact source
-    # variant (for example ``WheelbipeV14RoughV1``).  Resolve that owner from
-    # the checkpoint sidecar before constructing the environment, otherwise a
-    # same-shaped 35/78/6 policy may be evaluated with legacy reset and
-    # state-machine semantics.
-    cfg = hydrate_wheelbipe_play_config(load_path_dir, cfg)
+        return None
 
     print(f"Loading latest model: {load_path}")
-    torchscript_policy: WheelbipeTorchScriptPolicy | None = None
-    source_checkpoint = False
-    if is_wheelbipe_torchscript_archive(load_path):
-        # Source ``policy.pt`` files are serialized executable actors rather
-        # than optimizer checkpoints.  Load and validate them before creating
-        # the simulator; this also avoids requiring the source hidden
-        # dimensions in the target RSL-RL config.
-        torchscript_policy = WheelbipeTorchScriptPolicy(load_path, device=device)
+    _ckpt_keys = set(torch.load(load_path, map_location="cpu", weights_only=True).keys())
+    if "actor_state_dict" not in _ckpt_keys:
         print(
-            "Loaded upstream Wheelbipe TorchScript policy "
-            "(inference weights only; optimizer state is not resumed)."
+            f"Checkpoint at {load_path} is not an rsl-rl checkpoint "
+            f"(found keys: {_ckpt_keys}). Aborting play."
         )
-    else:
-        checkpoint_payload = torch.load(load_path, map_location="cpu", weights_only=True)
-        if not isinstance(checkpoint_payload, dict):
-            _ckpt_keys = {type(checkpoint_payload).__name__}
-        else:
-            _ckpt_keys = set(checkpoint_payload.keys())
-        source_checkpoint = (
-            "actor_state_dict" not in _ckpt_keys and "model_state_dict" in _ckpt_keys
-        )
-        if source_checkpoint and not is_wheelbipe_source_ppo_checkpoint(checkpoint_payload):
-            raise ValueError(
-                f"Checkpoint at {load_path} contains model_state_dict but is not a valid "
-                "upstream Wheelbipe vanilla-PPO checkpoint (expected std plus actor/critic "
-                "weight/bias pairs)."
-            )
-        if "actor_state_dict" not in _ckpt_keys and not source_checkpoint:
-            raise ValueError(
-                f"Checkpoint at {load_path} is not an rsl-rl checkpoint (found keys: {_ckpt_keys})."
-            )
+        return None
 
     cfg = (
         resolve_sim2sim_config(
@@ -554,17 +279,70 @@ def play_rsl_rl(cfg: DictConfig, device: str) -> str | None:
         num_envs=cfg.training.play_env_num,
         env_cfg_override=env_cfg_override,
     )
-    return _play_rsl_rl_with_env(
-        cfg,
-        device,
-        env,
-        wrapper_cls,
-        rl_cfg,
-        load_path,
-        load_path_dir,
-        source_checkpoint=source_checkpoint,
-        torchscript_policy=torchscript_policy,
+    wrapped_env = wrapper_cls(env, device=device)
+    train_cfg = normalize_ppo_train_cfg(rl_cfg)
+    apply_ppo_runtime_flags(train_cfg, cfg, training_enabled=False)
+    if "runner" not in train_cfg:
+        train_cfg["runner"] = {}
+    train_cfg["runner"]["logger"] = "none"
+
+    runner = cast(
+        Any,
+        OnPolicyRunner(cast(Any, wrapped_env), train_cfg, log_dir=None, device=device),
     )
+    with policy_load_dim_guard(
+        env_obs_dim=getattr(wrapped_env, "num_obs", None),
+        env_action_dim=getattr(wrapped_env, "num_actions", None),
+        algo_name="ppo",
+    ):
+        runner.load(str(load_path), map_location=device)
+    policy = runner.get_inference_policy(device=device)
+    if EXPORT_POLICY:
+        runner.export_policy_to_onnx(path=str(load_path_dir))
+        runner.export_policy_to_jit(path=str(load_path_dir))
+    num_steps = _resolve_play_num_steps(cfg)
+    output_video = Path(load_path_dir) / "play_video.mp4"
+    playback_mode: str | None = None
+
+    def _log_plan(plan) -> None:
+        nonlocal playback_mode
+        playback_mode = plan.mode
+        log_playback_plan(plan)
+
+    try:
+        with torch.inference_mode():
+            play_video_path = env.run_playback_mode(
+                play_render_mode=getattr(cfg.training, "play_render_mode", "auto"),
+                play_steps=num_steps,
+                output_video=output_video,
+                render_spacing=float(
+                    getattr(cfg.training, "render_spacing", getattr(env.cfg, "render_spacing", 1.0))
+                ),
+                render_offset_mode=str(getattr(env.cfg, "render_offset_mode", "grid")),
+                initialize=lambda: wrapped_env.reset()[0],
+                step=lambda obs: wrapped_env.step(policy(obs))[0],
+                camera_kwargs={
+                    "cam_distance": cfg.training.cam_distance,
+                    "cam_elevation": cfg.training.cam_elevation,
+                    "cam_azimuth": cfg.training.cam_azimuth,
+                    "cam_lookat": getattr(cfg.training, "cam_lookat", None),
+                    "cam_tracking": getattr(cfg.training, "cam_tracking", False),
+                    "cam_tracking_env_idx": getattr(cfg.training, "cam_tracking_env_idx", 0),
+                    "cam_tracking_extra_envs": getattr(cfg.training, "cam_tracking_extra_envs", 2),
+                },
+                on_plan=_log_plan,
+                extra_data_getter=(
+                    (lambda: getattr(env, "curr_ee_goal_world", None))
+                    if hasattr(env, "curr_ee_goal_world")
+                    else None
+                ),
+            )
+    except RenderClosedError:
+        # Interface-level signal: the user closed the backend render window.
+        print("Render window closed.")
+    if playback_mode != "none" and num_steps is not None:
+        print("Done.")
+    return play_video_path
 
 
 @hydra.main(version_base="1.3", config_path="../conf/ppo", config_name="config")
@@ -590,12 +368,12 @@ def main(cfg: DictConfig) -> None:
     # env, tracker, and runner construction all happen inside workers.
     if devices is not None and len(devices) > 1 and world_size == 1:
         if not cfg.training.play_only:
-            launch_log_dir = resolve_ppo_log_dir(cfg, world_size=len(devices))
+            log_dir = resolve_ppo_log_dir(cfg, world_size=len(devices))
             launch_torchrun_workers(
                 devices,
                 script_path=Path(__file__),
                 argv=sys.argv[1:],
-                log_dir=launch_log_dir,
+                log_dir=log_dir,
             )
             return
         validate_dp_launchable(devices)
@@ -640,7 +418,6 @@ def main(cfg: DictConfig) -> None:
             f"num_timesteps {cfg.training.num_timesteps}"
         )
 
-    log_dir: str | None
     if not cfg.training.play_only:
         log_dir = resolve_ppo_log_dir(cfg, world_size=world_size)
     else:
@@ -728,37 +505,13 @@ def main(cfg: DictConfig) -> None:
                             cast(Any, wrapped_env), train_cfg, log_dir=log_dir, device=device
                         ),
                     )
-                    if logger_type == "none":
-                        configure_rsl_rl_null_logger(runner)
                     patch_rsl_rl_action_std_logging(runner)
 
                     if cfg.algo.load_run != "-1":
                         resume_path, _ = parse_checkpoint_path(cfg, root_dir=ROOT_DIR)
                         if resume_path:
-                            source_warmstart = maybe_load_wheelbipe_source_ppo_checkpoint(
-                                runner,
-                                resume_path,
-                                map_location=device,
-                            )
-                            if source_warmstart:
-                                print(
-                                    "Warm-starting from upstream Wheelbipe PPO "
-                                    f"weights: {resume_path} "
-                                    "(fresh optimizer and RSL-RL iteration)"
-                                )
-                            else:
-                                print(f"Resuming from {resume_path}")
-                                runner.load(str(resume_path), map_location=device)
-                            # The runner restores its completed iteration, but
-                            # the freshly materialized env starts its local
-                            # step counter at zero.  Forward that lifecycle
-                            # anchor through the generic wrapper hook so
-                            # source-owned curricula do not restart silently.
-                            sync_iteration = getattr(wrapped_env, "sync_training_iteration", None)
-                            if callable(sync_iteration):
-                                sync_iteration(
-                                    int(getattr(runner, "current_learning_iteration", 0))
-                                )
+                            print(f"Resuming from {resume_path}")
+                            runner.load(str(resume_path), map_location=device)
 
                     initial_timesteps = int(getattr(runner.logger, "tot_timesteps", 0))
                     initial_training_time = float(getattr(runner.logger, "tot_time", 0.0))
@@ -841,7 +594,6 @@ def main(cfg: DictConfig) -> None:
                 play_only=cfg.training.play_only,
                 no_play=cfg.training.no_play,
                 play_render_mode=getattr(cfg.training, "play_render_mode", "auto"),
-                numerical_eval=True,
             )
         ):
             # torchrun rank variables outlive the training process group. Mask

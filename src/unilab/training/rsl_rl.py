@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import os
-import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
@@ -17,50 +16,6 @@ from tensordict import TensorDict
 from unilab.base.final_observation import resolve_terminal_observation_contract
 from unilab.base.np_env import NpEnvState
 from unilab.utils.tensor import to_numpy, to_torch
-
-
-class _NullRslRlWriter:
-    """Writer sink used when a PPO run explicitly disables metric logging.
-
-    Recent RSL-RL releases accept only ``tensorboard``, ``wandb`` and
-    ``neptune`` logger names, but UniLab's training contract also permits
-    ``training.logger=none`` for headless runs.  The upstream runner uses a
-    non-null writer as the condition for saving checkpoints, so this sink is
-    deliberately retained instead of passing ``log_dir=None`` (which would
-    silently disable checkpoint persistence as well).
-    """
-
-    def add_scalar(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-
-    def add_video(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-
-    def close(self) -> None:
-        return None
-
-
-def configure_rsl_rl_null_logger(runner: Any) -> None:
-    """Make an RSL-RL runner honor UniLab's ``logger=none`` setting.
-
-    RSL-RL initializes its writer lazily inside ``learn`` and raises for the
-    otherwise valid UniLab value ``none``.  Replace only that initialization
-    hook; tensorboard/W&B/Neptune modes continue to use the upstream logger,
-    while checkpoint saves remain enabled through the non-null sink.
-    """
-
-    logger = getattr(runner, "logger", None)
-    if logger is None:
-        raise ValueError("RSL-RL runner must expose a logger to disable metric output")
-
-    def _init_null_writer() -> None:
-        logger.logger_type = "none"
-        # Preserve RSL-RL's distributed rank gate.  Non-zero workers must
-        # keep ``writer=None`` so they do not race rank zero while saving a
-        # shared checkpoint path.
-        logger.writer = None if bool(getattr(logger, "disable_logs", False)) else _NullRslRlWriter()
-
-    logger.init_logging_writer = _init_null_writer
 
 
 def apply_rsl_rl_rank_seed(cfg: Any, rank: int) -> int:
@@ -166,13 +121,6 @@ def normalize_ppo_train_cfg(train_cfg: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(train_cfg)
     algorithm_cfg = normalized.get("algorithm")
     if isinstance(algorithm_cfg, dict):
-        # ``enable_compile`` belongs to UniLab's FinalObservationAwarePPO
-        # wrapper.  Upstream rsl_rl.algorithms.ppo.PPO has no such argument;
-        # keep the source-vanilla algorithm selectable for migration A/B runs
-        # without leaking owner-only options into its constructor.
-        algorithm_class = str(algorithm_cfg.get("class_name", ""))
-        if not algorithm_class.startswith("unilab."):
-            algorithm_cfg.pop("enable_compile", None)
         for key in (
             "target_kl_stop",
             "adaptive_kl_beta",
@@ -228,260 +176,6 @@ def normalize_ppo_train_cfg(train_cfg: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-# The upstream ``wheeled-legged_RL`` runner serializes its vanilla PPO models
-# under one ``model_state_dict`` with keys such as ``actor.0.weight`` and a
-# top-level ``std`` parameter.  Current RSL-RL keeps the two models separate
-# and prefixes the same layers with ``mlp``.  Keep this translation at the
-# training/checkpoint boundary so scripts do not grow a second model format.
-_WHEELBIPE_SOURCE_MLP_KEY = re.compile(r"^(actor|critic)\.(\d+)\.(weight|bias)$")
-
-
-def _extract_wheelbipe_source_ppo_state(
-    payload: Mapping[str, Any],
-) -> dict[str, torch.Tensor]:
-    """Validate and extract an upstream Wheelbipe vanilla-PPO state mapping.
-
-    The source project has several custom algorithms with a ``model_state_dict``
-    key as well.  Requiring the exact vanilla ``actor.*``/``critic.*``/``std``
-    shape keeps this adapter from silently treating those compact graphs as a
-    standard actor.  Structural validation happens before any target module is
-    touched, so malformed artifacts fail closed without partial loading.
-    """
-
-    if not isinstance(payload, Mapping):
-        raise ValueError(
-            f"Upstream Wheelbipe PPO checkpoint must be a mapping, got {type(payload).__name__}"
-        )
-    raw_state = payload.get("model_state_dict")
-    if not isinstance(raw_state, Mapping):
-        raise ValueError(
-            "Upstream Wheelbipe PPO checkpoint must contain a mapping under model_state_dict"
-        )
-    if not raw_state:
-        raise ValueError("Upstream Wheelbipe PPO model_state_dict cannot be empty")
-
-    state: dict[str, torch.Tensor] = {}
-    for key, value in raw_state.items():
-        if not isinstance(key, str):
-            raise ValueError("Upstream Wheelbipe PPO model_state_dict keys must be strings")
-        if key != "std" and _WHEELBIPE_SOURCE_MLP_KEY.fullmatch(key) is None:
-            raise ValueError(
-                "Upstream Wheelbipe PPO model_state_dict contains unsupported key "
-                f"{key!r}; expected std, actor.<layer>.<weight|bias>, or "
-                "critic.<layer>.<weight|bias>"
-            )
-        if not isinstance(value, torch.Tensor):
-            raise ValueError(
-                "Upstream Wheelbipe PPO model_state_dict values must be tensors; "
-                f"key {key!r} has {type(value).__name__}"
-            )
-        if not value.is_floating_point():
-            raise ValueError(
-                "Upstream Wheelbipe PPO model_state_dict tensors must use a floating dtype; "
-                f"key {key!r} has dtype {value.dtype}"
-            )
-        state[key] = value
-
-    std = state.get("std")
-    if std is None:
-        raise ValueError("Upstream Wheelbipe PPO model_state_dict is missing std")
-    if std.ndim != 1 or std.numel() == 0:
-        raise ValueError(
-            "Upstream Wheelbipe PPO std must be a non-empty rank-1 tensor, "
-            f"got shape {tuple(std.shape)}"
-        )
-    if not bool(torch.isfinite(std).all()):
-        raise ValueError("Upstream Wheelbipe PPO std contains non-finite values")
-    if not bool(torch.gt(std, 0).all()):
-        raise ValueError("Upstream Wheelbipe PPO std must contain strictly positive values")
-
-    for branch in ("actor", "critic"):
-        branch_keys = [key for key in state if key.startswith(f"{branch}.")]
-        if not branch_keys:
-            raise ValueError(f"Upstream Wheelbipe PPO model_state_dict is missing the {branch} MLP")
-        layer_parameters: dict[str, set[str]] = {}
-        for key in branch_keys:
-            match = _WHEELBIPE_SOURCE_MLP_KEY.fullmatch(key)
-            # The key was checked above; this guard keeps the invariant obvious
-            # to both readers and static analyzers.
-            if match is None:
-                raise ValueError(f"Invalid upstream Wheelbipe PPO {branch} key {key!r}")
-            layer_parameters.setdefault(match.group(2), set()).add(match.group(3))
-        incomplete = sorted(
-            layer
-            for layer, parameters in layer_parameters.items()
-            if parameters != {"weight", "bias"}
-        )
-        if incomplete:
-            raise ValueError(
-                f"Upstream Wheelbipe PPO {branch} MLP has incomplete weight/bias pairs "
-                f"for layer(s) {incomplete}"
-            )
-
-    return state
-
-
-def is_wheelbipe_source_ppo_checkpoint(payload: object) -> bool:
-    """Return whether ``payload`` has the strict upstream vanilla-PPO format."""
-
-    if not isinstance(payload, Mapping):
-        return False
-    try:
-        _extract_wheelbipe_source_ppo_state(payload)
-    except (TypeError, ValueError, RuntimeError):
-        return False
-    return True
-
-
-def _validate_wheelbipe_target_state(
-    target_state: Mapping[str, torch.Tensor],
-    candidate_state: Mapping[str, torch.Tensor],
-    *,
-    label: str,
-) -> None:
-    """Check keys and tensor shapes before invoking ``load_state_dict``."""
-
-    target_keys = set(target_state)
-    candidate_keys = set(candidate_state)
-    missing = sorted(target_keys - candidate_keys)
-    unexpected = sorted(candidate_keys - target_keys)
-    if missing or unexpected:
-        details: list[str] = []
-        if missing:
-            details.append(f"missing={missing}")
-        if unexpected:
-            details.append(f"unexpected={unexpected}")
-        raise ValueError(
-            "Upstream Wheelbipe PPO "
-            f"{label} state does not match the target RSL-RL model (" + "; ".join(details) + "). "
-            "Use the matching Wheelbipe policy hidden dimensions and disable observation "
-            "normalization when loading a source checkpoint."
-        )
-
-    for key in sorted(target_keys):
-        target_shape = tuple(target_state[key].shape)
-        candidate_shape = tuple(candidate_state[key].shape)
-        if target_shape != candidate_shape:
-            # Keep the canonical phrase used by ``policy_load_dim_guard`` so a
-            # cross-backend shape mismatch is surfaced with its richer context.
-            raise ValueError(
-                f"size mismatch for {label}.{key}: checkpoint shape {candidate_shape}, "
-                f"target shape {target_shape}"
-            )
-
-
-def load_wheelbipe_source_ppo_checkpoint(
-    actor: torch.nn.Module,
-    critic: torch.nn.Module,
-    checkpoint: str | os.PathLike[str] | Mapping[str, Any],
-    *,
-    map_location: str | torch.device | None = "cpu",
-) -> dict[str, Any]:
-    """Load an upstream Wheelbipe vanilla-PPO checkpoint into RSL-RL models.
-
-    Upstream checkpoints contain one ``model_state_dict`` and an optimizer
-    state whose parameter IDs belong to the source runner.  Playback only needs
-    the actor/critic weights, so this adapter deliberately does not restore the
-    source optimizer or iteration counters.  Training resume continues to use
-    the native RSL-RL checkpoint contract.
-
-    Both target modules are preflight-validated before either is mutated.  A
-    hidden-dimension, observation-dimension, or normalization mismatch thus
-    produces an actionable error rather than a partially loaded policy.
-    """
-
-    if isinstance(checkpoint, Mapping):
-        payload: Any = checkpoint
-    else:
-        payload = torch.load(checkpoint, map_location=map_location, weights_only=True)
-    if not isinstance(payload, Mapping):
-        raise ValueError(
-            f"Upstream Wheelbipe PPO checkpoint must be a mapping, got {type(payload).__name__}"
-        )
-    source_state = _extract_wheelbipe_source_ppo_state(payload)
-
-    actor_target = actor.state_dict()
-    critic_target = critic.state_dict()
-    actor_candidate: dict[str, torch.Tensor] = {}
-    critic_candidate: dict[str, torch.Tensor] = {}
-    for key, value in source_state.items():
-        if key == "std":
-            continue
-        match = _WHEELBIPE_SOURCE_MLP_KEY.fullmatch(key)
-        if match is None:  # pragma: no cover - extraction validates this branch
-            raise ValueError(f"Invalid upstream Wheelbipe PPO model key {key!r}")
-        target_key = f"mlp.{match.group(2)}.{match.group(3)}"
-        if match.group(1) == "actor":
-            actor_candidate[target_key] = value
-        else:
-            critic_candidate[target_key] = value
-
-    if "distribution.std_param" in actor_target:
-        std_key = "distribution.std_param"
-        actor_candidate[std_key] = source_state["std"]
-    elif "distribution.log_std_param" in actor_target:
-        std_key = "distribution.log_std_param"
-        actor_candidate[std_key] = torch.log(source_state["std"])
-    else:
-        raise ValueError(
-            "Target RSL-RL actor has no supported Gaussian standard-deviation parameter; "
-            "the upstream Wheelbipe PPO checkpoint requires distribution.std_param "
-            "or distribution.log_std_param"
-        )
-
-    _validate_wheelbipe_target_state(actor_target, actor_candidate, label="actor")
-    _validate_wheelbipe_target_state(critic_target, critic_candidate, label="critic")
-
-    # The preflight above ensures this pair of strict loads cannot expose a
-    # key/shape mismatch after mutating only one of the two models.
-    try:
-        actor.load_state_dict(actor_candidate, strict=True)
-        critic.load_state_dict(critic_candidate, strict=True)
-    except (RuntimeError, ValueError) as exc:
-        raise ValueError(
-            "Upstream Wheelbipe PPO checkpoint could not be loaded into the target "
-            f"RSL-RL models: {exc}"
-        ) from exc
-    return dict(payload)
-
-
-def maybe_load_wheelbipe_source_ppo_checkpoint(
-    runner: Any,
-    checkpoint: str | os.PathLike[str],
-    *,
-    map_location: str | torch.device | None = "cpu",
-) -> bool:
-    """Load a source Wheelbipe checkpoint for a fresh RSL-RL training run.
-
-    The upstream artifact has no compatible RSL-RL optimizer state, rollout
-    storage, or runner iteration counter.  When the checkpoint is in the
-    strict source format, copy only actor/critic weights into the already
-    materialized runner and leave its optimizer and iteration at their fresh
-    values.  Native RSL-RL checkpoints return ``False`` so the caller can use
-    the normal resume path unchanged.
-    """
-
-    payload = torch.load(checkpoint, map_location=map_location, weights_only=True)
-    if not is_wheelbipe_source_ppo_checkpoint(payload):
-        return False
-    try:
-        algorithm = runner.alg
-        actor = algorithm.actor
-        critic = algorithm.critic
-    except AttributeError as exc:
-        raise RuntimeError(
-            "Source Wheelbipe PPO warm-start requires an RSL-RL runner exposing "
-            "alg.actor and alg.critic"
-        ) from exc
-    load_wheelbipe_source_ppo_checkpoint(
-        actor,
-        critic,
-        payload,
-        map_location=map_location,
-    )
-    return True
-
-
 class RslRlVecEnvWrapper:
     """Adapter from UniLab's env contract to the RSL-RL VecEnv contract."""
 
@@ -517,92 +211,10 @@ class RslRlVecEnvWrapper:
         self.num_actions = int(action_shape[0])
 
         self.episode_returns = torch.zeros(self.num_envs, device=device)
-        # RSL-RL uses ``episode_length_buf`` as a public initialization hook:
-        # its runner assigns a randomly sampled length before the first
-        # rollout.  Keep that hook backed by the same tensor used for logging
-        # and, importantly, mirror assignments into UniLab's authoritative
-        # ``state.info['steps']`` counter.  Without this bridge the runner's
-        # random-start contract only changes a detached wrapper tensor while
-        # NpEnv still starts every episode at step zero.
-        self._episode_length_buf = torch.zeros(self.num_envs, device=device)
-        self.episode_lengths = self._episode_length_buf
-        self.episode_length_buf = self._episode_length_buf
+        self.episode_lengths = torch.zeros(self.num_envs, device=device)
+        self.episode_length_buf = self.episode_lengths
         self.max_episode_length = np.ceil(env.cfg.max_episode_seconds / env.cfg.ctrl_dt)
         self.reset()
-
-    @property
-    def episode_length_buf(self) -> torch.Tensor:
-        """Current episode lengths exposed through the RSL-RL VecEnv contract."""
-
-        return self._episode_length_buf
-
-    @episode_length_buf.setter
-    def episode_length_buf(self, value: torch.Tensor) -> None:
-        """Set episode lengths and synchronize the underlying NpEnv counter.
-
-        Upstream RSL-RL assigns a new tensor here for
-        ``init_at_random_ep_len``.  Treat that assignment as an owner-layer
-        lifecycle event rather than allowing the wrapper and NpEnv to drift.
-        Lightweight test doubles may not expose ``state.info['steps']``; in
-        that case the public wrapper buffer still behaves normally.
-        """
-
-        if not isinstance(value, torch.Tensor):
-            value = torch.as_tensor(value, device=self.device)
-        value = value.to(device=self.device)
-        if value.ndim != 1 or value.shape[0] != self.num_envs:
-            raise ValueError(
-                "RSL-RL episode_length_buf must have shape "
-                f"({self.num_envs},), got {tuple(value.shape)}"
-            )
-        self._episode_length_buf = value
-        # Keep the wrapper's logging alias in lockstep even when upstream
-        # replaces the tensor object rather than mutating it in-place.
-        self.episode_lengths = self._episode_length_buf
-        self._sync_episode_length_to_env()
-
-    def _sync_episode_length_to_env(self) -> None:
-        """Mirror the public RSL-RL episode counter into NpEnv state."""
-
-        # Some source-compatible owners intentionally keep RSL-RL's random
-        # episode-length buffer as a learner/logging-only counter.  In that
-        # mode the wrapper must not inject a synthetic age into the owner's
-        # authoritative reset state.  The opt-out is an explicit owner config
-        # field; environments without it retain the generic synchronization
-        # contract (and its tests).
-        cfg = getattr(self.env, "cfg", None)
-        if getattr(cfg, "source_episode_age_sync", None) is False:
-            return
-
-        state = getattr(self.env, "state", None)
-        info = getattr(state, "info", None)
-        if not isinstance(info, dict):
-            return
-        steps = info.get("steps")
-        if not isinstance(steps, np.ndarray) or steps.shape != (self.num_envs,):
-            return
-        np.copyto(steps, to_numpy(self._episode_length_buf), casting="unsafe")
-        # Source Wheelbipe reset envelopes are expressed in absolute episode
-        # time in IsaacLab.  Vanilla RSL-RL assigns a randomized age after the
-        # initial reset, so give that owner one explicit lifecycle hook to
-        # consume the age without resetting the environment or leaking the
-        # rule into the generic NpEnv contract.
-        sync_source_age = getattr(self.env, "sync_source_episode_length", None)
-        if callable(sync_source_age):
-            sync_source_age(np.asarray(steps))
-
-    def sync_training_iteration(self, iteration: int) -> None:
-        """Forward a resumed runner iteration to an owner, when supported.
-
-        This is a lifecycle hook rather than a Wheelbipe-specific rule: most
-        environments simply do not implement it.  Source-compatible owners
-        use it to keep curriculum schedules aligned with the checkpoint's
-        stored RSL-RL iteration after a fresh environment materialization.
-        """
-
-        sync_iteration = getattr(self.env, "sync_training_iteration", None)
-        if callable(sync_iteration):
-            sync_iteration(int(iteration))
 
     def _policy_obs(self, obs: dict[str, Any]) -> torch.Tensor:
         if self.policy_obs_mode == "actor":
@@ -630,16 +242,6 @@ class RslRlVecEnvWrapper:
         }
         if "critic" in obs:
             td_dict["critic"] = to_torch(obs["critic"], self.device)
-        # Preserve explicitly named source observation leaves for custom
-        # runners (notably NP3O's ``on_constraint`` / ``policy_hist`` /
-        # ``priv_latent`` streams).  Normal RSL-RL callers continue to consume
-        # only actor/policy/critic; retaining the leaves here avoids forcing a
-        # source adapter to reconstruct them from backend-private state.
-        for key, raw_value in obs.items():
-            if key in {"obs", "critic", "actor", "policy"} or key in td_dict:
-                continue
-            if isinstance(raw_value, (torch.Tensor, np.ndarray)):
-                td_dict[str(key)] = to_torch(raw_value, self.device)
         return TensorDict(td_dict, batch_size=self.num_envs, device=self.device)
 
     def _resolve_final_observation(self, state: NpEnvState) -> dict[str, Any] | None:
@@ -686,8 +288,6 @@ class RslRlVecEnvWrapper:
 
         if "log" in state.info:
             infos["log"] = state.info["log"]
-        if "costs" in state.info:
-            infos["costs"] = to_torch(state.info["costs"], self.device)
 
         return (
             self._obs_to_tensordict(state.obs, getattr(state, "info", None)),

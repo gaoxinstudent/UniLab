@@ -30,9 +30,8 @@ uv run eval --algo sac --task g1_walk_flat --sim mujoco --load-run -1
 uv run eval --algo ppo --task go2_joystick_flat --sim mujoco --load-run -1
 ```
 
-`--load-run` 接受 `-1`、run 目录名，或 run 目录/checkpoint 的绝对路径。带路径分隔符的
-相对路径仍会被拒绝，避免其含义受到 Hydra 工作目录影响。仍可直接传
-`algo.load_run=...`，但两种写法不能同时使用。
+某些脚本路径接受通过 `algo.load_run` 传入的检查点路径；统一 CLI 会将 `--load-run`
+校验为一个 run id，且不接受路径分隔符。
 
 ## 随机种子
 

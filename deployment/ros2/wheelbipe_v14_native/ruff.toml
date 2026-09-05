@@ -1,7 +1,0 @@
-extend = "../../../pyproject.toml"
-
-[lint]
-# Keep the pinned ROS launch source byte-for-byte identical to upstream.  Its
-# import grouping is valid Python/ROS and differs only from UniLab's isort
-# preference.
-extend-ignore = ["I001"]
