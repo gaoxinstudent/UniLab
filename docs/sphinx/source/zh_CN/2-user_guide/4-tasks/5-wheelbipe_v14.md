@@ -83,7 +83,7 @@ update 中输出 `adaboot_*` metrics，默认值仍为 `off`。这里只实现 r
 | HIM-PPO、DreamWaQ、NP3O + Barlow 历史策略 | `conf/custom_ppo/task/wheelbipe_v14_flat_*` 与 custom runner | source-key checkpoint/optimizer 回归、pinned DreamWaQ 类数值对齐、source-Barlow 双输入 artifact 测试，以及明确的 NP3O 312D 兼容修复 | 仅 flat MuJoCo/Motrix；上游 live env 的 351D 流与 312D model contract 自相矛盾；公开 checkout 未包含 custom checkpoint 可供实际加载；无 `mjwarp`；AdaBoot `reward_cv` 不等于完整论文实现。 |
 | 键盘命令与 velocity/reward trace | `src/unilab/visualization/wheelbipe_{keyboard,trace}.py` | `tests/visualization/test_wheelbipe_tools.py` 与 interactive CLI 路由测试 | viewer key-down 命令会锁存；跳跃是否接受仍由状态机决定；trace 是诊断而非 benchmark。 |
 | 无 ROS 的 ROS controller/state/wire contract | `WheelbipeRos2Controller`、deployment YAML 与 Python packet/gate helper | `tests/training/test_wheelbipe_ros2.py` 及 MuJoCo/Motrix 数值 helper 实跑 | 进程内 cadence emulation 不等于 DDS graph、realtime controller、serial transport 或硬件安全证明。 |
-| native ROS 2/controller_manager/pluginlib/serial/teleop source | `deployment/ros2/wheelbipe_v14_native/manifest.yaml` 与打包的 colcon source | exact-digest bundle verify、workspace materialize、runtime probe、reconnect/stale/teleop fail-closed 测试 | 当前主机没有 ROS 2；workspace 未 build/source/launch，未连接串口或机器人硬件。 |
+| native ROS 2/controller_manager/pluginlib/serial/teleop source | `deployment/ros2/wheelbipe_v14_native/manifest.yaml` 与打包的 colcon source | exact-digest bundle verify、workspace materialize、runtime probe、reconnect/stale/teleop fail-closed 测试，以及 2026-09-05 RoboStack Humble 环境下外部 workspace 的 build + headless launch（INIT→IDLE→PREPARE→RL、joint_states 演化） | 未打开串口、未连接机器人硬件；不宣称 realtime 或硬件安全。 |
 
 ## 训练
 
@@ -107,6 +107,15 @@ canonical `wheelbipe_v14_rough` 的训练契约与发布的上游
 `[256, 128, 64]`、`value_loss_coef=2.0`、seed 66，观测/动作/延迟/DR 与命令
 special-mode 配置保持该 run 的 pinned 语义。该 run 本身从 flat `model_8000.pt`
 warm-start，因此 UniLab 长训练同样建议从同族的源权重继续：
+
+机器人本体与弹簧物理以 `wheelbipe_ros2_sim2sim` 的 MuJoCo 部署资产为基准对齐
+（UniLab 训练物理 = ROS 2 sim2sim 部署物理，sim2sim 仓库保持不动）：base
+质量 17.963 kg、腿关节 `frictionloss=1.5`/`armature=0.035`、轮关节
+`frictionloss=0.023`；气弹簧为 q ∈ [-0.005, 0.07] 上 650 → 450 N 线性、
+阻尼 500 N/(m/s)（对应 `spring_offset=0.07`、`spring_linear_up=650`、
+`spring_linear_down=450`、`spring_linear_length=0.075`、
+`spring_damping=500`，无逐集预载随机）。在 140 mm 单级台阶测试场景
+（与 ROS 2 部署 scene 相同的台阶几何）上验证模型可稳定越过。
 
 ```bash
 uv run train --algo ppo --task wheelbipe_v14_rough --sim mujoco \
@@ -717,9 +726,19 @@ materialize 会复制 22 个 asset-overlay 文件，绝不会 build、source 或
 ONNX Runtime C++ 1.20.0、MuJoCo 3.5.0 及 manifest 中其余依赖属于外部 optional
 deployment boundary。
 
+2026-09-05 在同一台开发机上使用 RoboStack conda 环境
+`wheelbipe_humble`（ROS 2 Humble）完成了外部 `wheelbipe_ros2_sim2sim`
+workspace 的实际 build 与 headless launch：MuJoCo 场景加载、`joint_state_broadcaster`
+与 `template_ros2_controller` 配置激活、状态机 INIT → IDLE → PREPARE → RL 完整流转，
+并通过 `ros2 topic echo /wheelbipe_V14/joint_states` 观察到 8 个关节在策略驱动下连续
+演化。所用的 policy 就是本任务导出的 rough `policy.onnx`（该仓库
+`policy/parallel/V14-rough-unilab-1999.onnx`，`[1,35] → [1,6]`）。期间发现
+`install/` 中一份旧 `wheelbipe_V14.yaml` 的 `joints` 顺序（front 交叉排列）与
+controller 的关节合同不一致，重新 `colcon build` 后与 src 同步即恢复。
+
 静态 verify 与纯 Python reconnect/stale/teleop 测试不能证明 workspace 可在 ROS 环境编译
-运行。本机没有 build/source workspace、创建 DDS graph、打开 `/dev/wheelbipe_h7`、读取
-输入设备、测量 controller timing 或连接机器人硬件；不宣称 realtime、硬件安全或
+运行，但上段记录的是真实 ROS 2 headless launch 证据。仍未打开
+`/dev/wheelbipe_h7`、未连接机器人硬件，因此不宣称 realtime、硬件安全或
 sim-to-real 认证。
 
 ## 来源与许可

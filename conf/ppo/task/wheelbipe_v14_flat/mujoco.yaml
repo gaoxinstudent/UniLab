@@ -93,12 +93,15 @@ env:
     wheel_Kd: 0.2
     spring_mode: linear
     spring_force: 240.0
-    spring_random_force: [-50.0, 50.0]
-    spring_linear_up: 600.0
-    spring_linear_down: 400.0
-    spring_linear_length: 0.07
-    spring_offset: 0.06076
-    spring_damping: 50.0
+    # Aligned with the wheelbipe_ros2_sim2sim MujocoSystem gas-spring contract:
+    # q in [0.07-0.075, 0.07] -> 650 N -> 450 N linear, damping 500 N/(m/s),
+    # no per-episode preload randomization in the deployment model.
+    spring_random_force: [0.0, 0.0]
+    spring_linear_up: 650.0
+    spring_linear_down: 450.0
+    spring_linear_length: 0.075
+    spring_offset: 0.07
+    spring_damping: 500.0
     leg_torque_limit: 40.0
     wheel_torque_limit: 5.0
     spring_torque_limit: 1000.0

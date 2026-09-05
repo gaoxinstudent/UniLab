@@ -317,7 +317,7 @@ def test_wheelbipe_owner_yaml_declares_timing_and_torque(
         if config_dir == "ppo":
             assert cfg.env.training_semantics == "source_v14"
             assert int(cfg.algo.num_envs) == 4096
-            assert float(cfg.env.control_config.spring_damping) == pytest.approx(50.0)
+            assert float(cfg.env.control_config.spring_damping) == pytest.approx(500.0)
             assert float(cfg.env.noise_config.level) == pytest.approx(1.0)
             assert bool(cfg.env.domain_rand.randomize_body_mass) is True
             assert bool(cfg.env.domain_rand.randomize_body_material) is True

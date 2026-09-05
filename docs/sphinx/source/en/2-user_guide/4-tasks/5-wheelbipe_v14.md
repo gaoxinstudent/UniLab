@@ -95,7 +95,7 @@ and all values are still subject to the compact owner dimensions above.
 | HIM-PPO, DreamWaQ, NP3O + Barlow history policies | `conf/custom_ppo/task/wheelbipe_v14_flat_*` and custom runner | source-key checkpoint/optimizer regressions, numerical alignment with the pinned DreamWaQ class, source-Barlow two-input artifact tests, and a documented NP3O 312D compatibility repair | Flat MuJoCo/Motrix only; the upstream live env's 351D stream contradicts its 312D model contract; the public checkout has no custom checkpoint for an actual artifact load; no `mjwarp`; AdaBoot `reward_cv` is not full paper parity. |
 | Keyboard commands and velocity/reward traces | `src/unilab/visualization/wheelbipe_{keyboard,trace}.py` | `tests/visualization/test_wheelbipe_tools.py` and interactive CLI routing tests | Viewer key-down semantics are latched; jump acceptance remains state-machine-owned; traces are diagnostics, not benchmarks. |
 | ROS controller/state/wire contract without ROS | `WheelbipeRos2Controller`, deployment YAML, and Python packet/gate helpers | `tests/training/test_wheelbipe_ros2.py`, plus numerical MuJoCo/Motrix helper runs | In-process cadence emulation is not a DDS graph, realtime controller, serial transport, or hardware-safety proof. |
-| Native ROS 2/controller_manager/pluginlib/serial/teleop source | `deployment/ros2/wheelbipe_v14_native/manifest.yaml` and packaged colcon sources | exact-digest bundle verification, workspace materialization, runtime probe, reconnect/stale/teleop fail-closed tests | The current host lacks ROS 2; the workspace was not built/sourced/launched, and no serial or robot hardware was exercised. |
+| Native ROS 2/controller_manager/pluginlib/serial/teleop source | `deployment/ros2/wheelbipe_v14_native/manifest.yaml` and packaged colcon sources | exact-digest bundle verification, workspace materialization, runtime probe, reconnect/stale/teleop fail-closed tests, plus a 2026-09-05 build and headless launch of the external workspace under RoboStack Humble (INIT→IDLE→PREPARE→RL with evolving joint_states) | No serial port or robot hardware was exercised; no realtime or hardware-safety claim. |
 
 ## Train
 
@@ -138,6 +138,17 @@ uv run train --algo ppo --task wheelbipe_v14_rough --sim mujoco \
   algo.load_run=/path/to/wheeled-legged_RL/pretrained/26_infantry/rough_rotation_stair/\
 2026-07-23_10-19-59/model_2500.pt
 ```
+
+Robot-body and gas-spring physics are aligned to the `wheelbipe_ros2_sim2sim`
+MuJoCo deployment asset (UniLab training physics = ROS 2 sim2sim deployment
+physics; the sim2sim repository itself stays untouched): base mass 17.963 kg,
+leg joints `frictionloss=1.5`/`armature=0.035`, wheel joints
+`frictionloss=0.023`; the gas spring is linear 650 → 450 N over
+q ∈ [-0.005, 0.07] with 500 N/(m/s) damping (mapped to `spring_offset=0.07`,
+`spring_linear_up=650`, `spring_linear_down=450`, `spring_linear_length=0.075`,
+`spring_damping=500`, no per-episode preload randomization). The model is
+verified to climb a 140 mm single step using the same step geometry as the
+ROS 2 deployment scene.
 
 The warm start restores actor/critic weights (including std) only; the
 optimizer and iteration counters start fresh. Terrain-crossing quality is
@@ -853,10 +864,20 @@ return code 1. ROS 2 Humble, Linux x86-64, ONNX Runtime C++ 1.20.0, MuJoCo
 deployment boundary.
 
 Static verification and pure-Python reconnect/stale/teleop tests do not prove
-that the workspace compiles or runs in a ROS installation. This host did not
-build/source the workspace, create a DDS graph, open `/dev/wheelbipe_h7`, read
-an input device, measure controller timing, or connect robot hardware. No
-realtime, hardware-safety, or sim-to-real certification is claimed.
+that the workspace compiles or runs in a ROS installation, but on 2026-09-05
+the same development host built and headless-launched the external
+`wheelbipe_ros2_sim2sim` workspace under the RoboStack conda environment
+`wheelbipe_humble` (ROS 2 Humble): the MuJoCo scene loaded,
+`joint_state_broadcaster` and `template_ros2_controller` configured and
+activated, the FSM completed INIT → IDLE → PREPARE → RL, and
+`ros2 topic echo /wheelbipe_V14/joint_states` showed all eight joints evolving
+under the policy. The loaded policy is the rough `policy.onnx` exported by this
+task (`policy/parallel/V14-rough-unilab-1999.onnx` in that repository,
+`[1,35] → [1,6]`). A stale `install/` copy of `wheelbipe_V14.yaml` listed the
+joints in a front-interleaved order that violated the controller's joint
+contract; a `colcon` rebuild re-synced it with `src/` and the launch succeeded.
+`/dev/wheelbipe_h7` was still not opened and no robot hardware was connected,
+so no realtime, hardware-safety, or sim-to-real certification is claimed.
 
 ## Provenance and licenses
 

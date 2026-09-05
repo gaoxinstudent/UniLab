@@ -503,25 +503,35 @@ def test_mujoco_can_materialize_the_flat_scene() -> None:
     assert len(guide_body_names) == 16
     assert len(guide_joint_names) == 16
 
-    # These values are the cold-path dynamics baseline copied from the
-    # upstream wheelbipeV14_2 USD.  The runtime startup randomizer adds the
-    # source friction samples on top of these zeros; a non-zero XML baseline
-    # would silently make the front legs/wheels more resistant than source.
+    # Cold-path dynamics baseline aligned with the wheelbipe_ros2_sim2sim
+    # deployment MJCF: base 17.963 kg, leg frictionloss 1.5 / armature 0.035,
+    # wheel frictionloss 0.023.  The runtime startup randomizer adds source
+    # friction samples on top of these baselines.
     base_id = model.body("base_link").id
-    assert float(model.body_mass[base_id]) == pytest.approx(15.96301746, rel=0.0, abs=1.0e-7)
+    assert float(model.body_mass[base_id]) == pytest.approx(17.96301741, rel=0.0, abs=1.0e-7)
     expected_armature = {
-        "left_front1_joint": 0.015795,
-        "right_front1_joint": 0.015795,
-        "left_rear1_joint": 0.015795,
-        "right_rear1_joint": 0.015795,
+        "left_front1_joint": 0.035,
+        "right_front1_joint": 0.035,
+        "left_rear1_joint": 0.035,
+        "right_rear1_joint": 0.035,
         "left_wheel_joint": 0.0,
         "right_wheel_joint": 0.0,
+    }
+    expected_frictionloss = {
+        "left_front1_joint": 1.5,
+        "right_front1_joint": 1.5,
+        "left_rear1_joint": 0.0,
+        "right_rear1_joint": 0.0,
+        "left_wheel_joint": 0.023,
+        "right_wheel_joint": 0.023,
     }
     for joint_name, armature in expected_armature.items():
         joint_id = model.joint(joint_name).id
         dof_id = int(model.jnt_dofadr[joint_id])
         assert float(model.dof_armature[dof_id]) == pytest.approx(armature, rel=0.0, abs=1.0e-9)
-        assert float(model.dof_frictionloss[dof_id]) == pytest.approx(0.0, rel=0.0, abs=1.0e-9)
+        assert float(model.dof_frictionloss[dof_id]) == pytest.approx(
+            expected_frictionloss[joint_name], rel=0.0, abs=1.0e-9
+        )
 
 
 def test_motrix_compatibility_profile_survives_closed_loop_steps() -> None:
