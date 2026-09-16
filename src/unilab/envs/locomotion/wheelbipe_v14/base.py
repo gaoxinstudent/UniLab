@@ -488,7 +488,10 @@ class WheelbipeControlConfig(PdControlConfig):
     leg_torque_limit: float = 40.0
     wheel_torque_limit: float = 5.0
     spring_torque_limit: float = 1000.0
-    clip_actions: float = 1.0
+    # Both source PPO and the ROS2 policy interface accept unbounded actions.
+    # A unit clamp silently caps wheel targets at 10 rad/s (about 0.6 m/s)
+    # in registry-based sim2sim, even when training used the correct YAML.
+    clip_actions: float = float("inf")
     # Source Isaac applies no runner-side action clamp.  It constrains the
     # decoded physical targets instead: leg position to ±3.14 rad and wheel
     # velocity to ±100 rad/s.  Exact variant owners materialize these fields;

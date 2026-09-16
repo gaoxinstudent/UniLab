@@ -778,10 +778,12 @@ class WheelbipeOnnxPolicy:
             # A static-one deployment graph is intentionally evaluated one row
             # at a time for callers that request a vectorized rollout.
             outputs = [
-                self.session.run(
-                    [self.contract.output_name],
-                    {self.contract.input_name: row[None, :]},
-                )[0][0]
+                np.asarray(
+                    self.session.run(
+                        [self.contract.output_name],
+                        {self.contract.input_name: row[None, :]},
+                    )[0]
+                )[0]
                 for row in arr
             ]
             result = np.asarray(outputs, dtype=np.float32)
@@ -1318,10 +1320,12 @@ class WheelbipeHistoryOnnxPolicy:
         else:
             result = np.asarray(
                 [
-                    self.session.run(
-                        [self.contract.output_name],
-                        {self.contract.input_name: row[None, :]},
-                    )[0][0]
+                    np.asarray(
+                        self.session.run(
+                            [self.contract.output_name],
+                            {self.contract.input_name: row[None, :]},
+                        )[0]
+                    )[0]
                     for row in arr
                 ],
                 dtype=np.float32,
@@ -1392,10 +1396,12 @@ class WheelbipeSourceBarlowFullOnnxPolicy:
         else:
             result = np.asarray(
                 [
-                    self.session.run(
-                        [self.contract.output_name],
-                        {self.contract.input_name: row[None, :]},
-                    )[0][0]
+                    np.asarray(
+                        self.session.run(
+                            [self.contract.output_name],
+                            {self.contract.input_name: row[None, :]},
+                        )[0]
+                    )[0]
                     for row in arr
                 ],
                 dtype=np.float32,

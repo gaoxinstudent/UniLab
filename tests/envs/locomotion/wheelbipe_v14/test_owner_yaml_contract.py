@@ -317,7 +317,7 @@ def test_wheelbipe_owner_yaml_declares_timing_and_torque(
         if config_dir == "ppo":
             assert cfg.env.training_semantics == "source_v14"
             assert int(cfg.algo.num_envs) == 4096
-            assert float(cfg.env.control_config.spring_damping) == pytest.approx(500.0)
+            assert float(cfg.env.control_config.spring_damping) == pytest.approx(50.0)
             assert float(cfg.env.noise_config.level) == pytest.approx(1.0)
             assert bool(cfg.env.domain_rand.randomize_body_mass) is True
             assert bool(cfg.env.domain_rand.randomize_body_material) is True
@@ -344,10 +344,10 @@ def test_wheelbipe_owner_yaml_declares_timing_and_torque(
                 expected_scales["joint_torque"] = -1.0e-5
                 expected_scales["wheel_power"] = -1.0e-5
                 expected_scales["stand_still_lin_vel"] = -1.0
-                # The pinned rough runs strengthen both squared tracking
-                # penalties relative to the flat owner's -0.1.
-                expected_scales["track_lin_vel_xy_square"] = -1.0
-                expected_scales["track_ang_vel_z_square"] = -1.0
+                # Canonical rough follows the released 16:23:21 snapshot;
+                # its squared tracking scales match the flat run's -0.1.
+                expected_scales["track_lin_vel_xy_square"] = -0.1
+                expected_scales["track_ang_vel_z_square"] = -0.1
                 assert list(cfg.env.commands.special_mode_start_iterations) == [0, 0, 0]
                 assert list(cfg.env.commands.special_mode_probabilities) == pytest.approx(
                     [0.15, 0.15, 0.30]
@@ -423,9 +423,7 @@ def test_rough_owner_preserves_source_ctrl_mode_observation_scale() -> None:
     with initialize_config_dir(config_dir=str(ROOT / "conf" / "ppo"), version_base="1.3"):
         cfg = compose("config", overrides=["task=wheelbipe_v14_rough/mujoco"])
 
-    assert list(cfg.env.ctrl_mode_obs_scale) == pytest.approx(
-        [1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0]
-    )
+    assert list(cfg.env.ctrl_mode_obs_scale) == pytest.approx([1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0])
 
 
 def test_rough_owner_does_not_gate_velocity_tracking_by_height() -> None:

@@ -268,7 +268,8 @@ def test_wheelbipe_delay_buffer_returns_per_env_lag_and_resets_history() -> None
     np.testing.assert_allclose(
         # Isaac Lab's CircularBuffer fills an environment's history on its
         # first append, so a positive lag is immediately usable after reset.
-        buffer.compute(np.asarray([[1.0], [1.0]], dtype=np.float32)), [[1.0], [1.0]]
+        buffer.compute(np.asarray([[1.0], [1.0]], dtype=np.float32)),
+        [[1.0], [1.0]],
     )
     np.testing.assert_allclose(
         buffer.compute(np.asarray([[2.0], [2.0]], dtype=np.float32)), [[2.0], [1.0]]

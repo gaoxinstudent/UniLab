@@ -418,13 +418,17 @@ class MuJoCoBackend(SimBackend):
         # Sensor indices.
         self._sensor_indices = {}
         self._sensor_views = {}
+        dynamics_sensor_indices: list[int] = []
         for i in range(self._model.nsensor):
+            adr = self._model.sensor_adr[i]
+            dim = self._model.sensor_dim[i]
+            if self._model.sensor_needstage[i] == mujoco.mjtStage.mjSTAGE_ACC:
+                dynamics_sensor_indices.extend(range(adr, adr + dim))
             name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_SENSOR, i)
             if name:
-                adr = self._model.sensor_adr[i]
-                dim = self._model.sensor_dim[i]
                 self._sensor_indices[name] = list(range(adr, adr + dim))
                 self._sensor_views[name] = self._sensor_data[:, adr : adr + dim]
+        self._dynamics_sensor_indices = np.asarray(dynamics_sensor_indices, dtype=np.intp)
 
         # Zero-copy view mapping for tracked-body sensors.
         if self.add_body_sensors and self._valid_bnames:
@@ -989,6 +993,21 @@ class MuJoCoBackend(SimBackend):
     # Simulation control                                                 #
     # ------------------------------------------------------------------ #
 
+    def _refresh_post_step_sensors(
+        self, state: np.ndarray, integrated_sensors: np.ndarray
+    ) -> np.ndarray:
+        if not self._post_step_forward_sensor:
+            return integrated_sensors
+        # Runtime 0.3.1 forward() clears ctrl and applied forces. Refresh
+        # kinematics at the final pose, but retain force/acceleration sensors
+        # from the actual integrated step. Recomputing those with zero input
+        # fabricates contact forces and specific acceleration under load.
+        refreshed = self._pool.forward(state)  # type: ignore[union-attr]
+        refreshed[:, self._dynamics_sensor_indices] = integrated_sensors[
+            :, self._dynamics_sensor_indices
+        ]
+        return refreshed  # type: ignore[no-any-return]
+
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         if self._pre_step_control_fn is not None:
             return self._step_with_pre_step_control(ctrl, nsteps)
@@ -1014,8 +1033,9 @@ class MuJoCoBackend(SimBackend):
             control_spec=control_spec,
             chunk_size=self._chunk_size,
             return_sensor=True,
-            post_step_forward_sensor=self._post_step_forward_sensor,
+            post_step_forward_sensor=False,
         )
+        sensor_np = self._refresh_post_step_sensors(state_np, sensor_np)
         if control_spec & int(mujoco.mjtState.mjSTATE_XFRC_APPLIED):
             self._pending_xfrc_applied.fill(0.0)
         self._physics_state[:] = state_np.astype(self._np_dtype)
@@ -1063,8 +1083,9 @@ class MuJoCoBackend(SimBackend):
                 control_spec=control_spec,
                 chunk_size=self._chunk_size,
                 return_sensor=True,
-                post_step_forward_sensor=self._post_step_forward_sensor,
+                post_step_forward_sensor=False,
             )
+            sensor_np = self._refresh_post_step_sensors(state_np, sensor_np)
             self._physics_state[:] = state_np.astype(self._np_dtype)
             np.subtract(self._dof_vel_view, self._dof_vel_before_step, out=self._dof_acc)
             self._dof_acc /= float(self._sim_dt)

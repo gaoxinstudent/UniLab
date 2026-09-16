@@ -57,6 +57,7 @@ from .semantics import (
     SOURCE_V14_REWARD_SCALES,
     SOURCE_V14_ROUGH_V0_REWARD_SCALES,
     SOURCE_V14_ROUGH_V1_REWARD_SCALES,
+    build_source_v14_height_signals,
 )
 from .state_machine import (
     WheelbipeAirborneCommandResampleConfig,
@@ -1301,7 +1302,13 @@ class WheelbipeVariantEnv(
                         f"ids={ids.tolist()}, batch={base_pos.shape[0]}"
                     )
                 base_pos = base_pos[ids]
-            observed, _reward_height = self._source_height_signals(base_pos)
+            observed, _reward_height = build_source_v14_height_signals(
+                base_pos[:, 2],
+                None,
+                use_absolute_height=True,
+                clip_enabled=bool(self._cfg.height_obs_clip_enabled),
+                clip_range=self._cfg.height_obs_clip_range,
+            )
         heights = np.asarray(observed, dtype=observations["obs"].dtype).reshape(-1)
         if heights.shape != (observations["obs"].shape[0],):
             raise RuntimeError(

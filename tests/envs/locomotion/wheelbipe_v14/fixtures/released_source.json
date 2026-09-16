@@ -1,0 +1,333 @@
+{
+  "source": "scutrobotlab/wheeled-legged_RL@b8ff79f3",
+  "env_snapshot": "pretrained/26_infantry/rough_rotation_stair/2026-07-23_16-23-21/params/env.yaml",
+  "env_sha256": "85e82dc8025a53437a25fac4520c8caf7a0097a1627e851168dde15e913a544a",
+  "usd": "source/agent_world/agent_world/assets/usd_files/wheelbipeV14_2_1/wheelbipeV14_2.usd",
+  "bodies": {
+    "base_link": {
+      "mass": 15.963017463684082,
+      "com": [
+        0.005821189843118191,
+        0.0016817599534988403,
+        -0.041092101484537125
+      ],
+      "inertia": [
+        0.1986725777387619,
+        0.2984277606010437,
+        0.37418466806411743
+      ],
+      "quat": [
+        0.9998155236244202,
+        0.0016548872226849198,
+        0.01696489192545414,
+        0.008861424401402473
+      ]
+    },
+    "left_front2_link": {
+      "mass": 0.03289410099387169,
+      "com": [
+        -0.0544000007212162,
+        -0.004471499938517809,
+        -0.0399755984544754
+      ],
+      "inertia": [
+        1.4244782278183266e-06,
+        8.240000170189887e-05,
+        8.147551852744073e-05
+      ],
+      "quat": [
+        0.9502049684524536,
+        0.0,
+        -0.3116256296634674,
+        0.0
+      ]
+    },
+    "left_front3_link": {
+      "mass": 0.0443510003387928,
+      "com": [
+        -0.08446089923381805,
+        -0.0029490001033991575,
+        0.051597800105810165
+      ],
+      "inertia": [
+        3.1539698284177575e-06,
+        0.00016429999959655106,
+        0.0001613460190128535
+      ],
+      "quat": [
+        0.958503782749176,
+        0.0,
+        0.28507983684539795,
+        0.0
+      ]
+    },
+    "left_spring1_link": {
+      "mass": 0.030521800741553307,
+      "com": [
+        -0.045247700065374374,
+        -0.005216999910771847,
+        0.006045300047844648
+      ],
+      "inertia": [
+        3.8846025063321576e-07,
+        1.780252205207944e-05,
+        1.770901508280076e-05
+      ],
+      "quat": [
+        0.9951205253601074,
+        -0.07224339991807938,
+        0.06675960123538971,
+        0.007706264033913612
+      ]
+    },
+    "right_front2_link": {
+      "mass": 0.03289410099387169,
+      "com": [
+        -0.05438610166311264,
+        0.004471499938517809,
+        -0.039965398609638214
+      ],
+      "inertia": [
+        1.4244782278183266e-06,
+        8.240000170189887e-05,
+        8.147551852744073e-05
+      ],
+      "quat": [
+        0.9502049684524536,
+        0.0,
+        -0.3116256296634674,
+        0.0
+      ]
+    },
+    "right_front3_link": {
+      "mass": 0.0443510003387928,
+      "com": [
+        -0.08446089923381805,
+        0.0029490001033991575,
+        0.051597800105810165
+      ],
+      "inertia": [
+        3.1539698284177575e-06,
+        0.00016429999959655106,
+        0.0001613460190128535
+      ],
+      "quat": [
+        0.958503782749176,
+        0.0,
+        0.28507983684539795,
+        0.0
+      ]
+    },
+    "right_spring1_link": {
+      "mass": 0.030521800741553307,
+      "com": [
+        -0.045247700065374374,
+        0.005216999910771847,
+        0.006045300047844648
+      ],
+      "inertia": [
+        3.8846025063321576e-07,
+        1.780252205207944e-05,
+        1.770901508280076e-05
+      ],
+      "quat": [
+        0.9951205253601074,
+        0.07224339991807938,
+        0.06675960123538971,
+        -0.007706264033913612
+      ]
+    }
+  },
+  "terrain": {
+    "num_rows": 10.0,
+    "num_cols": 14.0,
+    "size": [
+      9.0,
+      9.0
+    ],
+    "border_width": 5.0
+  },
+  "sub_terrains": {
+    "tiny_step_rot": {
+      "proportion": 0.2,
+      "bar_height_range": [
+        0.01,
+        0.03
+      ],
+      "bar_width_range": [
+        0.05,
+        0.2
+      ]
+    },
+    "slope_for_rm_low": {
+      "proportion": 0.1,
+      "platform_width": 0.0,
+      "border_width": 1.0,
+      "slope_range": [
+        0.05,
+        0.15
+      ]
+    },
+    "inv_slope_for_rm_low": {
+      "proportion": 0.1,
+      "platform_width": 0.0,
+      "border_width": 1.0,
+      "slope_range": [
+        0.05,
+        0.15
+      ]
+    },
+    "stair_slope_for_rm_low": {
+      "proportion": 0.1,
+      "step_height_range": [
+        0.005,
+        0.015
+      ],
+      "step_width": 0.1,
+      "platform_width": 1.0,
+      "border_width": 1.0
+    },
+    "stair_slope_for_rm_mid": {
+      "proportion": 0.2,
+      "step_height_range": [
+        0.025,
+        0.04
+      ],
+      "step_width": 0.1,
+      "platform_width": 1.0,
+      "border_width": 1.0
+    },
+    "inv_stair_slope_for_rm_low": {
+      "proportion": 0.1,
+      "step_height_range": [
+        0.005,
+        0.015
+      ],
+      "step_width": 0.1,
+      "platform_width": 2.0,
+      "border_width": 1.0
+    },
+    "inv_stair_slope_for_rm_mid": {
+      "proportion": 0.2,
+      "step_height_range": [
+        0.025,
+        0.04
+      ],
+      "step_width": 0.1,
+      "platform_width": 1.0,
+      "border_width": 1.0
+    },
+    "plane_for_rm_rot": {
+      "proportion": 0.3
+    },
+    "random_uniform_for_rm": {
+      "proportion": 0.1,
+      "border_width": 1.0,
+      "noise_range": [
+        0.0,
+        0.03
+      ],
+      "noise_step": 0.005,
+      "downsampled_scale": 0.2
+    }
+  },
+  "spring": {
+    "mode": "linear",
+    "constant_force": 240.0,
+    "random_force": [
+      -50.0,
+      50.0
+    ],
+    "spring_offset": 0.06076,
+    "linear_up": 600.0,
+    "linear_down": 400.0,
+    "linear_length": 0.07,
+    "damping": false,
+    "rand_stretch_damping_range": [
+      300.0,
+      800.0
+    ],
+    "rand_contract_damping_range": [
+      300.0,
+      800.0
+    ]
+  },
+  "spring_actuator_damping": 50.0,
+  "rewards": {
+    "termination": -200.0,
+    "leg_joint_acc": -5e-07,
+    "leg_joint_vel": -0.005,
+    "leg_joint_pair_pos_diff": -0.0,
+    "joint_torque": -1e-05,
+    "wheel_acc": -1e-08,
+    "wheel_vel": -1e-05,
+    "wheel_power": -1e-05,
+    "wheel_air_spin": 0.0,
+    "lin_vel_z": -0.5,
+    "ang_vel_xy": -0.05,
+    "action_smoothness_leg": -0.05,
+    "action_rate": -0.01,
+    "action_smoothness_wheel": -0.01,
+    "flat_orientation_y": -0.0,
+    "flat_orientation_y_v": -2.0,
+    "flat_orientation_y_exp": 1.0,
+    "flat_orientation_x": -0.0,
+    "flat_orientation_x_v": -2.0,
+    "flat_orientation_x_exp": 1.0,
+    "track_lin_vel_xy": 1.0,
+    "track_lin_vel_xy_tight": 0.0,
+    "track_lin_vel_xy_square": -0.1,
+    "track_ang_vel_z": 1.0,
+    "track_ang_vel_z_square": -0.1,
+    "stand_still_lin_vel": -1.0,
+    "stand_still": -0.0,
+    "track_height_exp": 0.0,
+    "track_height_exp_soft": 0.0,
+    "track_height_exp_tight": 1.0,
+    "track_height_square": -1.0,
+    "track_height_exp_both_wheels_contact": 0.0,
+    "no_fork": -1.0,
+    "no_fork_square": -1.0,
+    "no_fork_exp": -0.0,
+    "no_fork_z_exp": -0.0,
+    "undesired_contact": -2.0
+  },
+  "height_scan_xy": [
+    [
+      -0.01,
+      -0.01
+    ],
+    [
+      -0.01,
+      0.0
+    ],
+    [
+      -0.01,
+      0.01
+    ],
+    [
+      0.0,
+      -0.01
+    ],
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.01
+    ],
+    [
+      0.01,
+      -0.01
+    ],
+    [
+      0.01,
+      0.0
+    ],
+    [
+      0.01,
+      0.01
+    ]
+  ]
+}

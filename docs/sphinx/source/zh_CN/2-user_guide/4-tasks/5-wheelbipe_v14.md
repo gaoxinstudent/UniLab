@@ -106,39 +106,56 @@ canonical `wheelbipe_v14_rough` 的训练契约与发布的上游
 `rough_rotation_stair` 2026-07-23 run 对齐：actor/critic 均为
 `[256, 128, 64]`、`value_loss_coef=2.0`、seed 66，观测/动作/延迟/DR 与命令
 special-mode 配置保持该 run 的 pinned 语义。该 run 本身从 flat `model_8000.pt`
-warm-start，因此 UniLab 长训练同样建议从同族的源权重继续：
+warm-start。复现 flat→rough 训练时，将 `algo.load_run` 指向
+`pretrained/26_infantry/flat_and_rotation/2026-07-19_09-14-50/model_8000.pt`。
+下面命令复现源 flat→rough 初始化路径。若改为继续训练已发布 rough `model_1000.pt`，应单独验收：
 
-机器人本体与弹簧物理以 `wheelbipe_ros2_sim2sim` 的 MuJoCo 部署资产为基准对齐
-（UniLab 训练物理 = ROS 2 sim2sim 部署物理，sim2sim 仓库保持不动）：base
-质量 17.963 kg、腿关节 `frictionloss=1.5`/`armature=0.035`、轮关节
-`frictionloss=0.023`；气弹簧为 q ∈ [-0.005, 0.07] 上 650 → 450 N 线性、
-阻尼 500 N/(m/s)（对应 `spring_offset=0.07`、`spring_linear_up=650`、
-`spring_linear_down=450`、`spring_linear_length=0.075`、
-`spring_damping=500`，无逐集预载随机）。在 140 mm 单级台阶测试场景
-（与 ROS 2 部署 scene 相同的台阶几何）上验证模型可稳定越过。
+训练模型使用源 USD 的质量、质心和完整惯量：base 为 15.96301746 kg，
+质心 X 为 +0.00582119 m，主动腿关节 armature 为 0.015795。
+被动连杆的惯量包含主轴旋转，不能只复制惯量对角项。训练气弹簧使用
+400–600 N / 70 mm、offset 0.06076 m、预载随机量 ±50 N，
+IdealPD 阻尼 50 N·s/m。源配置的 `spring_settings.damping=false` 仅关闭额外阻尼。
+ROS2 仓库的 650–450 N / 75 mm、500 N·s/m 是独立部署模型，不能覆盖训练 owner。
+
+canonical rough 地形对应发布模型 `2026-07-23_16-23-21/params/env.yaml`：
+10 行、14 列，包含上行/下行中等台阶（单级 0.025–0.04 m、宽 0.1 m），
+并使用该快照的地形高度命令。较早的 `2026-07-23_10-19-59` 和当前上游
+Rough-v0 配置只有 10 列，不能把同一天的不同训练配置混为一个基线。
+exact upstream id 仍保留其固定的源码预设。源数值回归见
+`tests/envs/locomotion/wheelbipe_v14/test_released_migration.py`。
+高度奖励使用随航向旋转的 3×3 地面采样均值（20 mm 范围、10 mm 间距），
+不再只取机身正下方一点；critic 仍保留世界高度。地面采样通过后端提供的
+heightfield surface contract 完成，不能将它宣称为 PhysX raycaster 的数值等价实现。
+MuJoCo owner 显式开启 `post_step_forward_sensor=true`，使 IMU、body tracking
+和 qpos/qvel 都对应同一物理步末，再施加源观测延迟；否则会额外引入一个物理步的传感器延迟。
+MuJoCo 适配层只刷新运动学传感器，并保留实际积分步的力/加速度传感器，
+防止运行时的零控制 `forward` 把负载下接触力重算成无控制力的结果。
+源奖励和 critic 使用机身质心速度（包含每个环境的 COM 随机偏移）。轮子 critic
+速度先将世界坐标下的轮子/机身质心速度相减，再旋转到机身坐标系并令 Y 分量为零；
+不能直接使用会扣除旋转参考系运输项的 backend 相对速度。惯性偏移仅在初始化时读取并缓存。
 
 ```bash
 uv run train --algo ppo --task wheelbipe_v14_rough --sim mujoco \
-  algo.num_envs=10240 algo.max_iterations=2000 training.no_play=true \
-  algo.load_run=/path/to/wheeled-legged_RL/pretrained/26_infantry/rough_rotation_stair/\
-2026-07-23_10-19-59/model_2500.pt
+  algo.num_envs=4096 algo.max_iterations=2000 training.no_play=true \
+  algo.load_run=/path/to/wheeled-legged_RL/pretrained/26_infantry/flat_and_rotation/\
+2026-07-19_09-14-50/model_8000.pt
 ```
 
 warm-start 只恢复 actor/critic 权重（含 std），optimizer 与 iteration 计数保持
-新建。以 `cliff_inv_stair_slope_short_for_rm_play` 播放地形上 body-frame
-forwardness（前进速度分量占速度模的比例）衡量越障质量：该源权重在 UniLab
-MuJoCo 播放下 forwardness ≈ 0.94、平均前进速度 ≈ 0.9–1.1 m/s，与上游
-`rough_v1_play_velocity_trace.csv` 记录的源环境行为一致；未经过充分训练的
-compact 128-64-32 族（rough_rotation_stair 2026-07-30，仅 1000 iterations）
-forwardness 只有 ≈ 0.63，因此不再作为 canonical 训练契约。需要加载 compact 族
-artifact 时显式覆盖维度即可（见下文）。
+新建。canonical rough 的 `track_lin_vel_xy_square` 和 `track_ang_vel_z_square`
+均为 -0.1，与 16:23:21 的完整奖励表一致；较早的 10:19:59 run 和 exact source
+Rough-v0/v1 使用 -1.0。策略导出的 35D→6D 接口可以由 ROS2 控制器直接加载，但接口一致
+不等于越障通过。
+registry 直接构造的 sim2sim owner 同样保留原始动作，不再截断到 ±1；旧默认值
+会把轮速目标限制到 ±10 rad/s（约 0.6 m/s），与训练路径不一致。物理参数修复
+不会改变 35D 输入维度，旧 checkpoint 虽能加载，仍须重新评估。
 
-rough owner 的 reward 权重与源 rough run 逐项对齐，包括 flat owner 没有的两个
-强化项：`track_lin_vel_xy_square` 与 `track_ang_vel_z_square` 均为 `-1.0`
-（flat 为 `-0.1`）。这两个平方误差惩罚是 rough 地形上保持精确速度/角速度
-跟踪的主要压力来源；继续沿用 flat 的 `-0.1` 会在 fine-tune 时让策略向
-自旋/姿态项漂移、越障 forwardness 从 ≈ 0.93 掉到 ≈ 0.7。exact Rough-v0/v1
-owner 的 pinned reward graph 同样固定这两个 `-1.0`。
+过去报告的 forwardness ≈ 0.94 只表示朝前运动，机器人在障碍前打滑也可能得到
+高分。越障验证必须记录障碍几何、速度/高度命令、两轮是否越过出口、是否绕行、
+跌倒和重置次数；不能使用训练平均 reward 或 forwardness 代替通过率。
+2026-09-16 的早期 140 mm 台阶探测仅复用了 ROS2 场景几何及简化 PD，
+没有包含原桥接器的二阶电机响应、力矩变化率限制和高速降额，不能用其通过率
+判断原生 ROS2 的越障性能。当前验收先恢复源 rough；ROS2 适配与节点时序另行验证。
 
 ### 加载上游 vanilla-PPO checkpoint
 
@@ -227,8 +244,8 @@ MUJOCO_GL=egl uv run eval --algo ppo --task Robotics-Wheelbipe-V14-Rough-v1 \
 与源发布包一致的断崖越障展示使用 exact `Robotics-Wheelbipe-V14-Rough-Play-v0`
 路由：10 行 `cliff_inv_stair_slope_short_for_rm_play` 地形、每 5 s 重置、地形
 profile 固定 2.5 m/s 前向命令。该地形的 bowl 中心低于地面、四周是 0.03 m 台阶
-和 +0.3–0.4 m 断崖；以 body-frame forwardness（前进速度分量占速度模的比例）
-衡量越障质量，canonical 256-128-64 源权重 forwardness ≈ 0.94：
+和 +0.3–0.4 m 断崖；历史 body-frame forwardness ≈ 0.94 仅衡量运动方向，
+不证明完成越障。以下命令用于可视化检查：
 
 ```bash
 MUJOCO_GL=egl uv run eval --algo ppo --task Robotics-Wheelbipe-V14-Rough-Play-v0 \
@@ -258,7 +275,7 @@ MUJOCO_GL=egl uv run eval --algo ppo --task Robotics-Wheelbipe-V14-Rough-Play-v0
 | 同目录上游 `policy.pt`，PPO `eval` | 可信 TorchScript rollout | 可信 TorchScript rollout | 检查输入上与 `model_8000.pt` actor 输出完全相同 |
 | 同目录上游 `policy.onnx`，专用 helper | ONNX rollout | ONNX rollout | 已检查 graph shape 和 actor 数值对齐 |
 | UniLab `wheelbipe_v14_flat_long_4096/model_2700.pt`，PPO `eval` | 原生 checkpoint rollout/export | 原生 checkpoint rollout/export | 该模型在最终 source-contract 修正前训练；仅作为带 provenance 标签的 loader smoke 保留，不是迁移后性能结果 |
-| UniLab rough `rr256fixsq` run `model_1999.pt`（4096 envs × 2000 iters，warm-start 源 `model_2500.pt`），PPO `eval` | 原生 checkpoint rollout、断崖播放录制与 `policy.onnx` 导出 | —（同一 checkpoint 的可加载性由 sim2sim 契约 audit 覆盖） | 断崖播放 body-frame forwardness ≈ 0.94、平均前进速度 ≈ 1.0 m/s，与源环境记录一致；导出的 ONNX 为 `obs[1,35] → actions[1,6]`，与 `wheelbipe_ros2_sim2sim` 合同一致 |
+| UniLab rough `rr256fixsq` run `model_1999.pt`（4096 envs × 2000 iters，warm-start 源 `model_2500.pt`），PPO `eval` | 原生 checkpoint rollout、断崖播放录制与 `policy.onnx` 导出 | —（同一 checkpoint 的可加载性由 sim2sim 契约 audit 覆盖） | 断崖播放 body-frame forwardness ≈ 0.94、平均前进速度 ≈ 1.0 m/s，该方向指标不能证明跨越障碍（尚无原生 ROS2 越障验收）；导出的 ONNX 为 `obs[1,35] → actions[1,6]`，与 `wheelbipe_ros2_sim2sim` 合同一致 |
 
 公共 flag 的绝对 checkpoint 路径和绝对 run 目录两种形式均已验证；exact upstream
 `*-Play-v0` alias 走同一路由。例如：

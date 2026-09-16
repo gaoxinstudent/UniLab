@@ -503,27 +503,25 @@ def test_mujoco_can_materialize_the_flat_scene() -> None:
     assert len(guide_body_names) == 16
     assert len(guide_joint_names) == 16
 
-    # Cold-path dynamics baseline aligned with the wheelbipe_ros2_sim2sim
-    # deployment MJCF: base 17.963 kg, leg frictionloss 1.5 / armature 0.035,
-    # wheel frictionloss 0.023.  The runtime startup randomizer adds source
-    # friction samples on top of these baselines.
+    # Source USD mass and IdealPD actuator armatures. Startup DR adds source
+    # friction samples to zero, without the ROS bridge's extra front friction.
     base_id = model.body("base_link").id
-    assert float(model.body_mass[base_id]) == pytest.approx(17.96301741, rel=0.0, abs=1.0e-7)
+    assert float(model.body_mass[base_id]) == pytest.approx(15.96301746, rel=0.0, abs=1.0e-7)
     expected_armature = {
-        "left_front1_joint": 0.035,
-        "right_front1_joint": 0.035,
-        "left_rear1_joint": 0.035,
-        "right_rear1_joint": 0.035,
+        "left_front1_joint": 0.015795,
+        "right_front1_joint": 0.015795,
+        "left_rear1_joint": 0.015795,
+        "right_rear1_joint": 0.015795,
         "left_wheel_joint": 0.0,
         "right_wheel_joint": 0.0,
     }
     expected_frictionloss = {
-        "left_front1_joint": 1.5,
-        "right_front1_joint": 1.5,
+        "left_front1_joint": 0.0,
+        "right_front1_joint": 0.0,
         "left_rear1_joint": 0.0,
         "right_rear1_joint": 0.0,
-        "left_wheel_joint": 0.023,
-        "right_wheel_joint": 0.023,
+        "left_wheel_joint": 0.0,
+        "right_wheel_joint": 0.0,
     }
     for joint_name, armature in expected_armature.items():
         joint_id = model.joint(joint_name).id
@@ -643,9 +641,7 @@ def test_source_mass_randomization_excludes_passive_guide_links() -> None:
         baseline = np.asarray(env._backend.get_body_mass(), dtype=np.float64)  # noqa: SLF001
         randomized = np.asarray(env._source_body_mass, dtype=np.float64)[0]  # noqa: SLF001
         body_names = set(env._backend.get_body_names())  # noqa: SLF001
-        guide_names = tuple(
-            name for name in body_names if name.endswith("_guide_link")
-        )
+        guide_names = tuple(name for name in body_names if name.endswith("_guide_link"))
         guide_ids = np.asarray(env._backend.get_body_ids(guide_names), dtype=np.intp)  # noqa: SLF001
         leg_names = tuple(name for name in SOURCE_V14_LEG_MASS_BODY_NAMES if name in body_names)
         leg_ids = np.asarray(env._backend.get_body_ids(leg_names), dtype=np.intp)  # noqa: SLF001

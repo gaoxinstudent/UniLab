@@ -6,6 +6,8 @@ defaults:
 training:
   task_name: WheelbipeV14Rough
   sim_backend: mujoco
+  # PPO playback passes this field explicitly, ahead of env.render_spacing.
+  render_spacing: 0.0
   # The default recording keeps four vectorized envs in view; callers can
   # select another primary terrain with cam_tracking_env_idx.
   play_env_num: 16
@@ -13,12 +15,11 @@ training:
   cam_tracking_extra_envs: 3
 
 algo:
-  # The rough owner shares the 256-128-64 source contract of the released
-  # rough_rotation_stair run (2026-07-23), which itself warm-starts from the
-  # flat model_8000.  This is the policy family that demonstrably crosses the
-  # cliff/stair play terrain.  The later compact 128-64-32 rough_rotation_stair
-  # run remains loadable only via an explicit dims override; it is not the
-  # canonical training contract.
+  # The canonical registry scene and terrain commands use the released
+  # rough_rotation_stair/2026-07-23_16-23-21 snapshot (14 columns, including
+  # medium stairs). Earlier 10-column source owners remain exact-ID variants.
+  # Both July 23 runs use 256-128-64; shape parity alone cannot select the
+  # matching terrain distribution or establish obstacle passage.
   policy:
     actor_hidden_dims: [256, 128, 64]
     critic_hidden_dims: [256, 128, 64]
@@ -77,21 +78,19 @@ reward:
     joint_torque: -1.0e-5
     wheel_power: -1.0e-5
     stand_still_lin_vel: -1.0
-    # The source rough run (2026-07-23) pins both squared tracking penalties
-    # at -1.0, ten times stronger than the flat owner's -0.1.  These terms
-    # carry most of the pressure to track velocity/yaw-rate precisely on rough
-    # terrain; inheriting the flat values visibly degrades crossing behavior
-    # during fine-tuning (forwardness drifts from ~0.93 to ~0.7).
-    track_lin_vel_xy_square: -1.0
-    track_ang_vel_z_square: -1.0
+    # The released 16:23:21 run uses -0.1 for both terms. The earlier
+    # 10:19:59 run uses -1.0 and belongs to a different terrain snapshot.
+    track_lin_vel_xy_square: -0.1
+    track_ang_vel_z_square: -0.1
 
 play_profile:
   enabled: true
   env:
-    render_spacing: 2.0
-    # Playback is a deterministic terrain showcase, not a second training
-    # distribution.  Keep the running-terrain generator and source terrain
-    # command profiles, but make the vectorized batch cover every generated
+    # States already include terrain-cell world origins. An extra display
+    # grid shifts robots away from their heightfield contact surfaces.
+    render_spacing: 0.0
+    # Keep the released rough terrain and source height-command profiles,
+    # but make the vectorized playback batch cover every generated
     # column and start at a visible mid-level difficulty.
     terrain_curriculum:
       type_col_assignment: round_robin

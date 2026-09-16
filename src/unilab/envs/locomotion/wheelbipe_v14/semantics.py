@@ -185,11 +185,8 @@ SOURCE_V14_ROUGH_V0_REWARD_SCALES: dict[str, float] = {
     # owner's stand-still penalty at -1 (the flat owner uses -2 in its
     # verified run).
     "stand_still_lin_vel": -1.0,
-    # The pinned rough_rotation_stair run (2026-07-23) sets both squared
-    # tracking penalties ten times stronger than the flat owner (-0.1).  They
-    # carry the precise velocity/yaw-rate tracking pressure on rough terrain;
-    # inheriting the flat values lets fine-tuning drift away from crossing
-    # behavior.
+    # Exact source Rough-v0 defaults and the 10:19:59 snapshot use -1.
+    # Canonical PPO instead selects the 16:23:21 snapshot (-0.1) in YAML.
     "track_lin_vel_xy_square": -1.0,
     "track_ang_vel_z_square": -1.0,
 }
@@ -198,8 +195,8 @@ SOURCE_V14_ROUGH_V1_REWARD_SCALES: dict[str, float] = {
     "wheel_power": -1.0e-5,
     "joint_torque": -1.0e-5,
     "track_lin_vel_xy": 1.25,
-    # Same as Rough-v0: the pinned source rough run keeps both squared
-    # tracking penalties at -1.0 rather than the flat-v1 -0.1.
+    # Exact source Rough-v1 class defaults, separate from canonical PPO's
+    # released 16:23:21 snapshot.
     "track_lin_vel_xy_square": -1.0,
     "track_ang_vel_z_square": -1.0,
     "stand_still_lin_vel": -1.0,

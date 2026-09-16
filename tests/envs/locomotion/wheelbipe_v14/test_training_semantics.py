@@ -17,8 +17,8 @@ from unilab.envs.locomotion.wheelbipe_v14.joystick import (
 )
 from unilab.envs.locomotion.wheelbipe_v14.semantics import (
     SOURCE_V14_GUIDE_BODY_NAMES,
-    SOURCE_V14_REWARD_SCALES,
     SOURCE_V14_RESET_CONTACT_BODY_NAMES,
+    SOURCE_V14_REWARD_SCALES,
     SOURCE_V14_UNDESIRED_CONTACT_BODY_NAMES,
     SourceV14HIMCurriculum,
     SourceV14RewardParameters,
@@ -47,6 +47,8 @@ def test_source_v14_contact_sets_match_v14_owner() -> None:
     )
     assert "gimbal_yaw_link" in SOURCE_V14_UNDESIRED_CONTACT_BODY_NAMES
     assert "gimbal_pitch_link" in SOURCE_V14_UNDESIRED_CONTACT_BODY_NAMES
+
+
 from unilab.envs.locomotion.wheelbipe_v14.variants import (
     WheelbipeCustomEnv,
     WheelbipeFlatV0Cfg,

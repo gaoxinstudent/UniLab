@@ -158,7 +158,9 @@ class HIMOnPolicyRunner:
                     with torch.no_grad():
                         # Route through the wrapper setter so the underlying
                         # NpEnv step counter follows the source lifecycle.
-                        self.env.episode_length_buf = torch.randint_like(episode_length_buf, high=high)
+                        self.env.episode_length_buf = torch.randint_like(
+                            episode_length_buf, high=high
+                        )
 
         self.alg.train_mode()
         start_iter = self.current_learning_iteration

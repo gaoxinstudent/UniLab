@@ -343,6 +343,7 @@ def test_custom_cli_runs_export_artifact_with_composed_owner_on_both_backends(
     """Exercise the real ONNX loader, owner validation and one simulator step."""
 
     pytest.importorskip("onnxruntime")
+    pytest.importorskip("mujoco" if sim == "mujoco" else "motrixsim")
     module = _load_script(
         f"sim2sim_wheelbipe_custom_{algorithm}_{artifact}_{sim}",
         "sim2sim_wheelbipe_custom.py",

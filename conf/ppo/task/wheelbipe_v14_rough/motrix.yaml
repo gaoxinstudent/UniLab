@@ -17,4 +17,4 @@ env:
 play_profile:
   enabled: true
   env:
-    render_spacing: 2.0
+    render_spacing: 0.0

@@ -91,6 +91,7 @@ def _fake_mujoco_backend(pre_step_control_fn=None, post_step_forward_sensor=Fals
     backend._np_dtype = np.float32
     backend._physics_state = np.zeros((1, 1), dtype=np.float32)
     backend._sensor_data = np.zeros((1, 1), dtype=np.float32)
+    backend._dynamics_sensor_indices = np.zeros((0,), dtype=np.intp)
     # This unit fixture deliberately bypasses ``MuJoCoBackend.__init__``.
     # Keep it aligned with the backend-owned physics-step acceleration cache.
     backend._dof_vel_view = backend._physics_state
@@ -129,7 +130,8 @@ def test_mujoco_step_honors_post_step_forward_sensor_flag() -> None:
     backend.step(ctrl, nsteps=3)
 
     assert backend._pool.step_calls[0]["return_sensor"] is True
-    assert backend._pool.step_calls[0]["post_step_forward_sensor"] is True
+    assert backend._pool.step_calls[0]["post_step_forward_sensor"] is False
+    assert len(backend._pool.forward_calls) == 1
 
 
 def test_mujoco_step_with_pre_step_control_recomputes_each_physics_step() -> None:
@@ -149,15 +151,70 @@ def test_mujoco_step_with_pre_step_control_recomputes_each_physics_step() -> Non
     assert len(backend._pool.step_calls) == 3
     assert [call["nstep"] for call in backend._pool.step_calls] == [1, 1, 1]
     assert all(call["return_sensor"] is True for call in backend._pool.step_calls)
-    assert all(call["post_step_forward_sensor"] is True for call in backend._pool.step_calls)
+    assert all(call["post_step_forward_sensor"] is False for call in backend._pool.step_calls)
     assert all(call["chunk_size"] is None for call in backend._pool.step_calls)
-    assert backend._pool.forward_calls == []
+    assert len(backend._pool.forward_calls) == 3
     np.testing.assert_allclose(seen_sensors, [[[0.0]], [[1.0]], [[2.0]]])
     np.testing.assert_allclose(backend._pool.step_calls[0]["control"], (ctrl + 1)[:, None, :])
     np.testing.assert_allclose(backend._pool.step_calls[1]["control"], (ctrl + 2)[:, None, :])
     np.testing.assert_allclose(backend._pool.step_calls[2]["control"], (ctrl + 3)[:, None, :])
     np.testing.assert_allclose(backend._physics_state, [[3.0]])
     np.testing.assert_allclose(backend._sensor_data, [[3.0]])
+
+
+@pytest.mark.parametrize("use_callback", [False, True])
+def test_mujoco_sensor_refresh_preserves_loaded_contact_and_acceleration(
+    tmp_path, use_callback: bool
+) -> None:
+    pytest.importorskip("mujoco")
+    from unilab.base.backend.mujoco.backend import MuJoCoBackend
+    from unilab.base.scene import SceneCfg
+
+    path = tmp_path / "loaded_contact.xml"
+    path.write_text("""<mujoco><option timestep="0.005"/>
+      <worldbody><geom type="plane" size="2 2 .1"/>
+        <body name="base" pos="0 0 .099"><freejoint name="root"/>
+          <geom type="sphere" size=".1" mass="1"/>
+          <site name="imu"/><site name="contact" type="sphere" size=".101"/>
+        </body></worldbody>
+      <actuator><motor joint="root" gear="0 0 1 0 0 0"/></actuator>
+      <sensor><touch name="touch" site="contact"/>
+        <accelerometer name="acc" site="imu"/>
+        <framepos name="position" objtype="xbody" objname="base"/>
+      </sensor></mujoco>""")
+    backends = [
+        MuJoCoBackend(
+            SceneCfg(model_file=str(path)),
+            1,
+            0.005,
+            base_name="base",
+            post_step_forward_sensor=refresh,
+        )
+        for refresh in (False, True)
+    ]
+    try:
+        for backend in backends:
+            backend.materialize()
+            if use_callback:
+                backend.set_pre_step_control(lambda current, ctrl: ctrl)
+            backend.step(np.asarray([[-100.0]]), nsteps=3)
+        integrated, refreshed = backends
+        # Sensor refresh must not change dynamics or erase the actuator load.
+        np.testing.assert_array_equal(integrated._physics_state, refreshed._physics_state)
+        for name in ("touch", "acc"):
+            np.testing.assert_array_equal(
+                refreshed.get_sensor_data(name), integrated.get_sensor_data(name)
+            )
+        assert refreshed.get_sensor_data("touch")[0, 0] > 100.0
+        np.testing.assert_allclose(
+            refreshed.get_sensor_data("position"), refreshed.get_base_pos(), atol=1e-7
+        )
+        assert not np.allclose(
+            integrated.get_sensor_data("position"), integrated.get_base_pos(), atol=1e-7
+        )
+    finally:
+        for backend in backends:
+            backend.cleanup_scene_assets()
 
 
 class _FakeMotrixModel:

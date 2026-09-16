@@ -45,10 +45,13 @@ from unilab.envs.locomotion.common.commands import (
 from unilab.envs.locomotion.common.domain_rand import DomainRandConfig
 from unilab.envs.locomotion.common.dr_provider import LocomotionDRProvider
 from unilab.envs.locomotion.common.rewards import RewardContext
-from unilab.envs.locomotion.common.terrain_spawn import TerrainSpawnManager
+from unilab.envs.locomotion.common.terrain_spawn import TerrainCurriculumCfg, TerrainSpawnManager
 from unilab.utils.geometry import np_roll_pitch_from_quat
 from unilab.utils.rotation import (
+    np_quat_apply,
+    np_quat_apply_batched,
     np_quat_apply_inverse,
+    np_quat_conjugate_batched,
     np_quat_from_euler_xyz,
     np_quat_mul,
     np_wrap_to_pi,
@@ -88,8 +91,8 @@ from .gimbal_asset import (
     materialize_wheelbipe_state_machine_asset,
 )
 from .semantics import (
-    SOURCE_V14_PRIVILEGED_POLICY_PERMUTATION,
     SOURCE_V14_LEG_MASS_BODY_NAMES,
+    SOURCE_V14_PRIVILEGED_POLICY_PERMUTATION,
     SOURCE_V14_RESET_CONTACT_BODY_NAMES,
     SOURCE_V14_RESET_JOINT_NAMES,
     SOURCE_V14_UNDESIRED_CONTACT_BODY_NAMES,
@@ -418,6 +421,9 @@ class WheelbipeSensor:
 @registry.envcfg("WheelbipeV14Flat")
 @dataclass
 class WheelbipeV14FlatCfg(WheelbipeV14BaseCfg):
+    # The source samples settled physics state. Without this refresh MuJoCo
+    # sensors lag qpos/qvel by one substep, adding an unintended IMU delay.
+    post_step_forward_sensor: bool = True
     scene: SceneCfg = field(
         default_factory=lambda: SceneCfg(
             model_file=str(
@@ -446,6 +452,12 @@ class WheelbipeV14FlatCfg(WheelbipeV14BaseCfg):
     use_absolute_height: bool = True
     height_obs_clip_enabled: bool = False
     height_obs_clip_range: list[float | None] = field(default_factory=lambda: [None, None])
+    # Released body scanner: 20 mm square, 10 mm spacing, aligned to yaw.
+    # Cache these offsets at construction; the terrain contract supplies
+    # surface heights without asset access in the reward path.
+    source_height_scan_xy: list[list[float]] = field(
+        default_factory=lambda: [[x, y] for x in (-0.01, 0.0, 0.01) for y in (-0.01, 0.0, 0.01)]
+    )
     training_semantics: str = "legacy"
     # The legacy successful V14 run kept RSL-RL's randomized episode length
     # buffer separate from NpEnv's source reset timers.  Keep that lifecycle
@@ -481,6 +493,14 @@ class WheelbipeV14FlatCfg(WheelbipeV14BaseCfg):
 
     def validate(self) -> None:
         super().validate()
+        scan = np.asarray(self.source_height_scan_xy, dtype=np.float64)
+        if (
+            scan.ndim != 2
+            or scan.shape[0] == 0
+            or scan.shape[1] != 2
+            or not np.isfinite(scan).all()
+        ):
+            raise ValueError("source_height_scan_xy must be a non-empty finite [N, 2] array")
         if isinstance(self.him_curriculum, dict):
             self.him_curriculum = WheelbipeHIMCurriculumConfig(**self.him_curriculum)
         if not isinstance(self.him_curriculum, WheelbipeHIMCurriculumConfig):
@@ -1521,13 +1541,17 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         self._terrain_surface_sample_height = (
             None if terrain_spawn_data is None else terrain_spawn_data.sample_height
         )
+        self._source_height_scan_xy = np.asarray(cfg.source_height_scan_xy, dtype=self._np_dtype)
+        self._source_height_spawn_margin = 0.0
         terrain_cfg = cfg.scene.terrain.generator if cfg.scene.terrain is not None else None
         if terrain_spawn_data is not None and terrain_cfg is not None:
+            spawn_cfg = getattr(cfg, "terrain_curriculum", TerrainCurriculumCfg())
+            self._source_height_spawn_margin = float(spawn_cfg.spawn_height_margin)
             self._spawn = TerrainSpawnManager(
                 num_envs,
                 terrain_spawn_data.terrain_origins,
                 cell_size=float(terrain_cfg.size[0]),
-                cfg=getattr(cfg, "terrain_curriculum", type("C", (), {"enabled": False})()),
+                cfg=spawn_cfg,
                 sample_height=terrain_spawn_data.sample_height,
             )
 
@@ -2253,6 +2277,8 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         self._source_reset_contact = np.zeros((n,), dtype=bool)
         self._source_body_mass = None
         self._source_base_com_offset = None
+        self._source_base_com_b = np.zeros((n, 3), dtype=dtype)
+        self._source_wheel_com_b = np.zeros((0, 3), dtype=dtype)
         self._source_geom_friction = None
         self._source_guide_material = np.zeros((n, 0, 3), dtype=dtype)
         self._source_guide_body_ids = np.zeros((0,), dtype=np.int32)
@@ -2292,6 +2318,11 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         self._wheel_body_ids = np.asarray(
             self._backend.get_body_ids(SOURCE_V14_WHEEL_BODY_NAMES), dtype=np.int32
         )
+        # Isaac root/body linear velocities are measured at each body's COM.
+        # Backend link-frame velocities need these cold-path inertial offsets.
+        body_ipos = np.asarray(self._backend.get_body_ipos(), dtype=dtype)
+        self._source_base_com_b[:] = body_ipos[base_id]
+        self._source_wheel_com_b = body_ipos[self._wheel_body_ids].copy()
         reset_contact_names = tuple(self._source_reset_contact_body_names())
         contact_names = tuple(
             dict.fromkeys(
@@ -2511,6 +2542,7 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
                 low, high = _sample_range(field_name, name=range_name)
                 offset[:, column] = np.random.uniform(low, high, size=n)
             self._source_base_com_offset = offset
+            self._source_base_com_b += offset
 
         friction_template = np.asarray(self._base_geom_friction, dtype=np.float64)
         geom_friction = np.broadcast_to(friction_template, (n, *friction_template.shape)).copy()
@@ -2646,7 +2678,9 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             self._source_reset_contact.fill(False)
         return wheel_contact, undesired, base_contact
 
-    def _source_height_signals(self, base_pos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _source_height_signals(
+        self, base_pos: np.ndarray, base_quat: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Build distinct privileged and reward height signals from one pose read."""
 
         positions = np.asarray(base_pos, dtype=self._np_dtype)
@@ -2657,9 +2691,25 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             not bool(self._cfg.use_absolute_height)
             and self._terrain_surface_sample_height is not None
         ):
-            terrain_height = np.asarray(
-                self._terrain_surface_sample_height(positions[:, :2]), dtype=self._np_dtype
+            yaw = np_yaw_from_quat(np.asarray(base_quat, dtype=self._np_dtype))
+            c, s = np.cos(yaw)[:, None], np.sin(yaw)[:, None]
+            dx, dy = self._source_height_scan_xy.T
+            offsets = np.stack((c * dx - s * dy, s * dx + c * dy), axis=-1)
+            scan_xy = positions[:, None, :2] + offsets
+            heights = np.asarray(self._terrain_surface_sample_height(scan_xy), dtype=self._np_dtype)
+            valid = np.isfinite(heights)
+            terrain_height = np.sum(np.where(valid, heights, 0.0), axis=1) / np.maximum(
+                np.sum(valid, axis=1), 1
             )
+            # Generated terrain samples are finite. Preserve the source
+            # origin fallback if a backend reports no valid surface hits.
+            if not np.all(np.any(valid, axis=1)):
+                fallback = self._spawn.origins_for(np.arange(positions.shape[0]))[:, 2]
+                terrain_height = np.where(
+                    np.any(valid, axis=1),
+                    terrain_height,
+                    fallback - self._source_height_spawn_margin,
+                )
         return build_source_v14_height_signals(
             positions[:, 2],
             terrain_height,
@@ -3242,6 +3292,40 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             delayed_vel = self._obs_delay_buffers["joint_vel"].compute(dof_vel)
         return delayed_gyro, delayed_gravity, delayed_pos, delayed_vel
 
+    def get_local_linvel(self) -> np.ndarray:
+        link_velocity = super().get_local_linvel()
+        if not self._source_semantics:
+            return link_velocity
+        gyro = np.asarray(self._backend.get_sensor_data(self._cfg.sensor.gyro))
+        return np.asarray(
+            link_velocity + np.cross(gyro, self._source_base_com_b), dtype=self._np_dtype
+        )
+
+    def _source_wheel_linear_velocity(self) -> np.ndarray:
+        """Rotate COM velocity differences, without rotating-frame transport.
+
+        The source subtracts root COM world velocity from wheel COM world
+        velocity, then rotates and projects onto the sagittal plane. A backend
+        relative-frame velocity also subtracts omega cross displacement and
+        therefore is a different signal, even when all COM offsets are zero.
+        """
+        wheel_quat = self._backend.get_body_quat_w(self._wheel_body_ids)
+        offset_w = np_quat_apply_batched(wheel_quat, self._source_wheel_com_b)
+        wheel_velocity = self._backend.get_body_lin_vel_w(self._wheel_body_ids)
+        wheel_omega = self._backend.get_body_ang_vel_w(self._wheel_body_ids)
+        wheel_com_velocity = wheel_velocity + np.cross(wheel_omega, offset_w)
+        root_quat = self._backend.get_base_quat()
+        root_com_velocity = np_quat_apply(root_quat, self.get_local_linvel())
+        relative_velocity = np.asarray(
+            np_quat_apply_batched(
+                np_quat_conjugate_batched(root_quat[:, None, :]),
+                wheel_com_velocity - root_com_velocity[:, None, :],
+            ),
+            dtype=self._np_dtype,
+        )
+        relative_velocity[:, :, 1] = 0.0
+        return relative_velocity
+
     def update_state(self, state: NpEnvState) -> NpEnvState:
         # The source DirectRLEnv order is: done -> reward (using the command
         # that drove this action) -> command resample/state-machine update ->
@@ -3256,7 +3340,9 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         # Rough rewards receive a separate terrain-relative signal below.
         base_pos = np.asarray(self._backend.get_base_pos(), dtype=self._np_dtype)
         if self._source_semantics:
-            observed_height, reward_height = self._source_height_signals(base_pos)
+            observed_height, reward_height = self._source_height_signals(
+                base_pos, self._backend.get_base_quat()
+            )
         else:
             observed_height = base_pos[:, 2].copy()
             if self._terrain_surface_sample_height is not None:
@@ -3282,9 +3368,7 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         dof_vel = self.get_dof_vel()
         # The source loop appends the settled post-step frame from its final
         # ``_get_observations`` call after the four physics substeps.
-        self._capture_post_step_delayed_observation(
-            gyro, projected_gravity, dof_pos, dof_vel
-        )
+        self._capture_post_step_delayed_observation(gyro, projected_gravity, dof_pos, dof_vel)
         state.info["torques"] = self._last_motor_ctrl.copy()
         state.info["qacc"] = self.get_dof_acc()
         self._last_policy_vel[:] = dof_vel
@@ -3309,9 +3393,7 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             state.info["wheel_pos_b"] = np.asarray(
                 self._backend.get_body_pos_b(self._wheel_body_ids), dtype=self._np_dtype
             )
-            state.info["wheel_lin_vel_b"] = np.asarray(
-                self._backend.get_body_lin_vel_b(self._wheel_body_ids), dtype=self._np_dtype
-            )
+            state.info["wheel_lin_vel_b"] = self._source_wheel_linear_velocity()
             # Preserve raw, undelayed tensors for the privileged critic.  They
             # are regular owner state, not a second simulator read inside the
             # pure observation builder.
@@ -3776,9 +3858,7 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
 
         roll, pitch = np_roll_pitch_from_quat(base_quat)
         physical = (
-            np.asarray(
-                info.get("reset_contact", info.get("base_contact", False)), dtype=bool
-            )
+            np.asarray(info.get("reset_contact", info.get("base_contact", False)), dtype=bool)
             | (np.abs(roll) > np.deg2rad(float(self._cfg.termination_roll_deg)))
             | (np.abs(pitch) > np.deg2rad(float(self._cfg.termination_pitch_deg)))
         )
@@ -3996,10 +4076,7 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             act_lags = selected_lags(self._act_delay_buffers, ("leg_actions", "wheel_actions"))
             wheel_lin_vel = info.get("wheel_lin_vel_b")
             if wheel_lin_vel is None:
-                wheel_lin_vel = np.asarray(
-                    self._backend.get_body_lin_vel_b(self._wheel_body_ids),
-                    dtype=self._np_dtype,
-                )[ids]
+                wheel_lin_vel = self._source_wheel_linear_velocity()[ids]
             wheel_contact = info.get("wheel_contact_state")
             if wheel_contact is None:
                 wheel_contact = self._source_contact_features()[0][ids]
@@ -4008,7 +4085,15 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
                 selected_base_pos = np.asarray(self._backend.get_base_pos(), dtype=self._np_dtype)[
                     ids
                 ]
-                observed_height, _reward_height = self._source_height_signals(selected_base_pos)
+                # The critic uses world height only; terrain scanning belongs
+                # to the reward update above, including for partial resets.
+                observed_height, _reward_height = build_source_v14_height_signals(
+                    selected_base_pos[:, 2],
+                    None,
+                    use_absolute_height=True,
+                    clip_enabled=bool(self._cfg.height_obs_clip_enabled),
+                    clip_range=self._cfg.height_obs_clip_range,
+                )
             critic = build_source_v14_critic_observation(
                 commands=commands,
                 height_command=heights,

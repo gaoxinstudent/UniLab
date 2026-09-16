@@ -129,46 +129,71 @@ The canonical `wheelbipe_v14_rough` training contract aligns with the released
 upstream `rough_rotation_stair` 2026-07-23 run: `[256, 128, 64]` actor and
 critic, `value_loss_coef=2.0`, seed 66, and the pinned observation/action/
 delay/DR and special-mode command semantics of that run. That source run
-itself warm-starts from the flat `model_8000.pt`, so UniLab long training
-should likewise continue from the same-family source weights:
+itself warm-starts from the flat `model_8000.pt`. To reproduce flat-to-rough
+training, set `algo.load_run` to
+`pretrained/26_infantry/flat_and_rotation/2026-07-19_09-14-50/model_8000.pt`.
+The command below reproduces that source initialization. Continuing the
+released rough `model_1000.pt` is a separate path and needs its own validation:
 
 ```bash
 uv run train --algo ppo --task wheelbipe_v14_rough --sim mujoco \
-  algo.num_envs=10240 algo.max_iterations=2000 training.no_play=true \
-  algo.load_run=/path/to/wheeled-legged_RL/pretrained/26_infantry/rough_rotation_stair/\
-2026-07-23_10-19-59/model_2500.pt
+  algo.num_envs=4096 algo.max_iterations=2000 training.no_play=true \
+  algo.load_run=/path/to/wheeled-legged_RL/pretrained/26_infantry/flat_and_rotation/\
+2026-07-19_09-14-50/model_8000.pt
 ```
 
-Robot-body and gas-spring physics are aligned to the `wheelbipe_ros2_sim2sim`
-MuJoCo deployment asset (UniLab training physics = ROS 2 sim2sim deployment
-physics; the sim2sim repository itself stays untouched): base mass 17.963 kg,
-leg joints `frictionloss=1.5`/`armature=0.035`, wheel joints
-`frictionloss=0.023`; the gas spring is linear 650 → 450 N over
-q ∈ [-0.005, 0.07] with 500 N/(m/s) damping (mapped to `spring_offset=0.07`,
-`spring_linear_up=650`, `spring_linear_down=450`, `spring_linear_length=0.075`,
-`spring_damping=500`, no per-episode preload randomization). The model is
-verified to climb a 140 mm single step using the same step geometry as the
-ROS 2 deployment scene.
+Training uses the source USD mass, center of mass, and full inertia tensors:
+base mass 15.96301746 kg, base COM x = +0.00582119 m, and active-leg armature
+0.015795. Passive-link inertia includes its principal-axis rotation. The
+training spring is 400–600 N over 70 mm, offset 0.06076 m, with ±50 N preload
+randomization and 50 N s/m IdealPD damping. The source's
+`spring_settings.damping=false` disables only the additional damping term.
+The ROS2 bridge's 650–450 N over 75 mm and 500 N s/m damping belong to a
+separate deployment model and must not overwrite the training owner.
 
-The warm start restores actor/critic weights (including std) only; the
-optimizer and iteration counters start fresh. Terrain-crossing quality is
-measured on the `cliff_inv_stair_slope_short_for_rm_play` play terrain by
-body-frame forwardness (the signed forward-velocity share of the total speed):
-the source weight reaches forwardness ≈ 0.94 with ≈ 0.9–1.1 m/s mean forward
-speed in UniLab MuJoCo playback, consistent with the source environment's
-`rough_v1_play_velocity_trace.csv`. The under-trained compact 128-64-32
-family (`rough_rotation_stair` 2026-07-30, 1,000 iterations) only reaches
-forwardness ≈ 0.63 and is therefore not the canonical training contract;
-pass an explicit dims override to load compact-family artifacts (see below).
+Canonical rough uses the released `2026-07-23_16-23-21/params/env.yaml` terrain:
+10 rows and 14 columns, including both medium stair types (0.025–0.04 m
+steps, 0.1 m width), with that snapshot's terrain-specific height commands.
+The earlier `2026-07-23_10-19-59` run and the current upstream Rough-v0 preset
+have only 10 columns. Exact upstream IDs retain their source-checkout presets.
+Regression evidence lives in
+`tests/envs/locomotion/wheelbipe_v14/test_released_migration.py`.
+Height rewards average a yaw-aligned 3×3 ground footprint (20 mm square,
+10 mm spacing), replacing the single center sample; the critic still sees
+world height. This uses the backend's heightfield surface contract and does
+not establish numerical equivalence with the PhysX raycaster.
+The MuJoCo owner explicitly enables `post_step_forward_sensor=true`, keeping
+IMU/body tracking and qpos/qvel at the same settled physics time before source
+observation delays are applied. Otherwise sensors acquire an extra substep of lag.
+The MuJoCo adapter refreshes kinematics while preserving force/acceleration
+sensors from the integrated step; the runtime zero-control forward must not
+replace measurements under actuator load.
+Source rewards and the critic use base COM velocity, including per-environment
+COM randomization. Wheel critic velocities subtract base COM world velocity
+from wheel COM world velocity before rotating to the base frame and zeroing Y.
+Backend relative-frame velocities include a rotating-frame transport term and
+are not interchangeable with this source signal. Inertial offsets are cached
+at initialization only.
 
-The rough owner's reward weights match the source rough run term by term,
-including two strengthened entries the flat owner does not share:
-`track_lin_vel_xy_square` and `track_ang_vel_z_square` are both `-1.0`
-(flat uses `-0.1`). These squared-error penalties carry most of the pressure
-for precise velocity/yaw-rate tracking on rough terrain; inheriting the flat
-`-0.1` lets fine-tuning drift toward spin/orientation terms and drops crossing
-forwardness from ≈ 0.93 to ≈ 0.7. The pinned reward graphs of the exact
-Rough-v0/v1 owners also fix both entries at `-1.0`.
+Warm start restores actor/critic weights (including std), with fresh optimizer
+and iteration counters. Canonical rough squared velocity/yaw tracking weights
+are -0.1, matching the complete 16:23:21 reward map. The earlier 10:19:59 run
+and exact source Rough-v0/v1 use -1.0. The exported 35D→6D ABI is loadable by the ROS2 controller, but
+ABI compatibility does not establish terrain-crossing success.
+Registry-based sim2sim also preserves raw actions. Its former ±1 default
+silently limited wheel targets to ±10 rad/s (about 0.6 m/s), unlike training.
+Physics corrections leave the 35D input shape unchanged: old checkpoints
+remain loadable but require reevaluation.
+
+Historical forwardness ≈ 0.94 measures motion direction; a robot stuck at an
+obstacle can still score highly. Record obstacle geometry, speed and height
+commands, both-wheel exit crossings, lateral bypass, falls, and resets.
+Do not substitute mean training reward or forwardness for passage rate.
+The early 2026-09-16 140 mm probe reused ROS2 scene geometry with simplified
+PD. It omitted the native bridge's second-order actuator response, torque
+slew limit, and speed droop, so its passage rates cannot establish native
+ROS2 performance. Current acceptance prioritizes source rough; ROS2 dynamics
+and node timing require a separate validation phase.
 
 ### Loading an upstream vanilla-PPO checkpoint
 
@@ -273,9 +298,8 @@ The cliff-crossing showcase matching the source release uses the exact
 `cliff_inv_stair_slope_short_for_rm_play`, a 5 s episode reset, and a terrain
 profile pinning a constant 2.5 m/s forward command. The bowl center of this
 terrain is below ground with 0.03 m steps and a +0.3–0.4 m cliff rim; crossing
-quality is measured as body-frame forwardness (the signed forward-velocity
-share of total speed), and the canonical 256-128-64 source weights reach
-forwardness ≈ 0.94:
+must be assessed from actual passage. Historical body-frame forwardness
+≈ 0.94 measures motion direction only. Use this command for visual inspection:
 
 ```bash
 MUJOCO_GL=egl uv run eval --algo ppo --task Robotics-Wheelbipe-V14-Rough-Play-v0 \
@@ -309,7 +333,7 @@ as reward or convergence evidence.
 | sibling upstream `policy.pt` through PPO `eval` | trusted TorchScript rollout | trusted TorchScript rollout | actor output equals `model_8000.pt` exactly for the checked input |
 | sibling upstream `policy.onnx` through the dedicated helper | ONNX rollout | ONNX rollout | graph shape and numerical actor comparison checked |
 | UniLab `wheelbipe_v14_flat_long_4096/model_2700.pt` through PPO `eval` | native-checkpoint rollout/export | native-checkpoint rollout/export | trained before the final source-contract corrections; retained as a provenance-labeled loader smoke, not a migrated-performance result |
-| UniLab rough `rr256fixsq` run `model_1999.pt` (4,096 envs × 2,000 iterations, warm-started from source `model_2500.pt`) through PPO `eval` | native-checkpoint rollout, cliff-play recording, and `policy.onnx` export | — (loadability of the same checkpoint covered by the sim2sim contract audit) | cliff-play body-frame forwardness ≈ 0.94 with ≈ 1.0 m/s mean forward speed, consistent with the source environment record; the exported ONNX is `obs[1,35] → actions[1,6]`, matching the `wheelbipe_ros2_sim2sim` contract |
+| UniLab rough `rr256fixsq` run `model_1999.pt` (4,096 envs × 2,000 iterations, warm-started from source `model_2500.pt`) through PPO `eval` | native-checkpoint rollout, cliff-play recording, and `policy.onnx` export | — (loadability of the same checkpoint covered by the sim2sim contract audit) | cliff-play body-frame forwardness ≈ 0.94 with ≈ 1.0 m/s mean forward speed, this direction metric does not establish obstacle passage (native ROS2 passage remains unvalidated); the exported ONNX is `obs[1,35] → actions[1,6]`, matching the `wheelbipe_ros2_sim2sim` contract |
 
 The checkpoint and containing-directory forms of the public flag were both
 validated with absolute paths; the exact upstream `*-Play-v0` alias used the

@@ -27,7 +27,11 @@ from unilab.terrains import (
 
 from .joystick import WheelbipeCommands, WheelbipeV14Env, WheelbipeV14FlatCfg
 from .semantics import SOURCE_V14_RESET_CONTACT_BODY_NAMES
-from .state_machine import WheelbipeStateMachineOwnerMixin, WheelbipeTerrainCommandConfig
+from .state_machine import (
+    WheelbipeStateMachineOwnerMixin,
+    WheelbipeTerrainCommandConfig,
+    WheelbipeTerrainCommandProfileConfig,
+)
 from .task_modes import WheelbipeGimbalSpinTranslateOwnerMixin
 
 
@@ -99,6 +103,61 @@ class WheelbipeRoughTerrainCfg(TerrainGeneratorCfg):
                 border_width=1.0,
             ),
         }
+    )
+
+
+def _released_rough_sub_terrains() -> dict[str, SubTerrainCfg]:
+    # The released 2026-07-23_16-23-21 params/env.yaml predates the source
+    # checkout's reduced rotation preset. Preserve its order and proportions.
+    terrains: dict[str, SubTerrainCfg] = {}
+    for name, cfg in WheelbipeRoughTerrainCfg().sub_terrains.items():
+        terrains[name] = cfg
+        if name == "stair_slope_for_rm_low":
+            terrains["stair_slope_for_rm_mid"] = pyramid_stairs(
+                proportion=0.2,
+                step_height_range=(0.025, 0.04),
+                step_width=0.1,
+                platform_width=1.0,
+                border_width=1.0,
+            )
+        elif name == "inv_stair_slope_for_rm_low":
+            terrains["inv_stair_slope_for_rm_mid"] = pyramid_stairs_inv(
+                proportion=0.2,
+                step_height_range=(0.025, 0.04),
+                step_width=0.1,
+                platform_width=1.0,
+                border_width=1.0,
+            )
+    return terrains
+
+
+@dataclass(kw_only=True)
+class WheelbipeReleasedRoughTerrainCfg(WheelbipeRoughTerrainCfg):
+    """Terrain distribution saved with the canonical released rough policy."""
+
+    source_preset: str = "rough_rotation_stair/2026-07-23_16-23-21/params/env.yaml"
+    num_cols: int = 14
+    sub_terrains: dict[str, SubTerrainCfg] = field(default_factory=_released_rough_sub_terrains)
+
+
+def _released_rough_commands() -> WheelbipeTerrainCommandConfig:
+    # No override for inv_stair_slope_for_rm_mid is present in the snapshot.
+    heights = {
+        "tiny_step_rot": (0.22, 0.42),
+        "slope_for_rm_low": (0.22, 0.42),
+        "inv_slope_for_rm_low": (0.22, 0.42),
+        "stair_slope_for_rm_low": (0.22, 0.42),
+        "stair_slope_for_rm_mid": (0.24, 0.38),
+        "inv_stair_slope_for_rm_low": (0.24, 0.38),
+        "plane_for_rm_rot": (0.20, 0.42),
+        "random_uniform_for_rm": (0.22, 0.42),
+    }
+    return WheelbipeTerrainCommandConfig(
+        enabled=True,
+        profiles={
+            name: WheelbipeTerrainCommandProfileConfig(height_ranges=(height,))
+            for name, height in heights.items()
+        },
     )
 
 
@@ -245,6 +304,10 @@ def wheelbipe_rotation_scene() -> SceneCfg:
     return _wheelbipe_rough_scene(WheelbipeRoughTerrainCfg())
 
 
+def wheelbipe_released_rough_scene() -> SceneCfg:
+    return _wheelbipe_rough_scene(WheelbipeReleasedRoughTerrainCfg())
+
+
 def wheelbipe_running_scene() -> SceneCfg:
     return _wheelbipe_rough_scene(WheelbipeRoughRunningTerrainCfg())
 
@@ -335,20 +398,19 @@ def compute_wheelbipe_rough_boundary_timeout(
 @registry.envcfg("WheelbipeV14Rough")
 @dataclass
 class WheelbipeV14RoughCfg(WheelbipeV14FlatCfg):
+    training_semantics: str = "source_v14"
     # The terrain materializer supplies the floor. Starting from the pure
     # robot XML avoids attaching a second geom named ``floor``.
-    scene: SceneCfg = field(default_factory=wheelbipe_rotation_scene)
+    scene: SceneCfg = field(default_factory=wheelbipe_released_rough_scene)
     commands: WheelbipeRoughCommands = field(default_factory=WheelbipeRoughCommands)
     # Source rough critics retain absolute root-z. Only the reward reference
     # subtracts the sampled terrain height.
     use_absolute_height: bool = False
     terrain_curriculum: TerrainCurriculumCfg = field(default_factory=TerrainCurriculumCfg)
-    # The legacy rough owner leaves terrain-aware command profiles disabled,
-    # while exact Rough-v1 supplies its pinned profile table.  Keeping the
-    # field on the common rough owner lets a play-only profile opt into the
-    # same command-direction contract without changing the training owner.
+    # Canonical PPO follows the released policy's saved configuration; exact
+    # source IDs override both scene and commands with their checkout presets.
     terrain_commands: WheelbipeTerrainCommandConfig = field(
-        default_factory=WheelbipeTerrainCommandConfig
+        default_factory=_released_rough_commands
     )
     rough_terrain_boundary_reset: WheelbipeRoughBoundaryResetConfig = field(
         default_factory=WheelbipeRoughBoundaryResetConfig

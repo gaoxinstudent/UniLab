@@ -2103,6 +2103,7 @@ class WheelbipeRos2Controller:
     def _run_prepare(self, robot_state: WheelbipeRos2RobotState, dt: float) -> None:
         if self._prepare_positions is None:
             self._prepare_positions = robot_state.positions[:4].copy()
+        assert self._prepare_positions is not None
         target = np.asarray(self.config.prepare_dof_pos, dtype=np.float64)
         max_step = float(self.config.prepare_max_velocity) * dt
         delta = target - self._prepare_positions
