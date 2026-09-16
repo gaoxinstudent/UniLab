@@ -1,0 +1,278 @@
+{
+  "source": "wheelbipeV14_2_1/wheelbipeV14_2.usd",
+  "traversal": "Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies())",
+  "sha256": {
+    "configuration/wheelbipeV14_2_base.usd": "45ccc5c85bf42501c4b941cbbceaa5b15dd93d687c7ad0c71c06222cab1f7d1f",
+    "configuration/wheelbipeV14_2_physics.usd": "9707bbcc49dca2809a865e720494f9a021e82a096322c7930e35ea14604d39eb",
+    "configuration/wheelbipeV14_2_robot.usd": "395e70f43277c9cf7aaac55560358ada05739d6c94a8d983af46faac55948f16",
+    "configuration/wheelbipeV14_2_sensor.usd": "635b8c6924aa7e1ae5fc1b3452b50fc3ff6691d3d00332143e3f06ef19b4d466",
+    "wheelbipeV14_2.usd": "48f2d53ac589391a37f3df550e8e537af3ecb5bdb6ebb632fb8c7b83fa9af325",
+    "wheelbipeV14_2_ng.usd": "6df973ffa0e7a640ea551ec77951bc9d5da5d2cfa5380f20cdb70a7dc0647f82"
+  },
+  "primitives": [
+    {
+      "body": "base_link",
+      "pos": "0.00511110015213 0.00117399997544 -0.045510198921",
+      "quat": "-0.00240134936757 0.999876547349 0.0140534655443 0.0066048231364",
+      "type": "box",
+      "size": "0.22499999404 0.15000000596 0.10000000149",
+      "usd_path": "/wheelbipeV14_2/base_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "gimbal_yaw_link",
+      "pos": "0 0 0.070000000298",
+      "quat": "1 0 0 0",
+      "type": "cylinder",
+      "size": "0.0500000007451 0.0500000007451",
+      "usd_path": "/wheelbipeV14_2/gimbal_yaw_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "gimbal_pitch_link",
+      "pos": "0.122241601348 0.0276848003268 -0.055365100503",
+      "quat": "0.974370062351 0 0.224951064887 0",
+      "type": "box",
+      "size": "0.17499999702 0.10000000149 0.0912242978811",
+      "usd_path": "/wheelbipeV14_2/gimbal_pitch_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_bottom1_guide_link",
+      "pos": "0 0.280000001192 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_bottom1_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_bottom2_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_bottom2_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_bottom3_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_bottom3_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_bottom4_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_bottom4_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_front1_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_front1_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_front1_link",
+      "pos": "0.0470402985811 -0.0125000001863 6.40000007479e-06",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.0755402967334 0.0125000001863 0.0284599494189",
+      "usd_path": "/wheelbipeV14_2/left_front1_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_front2_link",
+      "pos": "-0.0543931014836 -0.00499999988824 -0.0399704985321",
+      "quat": "0.671815335751 0.671938318125 -0.220387807429 0.220436534228",
+      "type": "box",
+      "size": "0.0798079967499 0.0125171495602 0.00500309979543",
+      "usd_path": "/wheelbipeV14_2/left_front2_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_front3_link",
+      "pos": "-0.0861302986741 -0.00297400006093 0.0506381988525",
+      "quat": "0.680705428123 -0.67121100005 0.208784772637 0.206215499539",
+      "type": "box",
+      "size": "0.110699951649 0.0180859994143 0.00327180000022",
+      "usd_path": "/wheelbipeV14_2/left_front3_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_front4_link",
+      "pos": "-0.0483739003539 -0.00499999988824 0",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.0607260502875 0.00499999988824 0.0124283498153",
+      "usd_path": "/wheelbipeV14_2/left_front4_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_front_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_front_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_rear1_link",
+      "pos": "-0.0993413999677 0.0010000000475 -0.00973969977349",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.132341399789 0.0130000002682 0.0426966995001",
+      "usd_path": "/wheelbipeV14_2/left_rear1_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_rear2_link",
+      "pos": "0.0885389968753 -0.00600130017847 -0.0399999991059",
+      "quat": "0.684954345226 0.678498433009 0.188647251428 -0.186787675956",
+      "type": "box",
+      "size": "0.159999996424 0.0391302518547 0.00638655014336",
+      "usd_path": "/wheelbipeV14_2/left_rear2_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "left_rear2_guide_link",
+      "pos": "-8.69999985298e-06 -0.0125000001863 0",
+      "quat": "0.70710682869 0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.0149985002354",
+      "usd_path": "/wheelbipeV14_2/left_rear2_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_wheel_link",
+      "pos": "0 -0.0125000001863 0",
+      "quat": "0.70710682869 0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0599999986589 0.0125000001863",
+      "usd_path": "/wheelbipeV14_2/left_wheel_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "left_rear_guide_link",
+      "pos": "0 -0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/left_rear_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_bottom1_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_bottom1_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_bottom2_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_bottom2_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_bottom3_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_bottom3_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_bottom4_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_bottom4_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_front1_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_front1_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_front1_link",
+      "pos": "0.0470402985811 0.0125000001863 6.40000007479e-06",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.0755402967334 0.0125000001863 0.0284599494189",
+      "usd_path": "/wheelbipeV14_2/right_front1_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_front2_link",
+      "pos": "-0.0543931014836 0.00499999988824 -0.0399704985321",
+      "quat": "-0.671868503094 0.67199642774 0.220225740785 0.220259253497",
+      "type": "box",
+      "size": "0.0798079967499 0.0125171495602 0.00500309979543",
+      "usd_path": "/wheelbipeV14_2/right_front2_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_front3_link",
+      "pos": "-0.0861992016435 0.00299019995145 0.0505581013858",
+      "quat": "0.680710494518 0.670812274525 0.209593765905 -0.206675030648",
+      "type": "box",
+      "size": "0.110699549317 0.0180026497692 0.0032697499264",
+      "usd_path": "/wheelbipeV14_2/right_front3_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_front4_link",
+      "pos": "-0.0483739003539 0.00499999988824 0",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.0607260502875 0.00499999988824 0.0124283498153",
+      "usd_path": "/wheelbipeV14_2/right_front4_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_front_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_front_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_rear1_link",
+      "pos": "-0.0993413999677 -0.0010000000475 -0.00973969977349",
+      "quat": "1 0 0 0",
+      "type": "box",
+      "size": "0.132341399789 0.0130000002682 0.0426966995001",
+      "usd_path": "/wheelbipeV14_2/right_rear1_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_rear2_link",
+      "pos": "0.0885500013828 0.00601539993659 -0.0399999991059",
+      "quat": "0.683072626591 -0.680699965338 0.187956385176 0.186364538641",
+      "type": "box",
+      "size": "0.159999996424 0.0388457514346 0.00632954994217",
+      "usd_path": "/wheelbipeV14_2/right_rear2_link/collisions/mesh_0/box"
+    },
+    {
+      "body": "right_rear2_guide_link",
+      "pos": "-8.69999985298e-06 0.0125000001863 0",
+      "quat": "0.70710682869 0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.0149985002354",
+      "usd_path": "/wheelbipeV14_2/right_rear2_guide_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_wheel_link",
+      "pos": "0 0.0125000001863 0",
+      "quat": "0.70710682869 0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0599999986589 0.0125000001863",
+      "usd_path": "/wheelbipeV14_2/right_wheel_link/collisions/mesh_0/cylinder"
+    },
+    {
+      "body": "right_rear_guide_link",
+      "pos": "0 0.00999999977648 0",
+      "quat": "0.70710682869 -0.707106733684 0 0",
+      "type": "cylinder",
+      "size": "0.0149999996647 0.00999999977648",
+      "usd_path": "/wheelbipeV14_2/right_rear_guide_link/collisions/mesh_0/cylinder"
+    }
+  ]
+}

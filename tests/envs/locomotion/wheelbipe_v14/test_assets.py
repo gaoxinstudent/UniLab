@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -530,6 +531,61 @@ def test_mujoco_can_materialize_the_flat_scene() -> None:
         assert float(model.dof_frictionloss[dof_id]) == pytest.approx(
             expected_frictionloss[joint_name], rel=0.0, abs=1.0e-9
         )
+
+
+def test_source_instance_collision_primitives_and_touch_volumes() -> None:
+    """USD instance proxies contain real rollers, not empty inertial bodies."""
+    mujoco = pytest.importorskip("mujoco")
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures/source_collision_primitives.json").read_text()
+    )
+    model = mujoco.MjModel.from_xml_path(str(SCENE_XML))
+    primitives = fixture["primitives"]
+    assert len(primitives) == 33
+    assert sum("guide" in item["body"] for item in primitives) == 16
+    for item in primitives:
+        body = item["body"]
+        geom = model.geom(f"{body}_collision")
+        site = model.site(f"contact_site_{body}")
+        expected_type = {
+            "box": mujoco.mjtGeom.mjGEOM_BOX,
+            "cylinder": mujoco.mjtGeom.mjGEOM_CYLINDER,
+        }[item["type"]]
+        assert geom.type[0] == expected_type
+        assert geom.bodyid[0] == model.body(body).id
+        assert geom.conaffinity[0] != 0
+        for name in ("pos", "quat", "size"):
+            expected = np.fromstring(item[name], sep=" ")
+            # Cylinder size uses only radius/half-height; the unused third
+            # site component keeps MuJoCo's default and has no geometry meaning.
+            width = len(expected)
+            np.testing.assert_allclose(getattr(geom, name)[:width], expected, atol=1.0e-8)
+            np.testing.assert_allclose(getattr(site, name)[:width], expected, atol=1.0e-8)
+
+
+def test_front_guide_rollers_contact_a_200mm_step_before_the_base(tmp_path: Path) -> None:
+    """The missing rolling contact must exist at the actual obstacle boundary."""
+    mujoco = pytest.importorskip("mujoco")
+    scene = tmp_path / "step.xml"
+    scene.write_text(
+        '<mujoco><include file="' + str(ROBOT_XML) + '"/>'
+        '<worldbody><geom name="step" type="box" pos="1.4 0 .1" '
+        'size=".2 .9 .1"/></worldbody></mujoco>'
+    )
+    model = mujoco.MjModel.from_xml_path(str(scene))
+    data = mujoco.MjData(model)
+    data.qpos[:3] = [0.935, 0.0, 0.30]
+    mujoco.mj_forward(model, data)
+    step = model.geom("step").id
+    touched = {
+        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(g))
+        for contact in data.contact
+        if step in contact.geom
+        for g in contact.geom
+        if g != step
+    }
+    assert {"left_front_guide_link_collision", "right_front_guide_link_collision"} <= touched
+    assert "base_link_collision" not in touched
 
 
 def test_motrix_compatibility_profile_survives_closed_loop_steps() -> None:

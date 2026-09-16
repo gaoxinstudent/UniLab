@@ -30,3 +30,9 @@ The source snapshot used for this migration is commit
 UniLab's copy adds backend-facing compiler metadata, sensors, and explicit
 control limits. The task start keyframe is intentionally kept in the separate
 `locomotion_task.xml` fragment and is UniLab integration work.
+
+The source collision primitives were additionally restored from SCUTRobotLab's
+`wheeled-legged_RL/source/agent_world/agent_world/assets/usd_files/`
+`wheelbipeV14_2_1` asset, including instance-proxy cylinder and box shapes.
+The source layer SHA-256 values are recorded in
+`tests/envs/locomotion/wheelbipe_v14/fixtures/source_collision_primitives.json`.

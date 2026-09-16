@@ -474,7 +474,7 @@ exact source owner 保留 pinned `EventCfgV14` 的调度语义，而不是把它
 | 调度 | Pinned source event | UniLab 物化方式与边界 |
 | --- | --- | --- |
 | startup mass 与 COM | base mass × `[0.9, 1.3]`；leg/gimbal body mass × `[0.9, 1.1]`；wheel mass × `[0.9, 1.1]`；base COM 的 x 为 `[-0.04, 0.04]` m、y/z 为 `[-0.02, 0.02]` m | 通过公共 backend reset/materialization contract 施加逐环境 mass multiplier 与 base-COM offset。source inertia event 已关闭，不属于这里的迁移声明。 |
-| startup body material | base static/dynamic `[0.01, 0.1]`、restitution `[0.02, 0.2]`、64 buckets；wheel static `[0.5, 1.2]`、dynamic `[0.4, 1.0]`、restitution `[0.02, 0.2]`、64 buckets；guide static/dynamic `[0.1, 0.7]`、restitution `[0.01, 0.1]`、8 buckets；consistent sample 会把 dynamic clamp 到不大于 static | MuJoCo/Motrix 只有一个 sliding-friction 通道，因此以 sampled dynamic friction 驱动该通道，不虚构 PhysX static/dynamic/restitution contact law。公开本地 asset 在两个后端都没有 `*_guide_link` target，因此 guide material 会 warning，并记录为 `not_applicable_missing_target`。 |
+| startup body material | base static/dynamic `[0.01, 0.1]`、restitution `[0.02, 0.2]`、64 buckets；wheel static `[0.5, 1.2]`、dynamic `[0.4, 1.0]`、restitution `[0.02, 0.2]`、64 buckets；guide static/dynamic `[0.1, 0.7]`、restitution `[0.01, 0.1]`、8 buckets；consistent sample 会把 dynamic clamp 到不大于 static | MuJoCo/Motrix 只有一个 sliding-friction 通道，因此以 sampled dynamic friction 驱动该通道，不虚构 PhysX static/dynamic/restitution contact law。本地 asset 包含 16 个被动导向轮及其圆柱碰撞体，guide material 映射到对应碰撞体；缺少 target 的下游精简 asset 仍会 warning 并记录 `not_applicable_missing_target`。 |
 | startup joint friction，add/uniform | front/rear 主动关节 static/dynamic `[0.25, 1.0]`、viscous `[0.05, 0.2]`；wheel static `[0.05, 0.25]`、viscous `[0, 0.01]`；inactive linkage static `[0.05, 0.1]`、viscous `[0.01, 0.025]`；gimbal static/viscous `[0.002, 0.01]` | source 未单列 dynamic range 时，使用 static range 生成诊断用 dynamic sample，并 clamp 到 static。sampled static 映射为 additive DoF `frictionloss`；两个本地后端都只有一个 Coulomb 系数，所以独立 dynamic sample 仅作诊断。MuJoCo 将 viscous friction 映射到 DoF damping；Motrix 明确记录 viscous `unsupported_omitted` 并 warning，但 Coulomb 随机化仍生效。 |
 | 满足间隔的 reset actuator gain 与 effort | 全局 stiffness/damping × `[0.75, 1.25]`，reset 最小间隔 720 steps；spring2 stiffness × `0.01`、damping × `[0.5, 1.5]`；leg effort × `[0.8, 1.1]`；wheel effort × `[0.9, 1.1]` | 已物化主动 leg、wheel、spring2 与 gimbal group。spring2 的 source stiffness baseline 为 0，因此 × `0.01` 后仍为 0；固定 50 N s/m damping 先乘全局系数，再乘 spring 系数。source passive-linkage `IdealPD` damping baseline `0.01` 也应进入全局 event，但本地 asset 没有对应 passive actuator：会 warning 并记录 `unsupported_unmaterialized_actuator`；这些关节的 startup joint friction 仍生效。`Rough-Play-v0` 只关闭全局 Kp/Kd event，保留继承的 spring/effort event。 |
 | episode reset | root roll/pitch 为 `[-0.15, 0.15]` rad，yaw 为 `[-3.14, 3.14]` rad；左右弹簧各自采样 `[-50, 50]` N preload | pose 与 preload 都通过 owner reset contract 重采样；preload 会叠加到下述 400--600 N 线性弹簧 profile。 |
@@ -483,8 +483,37 @@ exact source owner 保留 pinned `EventCfgV14` 的调度语义，而不是把它
 
 这些转换保留的是公开 task/config identity，不是 Isaac Sim/PhysX 的接触物理、经过
 solver 积分后的分布、数值轨迹或收敛效果。尤其是单 Coulomb material/joint-friction
-映射、缺失的 guide target、Motrix viscous omission 与未物化的 passive `IdealPD` gain，
+映射、Motrix viscous omission 与未物化的 passive `IdealPD` gain，
 都是明确的非 parity 边界。
+
+### 源 USD 的实例碰撞体
+
+源 `wheelbipeV14_2_1` USD 的碰撞形状位于实例内部。只遍历普通 prim 会漏掉
+16 个导向轮圆柱、4 个前连杆 box 和云台 yaw 圆柱；只保留 body/joint/inertia
+会使导向轮无法接触台阶。MJCF 现包含源文件的全部 33 个 box/cylinder 碰撞体，
+对应 touch site 使用同一位置、姿态和尺寸。几何在静态资源中物化，不在训练热路径
+读取 USD。独立源快照与 SHA 位于测试 fixture `source_collision_primitives.json`；
+导向轮与 200 mm 台阶的接触测试验证其在机身 box 接触之前参与碰撞。
+
+### 大台阶训练与七月 rough 的区别
+
+`wheelbipe_v14_rough` 对应七月发布的 rotation/stair 任务。要复现服务器
+`2026-09-01_17-03-38_rtx4090x4_from_flat3500` 的训练，应使用已有精确任务入口
+`Robotics-Wheelbipe-V14-Rough-v1`。它使用 13 列 running 地形，包含
+150–350 mm 低速台阶、150–400 mm 高速台阶和源 Airborne/StepUp 状态机。
+不能用七月小台阶测试的通过率代替 200 mm 垂直台阶验收。
+
+```bash
+uv run train --algo ppo --task Robotics-Wheelbipe-V14-Rough-v1 --sim mujoco \
+  algo.seed=44 algo.num_envs=512 algo.max_iterations=20000 \
+  training.device=cpu training.no_play=true \
+  algo.load_run=/absolute/path/to/source_flat3500/model_3500.pt
+```
+
+以上是单进程复现入口；源 run 的四 GPU 执行规模和训练收敛不能由短程 warm start
+代替。ROS2 的 35D/6D ONNX 可以加载这类模型，但原部署配置的弹簧、惯量、材料与
+训练不同，正常模式也不提供源训练的地形扫描。部署时需独立记录模型、物理配置、
+速度和高度命令，并验证两轮确实上台阶、离开平台且机器人保持直立。
 
 ### Rough 地形 contract
 
