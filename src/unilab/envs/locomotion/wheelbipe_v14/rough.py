@@ -451,6 +451,32 @@ class WheelbipeV14RoughEnv(
         return truncated
 
 
+@registry.envcfg("WheelbipeV14RoughRos2")
+@dataclass
+class WheelbipeV14RoughRos2Cfg(WheelbipeV14RoughCfg):
+    """Running terrain for the normal-only ROS2 policy adaptation owner.
+
+    This is deliberately separate from the versioned Isaac task aliases:
+    deployment does not supply their Airborne/StepUp mode observations.
+    Physics, commands and rewards are selected by the backend owner YAML.
+    """
+
+    scene: SceneCfg = field(default_factory=wheelbipe_running_scene)
+    terrain_commands: WheelbipeTerrainCommandConfig = field(
+        default_factory=WheelbipeTerrainCommandConfig
+    )
+
+
+@registry.env("WheelbipeV14RoughRos2", sim_backend="mujoco")
+class WheelbipeV14RoughRos2Env(WheelbipeV14RoughEnv):
+    """Keep obstacle-contact recovery when the deployment gimbal is fixed."""
+
+    def _source_reset_contact_body_names(self) -> tuple[str, ...]:
+        # Guide rollers and the belly are intended to touch an obstacle.
+        # Locking the gimbal must not turn those useful contacts into falls.
+        return ("gimbal_yaw_link", "gimbal_pitch_link")
+
+
 # The upstream Isaac task exposes this ``*EnvCfg`` spelling.  Preserve it as a
 # non-registered alias while keeping the UniLab ``*Cfg`` convention canonical.
 WheelbipeV14RoughEnvCfg = WheelbipeV14RoughCfg

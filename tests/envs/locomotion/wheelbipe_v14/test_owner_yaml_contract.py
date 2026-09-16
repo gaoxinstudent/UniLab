@@ -22,6 +22,144 @@ from unilab.training.reward import extract_reward_config
 ROOT = Path(__file__).resolve().parents[4]
 
 
+def test_ros2_rough_adaptation_keeps_running_terrain_and_normal_policy_contract() -> None:
+    """The deployment adaptation must not silently train the small rotation course."""
+    from unilab.envs.locomotion.wheelbipe_v14.rough import (
+        WheelbipeV14RoughRos2Cfg,
+        WheelbipeV14RoughRos2Env,
+    )
+    from unilab.envs.locomotion.wheelbipe_v14.semantics import build_source_v14_height_signals
+    from unilab.terrains.heightfield_terrains import HfPyramidStairsTerrainCfg
+
+    route = cli.build_route("ppo", "wheelbipe_v14_rough_ros2", "mujoco")
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(ROOT / "conf" / "ppo"), version_base="1.3"):
+        composed = compose("config", overrides=list(route.generated_overrides))
+    owner = WheelbipeV14RoughRos2Cfg()
+    overrides = OmegaConf.to_container(composed.env, resolve=True)
+    assert isinstance(overrides, dict)
+    overrides.update(extract_reward_config(composed))
+    apply_cfg_overrides(owner, overrides)
+    owner.validate()
+    assert composed.training.task_name == "WheelbipeV14RoughRos2"
+    assert owner.scene.terrain is not None
+    terrain = owner.scene.terrain.generator
+    assert terrain is not None and terrain.num_cols == 13
+    stairs = terrain.sub_terrains["high_speed_stair_for_rm"]
+    assert isinstance(stairs, HfPyramidStairsTerrainCfg)
+    assert stairs.step_height_range[0] <= 0.2 <= stairs.step_height_range[1]
+    assert owner.state_machine.enabled is False
+    assert owner.gimbal.enabled is False
+    assert owner.gimbal_spin_translate.enabled is False
+    assert owner.ctrl_mode_obs_dim == 7
+    assert owner.ctrl_mode_obs_scale == [1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 1.0]
+    assert (owner.sim_dt, owner.ctrl_dt) == (0.001, 0.02)
+    assert not owner.use_obs_delay and not owner.use_act_delay
+    assert owner.commands.vel_limit[0][0] <= -2.5
+    assert owner.commands.vel_limit[1][0] >= 2.5
+    assert owner.commands.vel_limit[0][2] <= -1.2
+    assert owner.commands.vel_limit[1][2] >= 1.2
+    assert owner.commands.rel_standing_envs >= 0.3
+    assert composed.reward.stand_still_deadzone_enabled is True
+    assert composed.reward.scales.stand_still_lin_vel < 0
+    env = object.__new__(WheelbipeV14RoughRos2Env)
+    assert env._source_reset_contact_body_names() == ("gimbal_yaw_link", "gimbal_pitch_link")
+
+    # The same 0.40 m body clearance on the ground, a 200 mm deck, and a
+    # high terrain cell must give the same reward reference. Clipping world
+    # z at 0.45 before subtracting ground used to produce [0.4, 0.25, -0.55].
+    ground = np.asarray([0.0, 0.2, 1.0])
+    observed, relative = build_source_v14_height_signals(
+        ground + 0.4,
+        ground,
+        use_absolute_height=owner.use_absolute_height,
+        clip_enabled=owner.height_obs_clip_enabled,
+        clip_range=owner.height_obs_clip_range,
+    )
+    np.testing.assert_allclose(relative, [0.4, 0.4, 0.4], atol=1e-6)
+    np.testing.assert_allclose(observed, ground + 0.4, atol=1e-6)
+
+
+def test_ros2_rough_fixed_gimbal_materializes_and_steps_with_joint_friction() -> None:
+    pytest.importorskip("mujoco")
+    from unilab.training import create_env
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(ROOT / "conf" / "ppo"), version_base="1.3"):
+        composed = compose(
+            "config",
+            overrides=["task=wheelbipe_v14_rough_ros2/mujoco", "env.adaptive_chunk_size=false"],
+        )
+    overrides = OmegaConf.to_container(composed.env, resolve=True)
+    assert isinstance(overrides, dict)
+    overrides.update(extract_reward_config(composed))
+    env = create_env(composed, num_envs=2, env_cfg_override=overrides)
+    try:
+        obs, _ = env.reset(np.arange(2, dtype=np.int32))
+        assert obs["obs"].shape == (2, 35)
+        assert obs["critic"].shape == (2, 78)
+        np.testing.assert_array_equal(obs["obs"][:, -7:], [[1, 0, 0, 0, 0, 0, 0]] * 2)
+        contract = env.domain_randomization_contract["joint_friction"]
+        assert contract["groups"]["gimbal"]["status"] == "not_applicable_fixed_gimbal"
+        assert len(contract["groups"]["wheel"]["dof_indices"]) == 2
+        # Check the actual source sampler, not only the YAML envelope: startup
+        # curricula must not remove reverse or stationary commands.
+        samples = env._sample_source_commands(
+            current_yaw=np.zeros(4096), episode_steps=np.zeros(4096, dtype=np.int32)
+        )["commands"]
+        assert np.mean(samples[:, 0] < -0.5) > 0.15
+        assert np.mean(samples[:, 0] > 0.5) > 0.15
+        assert np.mean(np.all(samples == 0.0, axis=1)) > 0.20
+        for _ in range(3):
+            state = env.step(np.zeros((2, 6), dtype=np.float32))
+            assert np.all(np.isfinite(state.obs["obs"]))
+            assert np.all(np.isfinite(state.reward))
+    finally:
+        env.close()
+
+
+def test_wheelbipe_time_limit_curriculum_uses_final_position_before_autoreset() -> None:
+    """Successful timeout episodes promote once; short episodes demote once."""
+    pytest.importorskip("mujoco")
+    from unilab.training import create_env
+
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(ROOT / "conf" / "ppo"), version_base="1.3"):
+        composed = compose(
+            "config",
+            overrides=[
+                "task=wheelbipe_v14_rough_ros2/mujoco",
+                "env.adaptive_chunk_size=false",
+                "env.terrain_curriculum.initial_level=2",
+            ],
+        )
+    overrides = OmegaConf.to_container(composed.env, resolve=True)
+    assert isinstance(overrides, dict)
+    overrides.update(extract_reward_config(composed))
+    env = create_env(composed, num_envs=2, env_cfg_override=overrides)
+    try:
+        # Simulate one long and one short completed displacement without
+        # depending on a learned policy or contact-sensitive walking test.
+        env.init_state()
+        np.testing.assert_array_equal(env._spawn.levels, [2, 2])
+        starts = env._backend.get_base_pos().copy()
+        starts[0, 0] -= 5.0  # above the 4.5 m promotion threshold
+        env._spawn.record_episode_start(np.arange(2), starts)
+        env.state.info["steps"][:] = env.cfg.max_episode_steps - 1
+        state = env.step(np.zeros((2, 6), dtype=np.float32))
+        assert np.all(state.truncated) and not np.any(state.terminated)
+        np.testing.assert_array_equal(env._spawn.levels, [3, 1])
+        assert state.info["log"]["terrain/num_promoted"] == 1
+        assert state.info["log"]["terrain/num_demoted"] == 1
+        assert state.final_observation is not None
+        # Returned done flags describe the final transition. They must not
+        # advance the new episode a second time on the next step.
+        env.step(np.zeros((2, 6), dtype=np.float32))
+        np.testing.assert_array_equal(env._spawn.levels, [3, 1])
+    finally:
+        env.close()
+
+
 @pytest.mark.parametrize("backend", ["mujoco", "motrix"])
 @pytest.mark.parametrize("source_id", sorted(cli.UPSTREAM_WHEELBIPE_CLI_ROUTES))
 def test_all_exact_cli_compositions_validate_at_the_registry_owner(

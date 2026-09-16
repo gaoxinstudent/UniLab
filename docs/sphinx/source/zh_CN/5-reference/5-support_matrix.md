@@ -89,6 +89,7 @@ HIM-PPO、DreamWaQ 和 NP3O + Barlow 的 custom WheelBipe 行只表示 owner 配
 | PPO (torch) | `stewart_balance` (stewart balance) | Tested | - | Tested |
 | PPO (torch) | `wheelbipe_v14_flat` (wheelbipe v14 flat) | Configured | - | Configured |
 | PPO (torch) | `wheelbipe_v14_rough` (wheelbipe v14 rough) | Configured | - | Configured |
+| PPO (torch) | `wheelbipe_v14_rough_ros2` (wheelbipe v14 rough ros2) | Configured | - | - |
 | APPO (torch) | `go1_joystick_flat` (Go1 joystick) | Tested | - | Tested |
 | APPO (torch) | `go2_joystick_flat` (Go2 joystick) | Tested | - | Tested |
 | APPO (torch) | `g1_walk_flat` (G1 walk flat) | Tested | Registered | Registered |

@@ -2127,6 +2127,9 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
         covered_indices: list[int] = []
         group_contracts: dict[str, Any] = {}
         for group, names in _SOURCE_JOINT_FRICTION_NAMES.items():
+            if group == "gimbal" and not self._gimbal_enabled:
+                group_contracts[group] = {"status": "not_applicable_fixed_gimbal"}
+                continue
             indices = np.asarray(self._backend.get_joint_dof_indices(names), dtype=np.intp).reshape(
                 -1
             )
@@ -3456,17 +3459,24 @@ class WheelbipeV14Env(WheelbipeV14BaseEnv):
             obs_dof_vel,
             env_ids=None,
         )
-        state = state.replace(obs=obs, reward=reward, terminated=terminated)
-        done = state.terminated | state.truncated
-        if np.any(done):
+        return state.replace(obs=obs, reward=reward, terminated=terminated)
+
+    def _reset_done_envs(self) -> None:
+        # NpEnv computes time limits and task boundary truncations *after*
+        # update_state. Consume the completed done mask here, before the
+        # reset plan replaces the episode's position and distance baseline.
+        # Otherwise successful time-limit episodes never promote terrain.
+        assert self._state is not None
+        done = self._state.terminated | self._state.truncated
+        if self.step_counter > 0 and np.any(done):
             stats = self._spawn.update_on_done(
                 np.flatnonzero(done).astype(np.int32), self._backend.get_base_pos()[done]
             )
             if stats:
-                state.info.setdefault("log", {}).update(
+                self._state.info.setdefault("log", {}).update(
                     {f"terrain/{key}": float(value) for key, value in stats.items()}
                 )
-        return state
+        super()._reset_done_envs()
 
     def _update_state_machine(self, info: dict[str, Any]) -> None:
         """Advance the optional owner state machine and apply mode envelopes."""

@@ -1,0 +1,64 @@
+# @package _global_
+# Adapt a source 35D normal policy on the running rough terrain for ROS2.
+# This owner is not an exact alias of the upstream Airborne/StepUp task.
+defaults:
+  - /task/wheelbipe_v14_rough/mujoco
+  - _self_
+
+training:
+  task_name: WheelbipeV14RoughRos2
+  sim_backend: mujoco
+
+algo:
+  algorithm:
+    learning_rate: 1.0e-5
+    schedule: fixed
+
+env:
+  sim_dt: 0.001
+  ctrl_dt: 0.02
+  sampling_mode: start
+  delay_profile: local_physics
+  use_obs_delay: false
+  use_act_delay: false
+  height_obs_clip_enabled: false
+  height_range: [0.34, 0.40]
+  gimbal:
+    enabled: false
+    control_mode: velocity
+    randomize_heading: false
+  state_machine:
+    enabled: false
+  terrain_commands:
+    enabled: false
+  terrain_curriculum:
+    enabled: true
+    initial_level: 0
+    type_col_assignment: round_robin
+  commands:
+    heading_command: false
+    # Interactive deployment must also learn stop, reverse and steering.
+    vel_limit: [[-2.7, 0.0, -1.2], [2.7, 0.0, 1.2]]
+    resampling_time_range: [2.0, 5.0]
+    rel_standing_envs: 0.30
+    rel_heading_envs: 0.0
+    special_mode_probabilities: [0.0, 0.0, 0.0]
+    zero_command_probability: 0.0
+    gimbal_mode_probability: 0.0
+  domain_rand:
+    # Adapt locomotion first; self-righting and airborne recovery are distinct
+    # objectives from the normal-only ROS2 controller's supported startup.
+    use_leg_random_start: false
+    use_predefined_leg_random_start: false
+    predefined_air_enabled: false
+    source_push_velocity_enabled: false
+    source_external_force_enabled: false
+
+reward:
+  # This flag also gates the stand_still_lin_vel penalty, not just clipping.
+  stand_still_deadzone_enabled: true
+  scales:
+    track_lin_vel_xy: 4.0
+    track_lin_vel_xy_square: -4.0
+    stand_still_lin_vel: -4.0
+    track_ang_vel_z_square: -1.0

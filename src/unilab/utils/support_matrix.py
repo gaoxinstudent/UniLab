@@ -240,6 +240,7 @@ def _is_tested(spec: EntrypointSpec, task_slug: str, backend: str, root: Path) -
     if spec.entrypoint_id == "ppo_torch" and task_slug in {
         "wheelbipe_v14_flat",
         "wheelbipe_v14_rough",
+        "wheelbipe_v14_rough_ros2",
     }:
         return False
     return spec.generic_tested

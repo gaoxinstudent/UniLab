@@ -515,6 +515,38 @@ uv run train --algo ppo --task Robotics-Wheelbipe-V14-Rough-v1 --sim mujoco \
 训练不同，正常模式也不提供源训练的地形扫描。部署时需独立记录模型、物理配置、
 速度和高度命令，并验证两轮确实上台阶、离开平台且机器人保持直立。
 
+### 面向 ROS2 普通模式的 rough 适配训练
+
+`wheelbipe_v14_rough_ros2/mujoco` 是独立的适配 owner，使用源 running 的 13 列
+地形、固定云台、普通模式 35D/6D 策略、1 ms 仿真步长和 20 ms 策略周期。它关闭
+部署中没有的 Airborne/StepUp 模式输入与额外观测/动作延迟；训练覆盖前进、停止、倒退
+和转向，速度范围 -2.7–2.7 m/s、偏航 ±1.2 rad/s、高度命令 0.34–0.40 m。
+30% 静止命令与静止速度惩罚共同约束零速下漂移，保留质量、质心、材料和电机随机化。
+这不是精确源任务的别名，也不覆盖高速旋转、自起立或实机控制。
+
+```bash
+uv run train --algo ppo --task wheelbipe_v14_rough_ros2 --sim mujoco \
+  algo.num_envs=256 algo.max_iterations=300 training.device=cuda:0 \
+  training.no_play=true training.log_dir=logs/wheelbipe_rough_ros2 \
+  algo.load_run=/absolute/path/to/rough_dash/model_3500.pt
+```
+
+此 MuJoCo owner 的物理仿真运行在 CPU；`training.device=cuda:0` 将策略推理和
+PPO 更新放在 GPU 上。继续训练时可将 `algo.load_run` 指向 UniLab 检查点。
+
+该 owner 不截断世界坐标高度：在地面、200 mm 平台或更高地形上，真实 0.40 m
+离地高度应得到相同的高度奖励参考。精确源别名仍保留各自的高度观测设置。
+导向轮/腹部接触允许用于越障；固定云台没有活动关节，因此其关节摩擦随机化明确记录
+为 `not_applicable_fixed_gimbal`，其余关节照常随机化。
+
+地形课程在自动重置前统计完整 `terminated | truncated` 标记和回合末位置，覆盖
+正常超时及场景边界超时；初始化、手动重置不会作为完成的训练回合重复晋级。
+课程从第 0 级开始；训练奖励、地形等级和 200 mm 部署验收需要分别报告。
+新增 owner 的公开支持等级仍为 `Configured`，不能仅凭可训练或奖励上升宣称等同源能力。
+早期仅正向采样、关闭静止死区的适配检查点即使通过台阶，也不能作为交互控制验收结果；
+`stand_still_deadzone_enabled=false` 还会关闭静止速度惩罚。验收必须同时检查策略实际
+收到的命令与机体速度：零速站稳、松键制动、倒退方向及越障，不能仅断言 ROS 命令清零。
+
 ### Rough 地形 contract
 
 rough exact owner 不共用一个泛化地形：`Rough-v0` 使用 source
