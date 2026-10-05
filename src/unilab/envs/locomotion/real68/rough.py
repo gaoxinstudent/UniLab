@@ -33,6 +33,7 @@ from unilab.envs.locomotion.real68.balance import (
     Real68BalanceEnv,
     Real68Commands,
     Real68DomainRandConfig,
+    _apply_cold_start_pose,
 )
 from unilab.envs.locomotion.real68.balance import (
     Real68CommandCurriculumCfg as BaseReal68CommandCurriculumCfg,
@@ -215,6 +216,19 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         recovery_joint_pose_ids = env._sample_recovery_joint_poses(qpos, recovering)
         qpos[:, 0:3] = env._spawn.apply_spawn(env_ids, qpos[:, 0:3], yaw=yaw)
         qpos[:, 3:7] = np_quat_mul(qpos[:, 3:7], np_quat_from_euler_xyz(roll, pitch, yaw))
+        cold_start_cfg = env.cfg.cold_start
+        cold = np.zeros((num_reset,), dtype=bool)
+        if cold_start_cfg.enabled and cold_start_cfg.fraction > 0.0 and np.any(~recovering):
+            eligible = np.flatnonzero(~recovering)
+            cold[eligible] = np.random.uniform(size=eligible.size) < cold_start_cfg.fraction
+        if np.any(cold):
+            # Power-on startup state: all joints (active + passive) near zero,
+            # wheels on the terrain ground, body upright. The zero-joint pose
+            # closes the fourbar (passive joints ~= 0), so this is a valid
+            # standing start the default reset distribution never covers.
+            spawn_origins = env._spawn.origins_for(env_ids)
+            _apply_cold_start_pose(qpos, cold, cold_start_cfg, spawn_origins[:, 2])
+            qpos[cold, 3:7] = np_quat_from_euler_xyz(0.0, 0.0, yaw[cold])
         env._spawn.record_episode_start(env_ids, qpos[:, 0:3])
 
         limit = float(env.cfg.domain_rand.reset_qvel_limit)
@@ -222,6 +236,10 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
             np.random.uniform(-limit, limit, size=(num_reset, 6)),
             dtype=get_global_dtype(),
         )
+        if np.any(cold):
+            # Power-on at rest: cold-start envs start with the full qvel zeroed
+            # (base and joints), overriding the base qvel randomization above.
+            qvel[cold, :] = 0.0
 
         commands = env.sample_velocity_commands(num_reset)
         if env._last_command_clip_scale.shape[0] == num_reset:
@@ -262,7 +280,9 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
         mass_delta = np.zeros((num_reset, 1), dtype=get_global_dtype())
         com_offset = np.zeros((num_reset, 3), dtype=get_global_dtype())
         ground_friction = np.full(
-            (num_reset, 1), env._base_geom_friction[env._ground_geom_id, 0], dtype=get_global_dtype()
+            (num_reset, 1),
+            env._base_geom_friction[env._ground_geom_id, 0],
+            dtype=get_global_dtype(),
         )
         if randomization is not None:
             if randomization.base_mass_delta is not None:
@@ -288,6 +308,7 @@ class Real68BalanceRoughDomainRandomizationProvider(Real68BalanceDomainRandomiza
             "recovery_completed": np.zeros((num_reset,), dtype=bool),
             "recovery_pose_ids": recovery_pose_ids,
             "recovery_joint_pose_ids": recovery_joint_pose_ids,
+            "cold_start": cold,
             "current_actions": zero_actions(num_reset, env._num_action),
             "last_actions": zero_actions(num_reset, env._num_action),
             "torques": np.zeros((num_reset, env._num_action), dtype=get_global_dtype()),
@@ -360,15 +381,11 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
                     [terrain.proportion for terrain in terrain_generator.sub_terrains.values()],
                     dtype=np.float64,
                 ),
-                initial_type_col=(
-                    self._terrain_bootstrap_type_col if terrain_locked else None
-                ),
+                initial_type_col=(self._terrain_bootstrap_type_col if terrain_locked else None),
             )
             self._terrain_type_pending_unlock[:] = terrain_locked
         init_height_scan_sensor(self, cfg.terrain_scan, cfg.asset.base_name)
-        self._critic_history = np.zeros(
-            (num_envs, self._critic_one_step_dim), dtype=self._np_dtype
-        )
+        self._critic_history = np.zeros((num_envs, self._critic_one_step_dim), dtype=self._np_dtype)
 
     def _make_dr_provider(self) -> Real68BalanceRoughDomainRandomizationProvider:
         return Real68BalanceRoughDomainRandomizationProvider()
@@ -402,9 +419,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
                 "Real68 terrain pending-unlock shape mismatch: "
                 f"{pending.shape} != {self._terrain_type_pending_unlock.shape}"
             )
-        self._spawn.load_training_state_dict(
-            cast(dict[str, object], terrain_state["spawn"])
-        )
+        self._spawn.load_training_state_dict(cast(dict[str, object], terrain_state["spawn"]))
         self._terrain_type_pending_unlock[:] = pending
 
     def get_playback_root_xy_offsets(self) -> np.ndarray | None:
@@ -490,10 +505,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
                     promote_performance = (
                         (vx_error <= float(terrain_cfg.max_vx_error))
                         & (tilt_rate <= float(terrain_cfg.max_tilt_rate))
-                        & (
-                            contact_rate
-                            <= float(terrain_cfg.max_nonwheel_contact_rate)
-                        )
+                        & (contact_rate <= float(terrain_cfg.max_nonwheel_contact_rate))
                         & ~self._segment_recovery_seen[done_indices]
                     )
                     recovery_timeout = np.asarray(
@@ -535,6 +547,7 @@ class Real68BalanceRoughEnv(Real68BalanceEnv):
         if not isinstance(log, dict):
             return
         self._write_motion_metrics(log, state.info, linvel, gyro)
+        self._write_cold_start_metrics(log, state.info)
         self._update_command_curriculum()
         self._write_command_curriculum_metrics(log)
         log["command_curriculum/terrain_unlocked"] = float(self._terrain_curriculum_unlocked())

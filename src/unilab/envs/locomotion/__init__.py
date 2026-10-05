@@ -7,4 +7,5 @@ __unilab_registry_modules__ = (
     "unilab.envs.locomotion.g1",
     "unilab.envs.locomotion.go2_arm",
     "unilab.envs.locomotion.real68",
+    "unilab.envs.locomotion.ten_four",
 )

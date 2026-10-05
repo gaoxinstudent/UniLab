@@ -13,73 +13,73 @@ from unilab.envs.locomotion.common.base import (
 )
 
 ACTIVE_JOINT_POS_SENSORS: tuple[str, ...] = (
-    "left_hip_bigleg_joint_pos",
+    "left_rear1_joint_pos",
     "left_wheel_joint_pos",
-    "left_calf_smallleg_joint_pos",
-    "right_hip_bigleg_joint_pos",
+    "left_front1_joint_pos",
+    "right_rear1_joint_pos",
     "right_wheel_joint_pos",
-    "right_calf_smallleg_joint_pos",
+    "right_front1_joint_pos",
 )
 ACTIVE_JOINT_NAMES: tuple[str, ...] = (
-    "left_hip_bigleg_joint",
+    "left_rear1_joint",
     "left_wheel_joint",
-    "left_calf_smallleg_joint",
-    "right_hip_bigleg_joint",
+    "left_front1_joint",
+    "right_rear1_joint",
     "right_wheel_joint",
-    "right_calf_smallleg_joint",
+    "right_front1_joint",
 )
 ACTIVE_JOINT_VEL_SENSORS: tuple[str, ...] = (
-    "left_hip_bigleg_joint_vel",
+    "left_rear1_joint_vel",
     "left_wheel_joint_vel",
-    "left_calf_smallleg_joint_vel",
-    "right_hip_bigleg_joint_vel",
+    "left_front1_joint_vel",
+    "right_rear1_joint_vel",
     "right_wheel_joint_vel",
-    "right_calf_smallleg_joint_vel",
+    "right_front1_joint_vel",
 )
 PASSIVE_JOINT_POS_SENSORS: tuple[str, ...] = (
-    "left_calf_smallleg_liangan_joint_pos",
-    "left_chuanliangan2_joint_pos",
-    "left_chuanliangan3_joint_pos",
-    "left_chuanliangan5_joint_pos",
-    "right_calf_smallleg_liangan_joint_pos",
-    "right_liangan2_joint_pos",
-    "right_liangan3_joint_pos",
-    "right_liangan5_joint_pos",
+    "left_rear2_joint_pos",
+    "left_front2_joint_pos",
+    "left_front3_joint_pos",
+    "left_front4_joint_pos",
+    "right_rear2_joint_pos",
+    "right_front2_joint_pos",
+    "right_front3_joint_pos",
+    "right_front4_joint_pos",
 )
 PASSIVE_JOINT_VEL_SENSORS: tuple[str, ...] = (
-    "left_calf_smallleg_liangan_joint_vel",
-    "left_chuanliangan2_joint_vel",
-    "left_chuanliangan3_joint_vel",
-    "left_chuanliangan5_joint_vel",
-    "right_calf_smallleg_liangan_joint_vel",
-    "right_liangan2_joint_vel",
-    "right_liangan3_joint_vel",
-    "right_liangan5_joint_vel",
+    "left_rear2_joint_vel",
+    "left_front2_joint_vel",
+    "left_front3_joint_vel",
+    "left_front4_joint_vel",
+    "right_rear2_joint_vel",
+    "right_front2_joint_vel",
+    "right_front3_joint_vel",
+    "right_front4_joint_vel",
 )
 WHEEL_CONTACT_SENSORS: tuple[str, ...] = ("left_wheel_contact", "right_wheel_contact")
 NONWHEEL_CONTACT_SENSORS: tuple[str, ...] = (
     "base_link_contact",
-    "left_hip_bigleg_contact",
-    "left_calf_smallleg_liangan_contact",
-    "left_calf_smallleg_contact",
-    "left_chuanliangan2_contact",
-    "left_chuanliangan3_contact",
-    "left_chuanliangan5_contact",
-    "right_hip_bigleg_contact",
-    "right_calf_smallleg_liangan_contact",
-    "right_calf_smallleg_contact",
-    "right_liangan2_contact",
-    "right_liangan3_contact",
-    "right_liangan5_contact",
+    "left_front_guide_contact",
+    "left_front1_guide_contact",
+    "left_bottom1_guide_contact",
+    "left_bottom2_guide_contact",
+    "left_bottom3_guide_contact",
+    "left_bottom4_guide_contact",
+    "right_front_guide_contact",
+    "right_front1_guide_contact",
+    "right_bottom1_guide_contact",
+    "right_bottom2_guide_contact",
+    "right_bottom3_guide_contact",
+    "right_bottom4_guide_contact",
 )
 # Keep the critic contact slice checkpoint-compatible while internal reward and
 # termination logic observes every non-wheel collision link.
 NONWHEEL_CONTACT_OBSERVATION_SENSORS: tuple[str, ...] = (
     "base_link_contact",
-    "left_chuanliangan3_contact",
-    "left_chuanliangan5_contact",
-    "right_liangan3_contact",
-    "right_liangan5_contact",
+    "left_bottom3_guide_contact",
+    "left_bottom4_guide_contact",
+    "right_bottom3_guide_contact",
+    "right_bottom4_guide_contact",
 )
 
 NUM_ACTIONS = len(ACTIVE_JOINT_POS_SENSORS)
@@ -131,7 +131,7 @@ class Asset:
 
 
 @dataclass
-class Real68BaseCfg(LocomotionBaseCfg):
+class TenFourBaseCfg(LocomotionBaseCfg):
     noise_config: NoiseConfig = field(default_factory=NoiseConfig)  # type: ignore[assignment]
     control_config: ControlConfig = field(default_factory=ControlConfig)  # type: ignore[assignment]
     asset: Asset = field(default_factory=Asset)
@@ -149,7 +149,7 @@ def scalarize_contacts(backend, names: tuple[str, ...], *, dtype: np.dtype | typ
     return values
 
 
-def compute_real68_motor_ctrl(
+def compute_ten_four_motor_ctrl(
     policy_ctrl: np.ndarray,
     active_pos: np.ndarray,
     active_vel: np.ndarray,
@@ -177,8 +177,8 @@ def compute_real68_motor_ctrl(
     return out
 
 
-class Real68BaseEnv(LocomotionBaseEnv):
-    _cfg: Real68BaseCfg
+class TenFourBaseEnv(LocomotionBaseEnv):
+    _cfg: TenFourBaseCfg
 
     def _init_action_space(self) -> None:
         self._action_space = gym.spaces.Box(

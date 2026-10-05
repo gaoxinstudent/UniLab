@@ -32,7 +32,7 @@ from unilab.envs.locomotion.common.commands import Commands, zero_small_xy_comma
 from unilab.envs.locomotion.common.domain_rand import DomainRandConfig
 from unilab.envs.locomotion.common.dr_provider import LocomotionDRProvider
 from unilab.envs.locomotion.common.rewards import RewardContext
-from unilab.envs.locomotion.real68.base import (
+from unilab.envs.locomotion.ten_four.base import (
     ACTIVE_JOINT_NAMES,
     ACTIVE_JOINT_POS_SENSORS,
     CALF_INDICES,
@@ -47,12 +47,12 @@ from unilab.envs.locomotion.real68.base import (
     SYMMETRIC_STANDING_ACTIVE_ANGLES,
     WHEEL_CONTACT_SENSORS,
     WHEEL_INDICES,
-    Real68BaseCfg,
-    Real68BaseEnv,
-    compute_real68_motor_ctrl,
+    TenFourBaseCfg,
+    TenFourBaseEnv,
+    compute_ten_four_motor_ctrl,
     scalarize_contacts,
 )
-from unilab.envs.locomotion.real68.observations import (
+from unilab.envs.locomotion.ten_four.observations import (
     ACTION_SCHEMA,
     ACTOR_ONE_STEP_DIM,
     CRITIC_ONE_STEP_DIM,
@@ -63,39 +63,42 @@ from unilab.envs.locomotion.real68.observations import (
     fill_history,
 )
 
-_REAL68_LEFT_POSTURE = np.asarray([0, 1], dtype=np.int32)
-_REAL68_RIGHT_POSTURE = np.asarray([2, 3], dtype=np.int32)
-_REAL68_MIRROR_SIGNS = np.asarray([-1.0, -1.0], dtype=np.float64)
-_REAL68_CURRICULUM_MIN_ABS_COMMAND = 0.05
-_REAL68_CURRICULUM_NUM_BINS = 4
-_REAL68_LEFT_HIP_INDEX = int(HIP_INDICES[0])
-_REAL68_RIGHT_HIP_INDEX = int(HIP_INDICES[1])
-_REAL68_LEFT_WHEEL_INDEX = int(WHEEL_INDICES[0])
-_REAL68_RIGHT_WHEEL_INDEX = int(WHEEL_INDICES[1])
-_REAL68_LEFT_CALF_INDEX = int(CALF_INDICES[0])
-_REAL68_RIGHT_CALF_INDEX = int(CALF_INDICES[1])
-_REAL68_LEFT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("left_chuanliangan5_contact")
-_REAL68_RIGHT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("right_liangan5_contact")
-_REAL68_RECOVERY_FORBIDDEN_CONTACT_INDICES = np.asarray(
-    [
-        NONWHEEL_CONTACT_SENSORS.index("base_link_contact"),
-        NONWHEEL_CONTACT_SENSORS.index("left_hip_bigleg_contact"),
-        NONWHEEL_CONTACT_SENSORS.index("right_hip_bigleg_contact"),
-    ],
+_TEN_FOUR_LEFT_POSTURE = np.asarray([0, 1], dtype=np.int32)
+_TEN_FOUR_RIGHT_POSTURE = np.asarray([2, 3], dtype=np.int32)
+_TEN_FOUR_MIRROR_SIGNS = np.asarray([-1.0, -1.0], dtype=np.float64)
+_TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND = 0.05
+_TEN_FOUR_CURRICULUM_NUM_BINS = 4
+_TEN_FOUR_LEFT_HIP_INDEX = int(HIP_INDICES[0])
+_TEN_FOUR_RIGHT_HIP_INDEX = int(HIP_INDICES[1])
+_TEN_FOUR_LEFT_WHEEL_INDEX = int(WHEEL_INDICES[0])
+_TEN_FOUR_RIGHT_WHEEL_INDEX = int(WHEEL_INDICES[1])
+_TEN_FOUR_LEFT_CALF_INDEX = int(CALF_INDICES[0])
+_TEN_FOUR_RIGHT_CALF_INDEX = int(CALF_INDICES[1])
+_TEN_FOUR_LEFT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index("left_bottom4_guide_contact")
+_TEN_FOUR_RIGHT_LIANGAN5_CONTACT_INDEX = NONWHEEL_CONTACT_SENSORS.index(
+    "right_bottom4_guide_contact"
+)
+# Guide wheels are intentional support contacts.  Keep them in observations and
+# recovery support logic, but never treat their ground contact as a failure,
+# termination cause, or contact penalty.  For this robot the only non-wheel
+# contact that remains safety-critical is the chassis/base contact.
+_TEN_FOUR_PENALIZED_NONWHEEL_CONTACT_INDICES = np.asarray(
+    [NONWHEEL_CONTACT_SENSORS.index("base_link_contact")],
     dtype=np.int32,
 )
-_REAL68_NONWHEEL_CONTACT_OBSERVATION_INDICES = np.asarray(
+_TEN_FOUR_RECOVERY_FORBIDDEN_CONTACT_INDICES = _TEN_FOUR_PENALIZED_NONWHEEL_CONTACT_INDICES
+_TEN_FOUR_NONWHEEL_CONTACT_OBSERVATION_INDICES = np.asarray(
     [NONWHEEL_CONTACT_SENSORS.index(name) for name in NONWHEEL_CONTACT_OBSERVATION_SENSORS],
     dtype=np.int32,
 )
-_REAL68_FORWARD_AXIS = 1
-_REAL68_LATERAL_AXIS = 0
-_REAL68_FORWARD_SIGN = 1.0
-_REAL68_WHEEL_RADIUS = 0.06
-# Left/right wheel bodies sit at y = ±0.215 in real68.xml (lines 54, 110),
+_TEN_FOUR_FORWARD_AXIS = 1
+_TEN_FOUR_LATERAL_AXIS = 0
+_TEN_FOUR_FORWARD_SIGN = 1.0
+_TEN_FOUR_WHEEL_RADIUS = 0.06
+# Left/right wheel bodies sit at y = ±0.215 in ten_four.xml (lines 54, 110),
 # so the differential-drive wheelbase is 2 * 0.215 = 0.43 m. Used to clip the
 # commanded (vx, wz) into the reachable diamond |vx| + |wz| * L/2 <= v_wheel_max.
-_REAL68_WHEEL_BASE = 0.43
+_TEN_FOUR_WHEEL_BASE = 0.43
 
 _COMMAND_CURRICULUM_ARRAY_STATE = (
     "_curriculum_vx_count",
@@ -127,7 +130,7 @@ _RECOVERY_CURRICULUM_ARRAY_STATE = (
 
 
 @dataclass
-class Real68CommandCurriculumCfg:
+class TenFourCommandCurriculumCfg:
     enabled: bool = False
     initial_vel_limit: list[list[float]] = field(
         default_factory=lambda: [[0.1, 0.0, -0.3], [0.35, 0.0, 0.3]]
@@ -197,7 +200,7 @@ class HistoryConfig:
 
 
 @dataclass
-class Real68Commands(Commands):
+class TenFourCommands(Commands):
     vel_limit: list[list[float]] = field(
         default_factory=lambda: [[-0.5, 0.0, -0.8], [0.8, 0.0, 0.8]]
     )
@@ -254,7 +257,7 @@ class RewardConfig:
 
 
 @dataclass
-class Real68Sensor(LocomotionSensor):
+class TenFourSensor(LocomotionSensor):
     local_linvel = "local_linvel"
     gyro = "gyro"
     gravity = "upvector"
@@ -264,7 +267,7 @@ class Real68Sensor(LocomotionSensor):
 
 
 @dataclass
-class Real68DomainRandConfig(DomainRandConfig):
+class TenFourDomainRandConfig(DomainRandConfig):
     randomize_init_yaw: bool = True
     init_yaw_range: list[float] = field(default_factory=lambda: [-np.pi, np.pi])
     reset_qvel_limit: float = 0.2
@@ -433,27 +436,27 @@ class FlatTerminationConfig:
     nonwheel_contact_max_steps: int = 8
 
 
-@registry.envcfg("Real68BalanceFlat")
+@registry.envcfg("TenFourBalanceFlat")
 @dataclass
-class Real68BalanceCfg(Real68BaseCfg):
+class TenFourBalanceCfg(TenFourBaseCfg):
     scene: SceneCfg = field(
         default_factory=lambda: SceneCfg(
-            model_file=str(ASSETS_ROOT_PATH / "robots" / "real68" / "scene_flat.xml")
+            model_file=str(ASSETS_ROOT_PATH / "robots" / "10_4" / "scene_flat.xml")
         )
     )
     max_episode_seconds: float = 15.0
     init_state: InitState = field(default_factory=InitState)
-    commands: Real68Commands = field(default_factory=Real68Commands)
+    commands: TenFourCommands = field(default_factory=TenFourCommands)
     height_command: HeightCommandConfig = field(default_factory=HeightCommandConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     observation_schema: str = OBSERVATION_SCHEMA
     action_schema: str = ACTION_SCHEMA
-    command_curriculum: Real68CommandCurriculumCfg = field(
-        default_factory=Real68CommandCurriculumCfg
+    command_curriculum: TenFourCommandCurriculumCfg = field(
+        default_factory=TenFourCommandCurriculumCfg
     )
     reward_config: RewardConfig | None = None
-    sensor: Real68Sensor = field(default_factory=Real68Sensor)
-    domain_rand: Real68DomainRandConfig = field(default_factory=Real68DomainRandConfig)
+    sensor: TenFourSensor = field(default_factory=TenFourSensor)
+    domain_rand: TenFourDomainRandConfig = field(default_factory=TenFourDomainRandConfig)
     domain_rand_curriculum: DomainRandCurriculumConfig = field(
         default_factory=DomainRandCurriculumConfig
     )
@@ -462,7 +465,7 @@ class Real68BalanceCfg(Real68BaseCfg):
     cold_start: ColdStartConfig = field(default_factory=ColdStartConfig)
 
 
-class Real68BalanceDomainRandomizationProvider(LocomotionDRProvider):
+class TenFourBalanceDomainRandomizationProvider(LocomotionDRProvider):
     def validate(self, env: Any, capabilities) -> None:
         validate_common_reset_randomization(
             env,
@@ -690,18 +693,18 @@ def _restore_training_arrays(
         restored_shape = tuple(int(size) for size in array_payload["shape"])
         if restored_shape != target.shape:
             raise ValueError(
-                f"Real68 training state shape mismatch for {name}: "
+                f"TenFour training state shape mismatch for {name}: "
                 f"{restored_shape} != {target.shape}"
             )
         restored = np.asarray(array_payload["values"], dtype=target.dtype)
         if restored.size != target.size:
             raise ValueError(
-                f"Real68 training state size mismatch for {name}: {restored.size} != {target.size}"
+                f"TenFour training state size mismatch for {name}: {restored.size} != {target.size}"
             )
         target[...] = restored.reshape(target.shape)
 
 
-def validate_standing_bootstrap_horizon(cfg: Real68BalanceCfg) -> None:
+def validate_standing_bootstrap_horizon(cfg: TenFourBalanceCfg) -> None:
     curriculum = cfg.command_curriculum
     if not (curriculum.enabled and curriculum.standing_bootstrap_enabled):
         return
@@ -718,12 +721,12 @@ def validate_standing_bootstrap_horizon(cfg: Real68BalanceCfg) -> None:
         )
 
 
-@registry.env("Real68BalanceFlat", sim_backend="mujoco")
-class Real68BalanceEnv(Real68BaseEnv):
-    _cfg: Real68BalanceCfg
+@registry.env("TenFourBalanceFlat", sim_backend="mujoco")
+class TenFourBalanceEnv(TenFourBaseEnv):
+    _cfg: TenFourBalanceCfg
     _critic_one_step_dim: int = CRITIC_ONE_STEP_DIM
 
-    def __init__(self, cfg: Real68BalanceCfg, num_envs=1, backend_type="mujoco"):
+    def __init__(self, cfg: TenFourBalanceCfg, num_envs=1, backend_type="mujoco"):
         if cfg.reward_config is None:
             raise ValueError("reward_config must be provided via Hydra configuration")
         validate_standing_bootstrap_horizon(cfg)
@@ -739,10 +742,17 @@ class Real68BalanceEnv(Real68BaseEnv):
         super().__init__(cfg, backend, num_envs)
         self._np_dtype = get_global_dtype()
         ctrl_range = np.asarray(self._backend.get_actuator_ctrl_range(), dtype=np.float64)
-        if ctrl_range.shape != (NUM_ACTIONS, 2):
-            raise ValueError(f"Real68 actuator ctrl_range must have shape ({NUM_ACTIONS}, 2)")
-        self._ctrl_lower = ctrl_range[:, 0].astype(self._np_dtype)
-        self._ctrl_upper = ctrl_range[:, 1].astype(self._np_dtype)
+        if ctrl_range.shape[0] < NUM_ACTIONS or ctrl_range.shape[1] != 2:
+            raise ValueError(
+                f"TenFour model must expose at least {NUM_ACTIONS} policy actuators, got {ctrl_range.shape}"
+            )
+        # The two gas-spring general actuators are physics-owned bias forces,
+        # not policy outputs. Keep their control at zero and expose only the
+        # six drive actuators to PPO.
+        self._policy_actuator_count = NUM_ACTIONS
+        self._backend_actuator_count = int(ctrl_range.shape[0])
+        self._ctrl_lower = ctrl_range[:NUM_ACTIONS, 0].astype(self._np_dtype)
+        self._ctrl_upper = ctrl_range[:NUM_ACTIONS, 1].astype(self._np_dtype)
         self._ground_geom_id = self._backend.get_geom_id(self._cfg.asset.ground)
         joint_qpos_indices = self._backend.get_joint_dof_pos_indices(ACTIVE_JOINT_NAMES)
         root_qpos_dim = int(self._init_qpos.size - self._backend.num_dof_vel)
@@ -782,7 +792,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
         if missing_reward_fns:
             raise ValueError(
-                "Real68 reward_config.scales has no implementation for: "
+                "TenFour reward_config.scales has no implementation for: "
                 + ", ".join(missing_reward_fns)
             )
         self._init_domain_randomization(self._make_dr_provider())
@@ -801,40 +811,40 @@ class Real68BalanceEnv(Real68BaseEnv):
             ccfg.initial_vel_limit[1] if ccfg.enabled else self._cfg.commands.vel_limit[1],
             dtype=self._np_dtype,
         )
-        self._curriculum_vx_count = np.zeros((_REAL68_CURRICULUM_NUM_BINS,), dtype=np.int32)
+        self._curriculum_vx_count = np.zeros((_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=np.int32)
         self._curriculum_vx_signed_speed_ratio_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_vx_error_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_vx_tilt_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_vx_tilt_angle_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_vx_height_violation_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_vx_nonwheel_contact_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
-        self._curriculum_yaw_count = np.zeros((_REAL68_CURRICULUM_NUM_BINS,), dtype=np.int32)
+        self._curriculum_yaw_count = np.zeros((_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=np.int32)
         self._curriculum_yaw_error_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_yaw_tilt_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_yaw_tilt_angle_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_yaw_height_violation_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._curriculum_yaw_nonwheel_contact_rate_sum = np.zeros(
-            (_REAL68_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
+            (_TEN_FOUR_CURRICULUM_NUM_BINS,), dtype=self._np_dtype
         )
         self._last_curriculum_vx_eval: dict[str, float] | None = None
         self._last_curriculum_yaw_eval: dict[str, float] | None = None
@@ -973,7 +983,7 @@ class Real68BalanceEnv(Real68BaseEnv):
     def load_training_state_dict(self, state: dict[str, Any]) -> None:
         version = int(state.get("version", 0))
         if version != 1:
-            raise ValueError(f"Unsupported Real68 training state version: {version}")
+            raise ValueError(f"Unsupported TenFour training state version: {version}")
         super().load_training_state_dict(cast(dict[str, Any], state["base"]))
 
         command = cast(dict[str, Any], state["command_curriculum"])
@@ -1064,7 +1074,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         """
         version = int(state.get("version", 0))
         if version != 1:
-            raise ValueError(f"Unsupported Real68 playback state version: {version}")
+            raise ValueError(f"Unsupported TenFour playback state version: {version}")
         command = cast(dict[str, Any], state["command_curriculum"])
         self._command_curriculum_vx_progress = _progress_value(
             command["vx_progress"], "vx_progress"
@@ -1080,10 +1090,10 @@ class Real68BalanceEnv(Real68BaseEnv):
         actor_history = int(self._cfg.history.num_actor_history)
         critic_history = int(self._cfg.history.num_critic_history)
         if actor_history <= 0 or critic_history <= 0:
-            raise ValueError("Real68 observation history lengths must be positive")
+            raise ValueError("TenFour observation history lengths must be positive")
         if critic_history != 1:
             raise ValueError(
-                "Real68 critic history must remain 1 for the privileged critic contract"
+                "TenFour critic history must remain 1 for the privileged critic contract"
             )
         dtype = get_global_dtype()
         self._actor_history = np.zeros(
@@ -1097,17 +1107,22 @@ class Real68BalanceEnv(Real68BaseEnv):
         self._motor_strength = np.ones((self._num_envs, self._num_action), dtype=dtype)
         self._action_delay_steps = np.zeros((self._num_envs,), dtype=np.int32)
 
-    def _make_dr_provider(self) -> Real68BalanceDomainRandomizationProvider:
-        return Real68BalanceDomainRandomizationProvider()
+    def _make_dr_provider(self) -> TenFourBalanceDomainRandomizationProvider:
+        return TenFourBalanceDomainRandomizationProvider()
+
+    def get_playback_root_xy_offsets(self) -> np.ndarray:
+        # Flat scenes have no terrain-origin manager, but the generic MuJoCo
+        # playback path expects a callable to return one offset per env.
+        return np.zeros((self._num_envs, 2), dtype=self._np_dtype)
 
     def _forward_linvel(self, linvel: np.ndarray) -> np.ndarray:
         return np.asarray(
-            linvel[:, _REAL68_FORWARD_AXIS] * _REAL68_FORWARD_SIGN,
+            linvel[:, _TEN_FOUR_FORWARD_AXIS] * _TEN_FOUR_FORWARD_SIGN,
             dtype=self._np_dtype,
         )
 
     def _lateral_linvel(self, linvel: np.ndarray) -> np.ndarray:
-        return np.asarray(linvel[:, _REAL68_LATERAL_AXIS], dtype=self._np_dtype)
+        return np.asarray(linvel[:, _TEN_FOUR_LATERAL_AXIS], dtype=self._np_dtype)
 
     @property
     def obs_groups_spec(self) -> dict[str, int]:
@@ -1475,8 +1490,8 @@ class Real68BalanceEnv(Real68BaseEnv):
         scatter them into ``self._command_clip_scale`` for diagnostics.
         """
         wheel_velocity_scale = float(self._cfg.control_config.wheel_velocity_scale)
-        v_wheel_max = wheel_velocity_scale * _REAL68_WHEEL_RADIUS
-        demand = np.abs(commands[:, 0]) + np.abs(commands[:, 2]) * (0.5 * _REAL68_WHEEL_BASE)
+        v_wheel_max = wheel_velocity_scale * _TEN_FOUR_WHEEL_RADIUS
+        demand = np.abs(commands[:, 0]) + np.abs(commands[:, 2]) * (0.5 * _TEN_FOUR_WHEEL_BASE)
         clip_scale = np.ones_like(demand, dtype=self._np_dtype)
         over = demand > v_wheel_max
         if np.any(over):
@@ -1789,7 +1804,13 @@ class Real68BalanceEnv(Real68BaseEnv):
             self.default_angles[CALF_INDICES]
             + exec_actions[:, CALF_INDICES] * self._cfg.control_config.calf_action_scale
         )
-        return targets
+        if self._backend_actuator_count == NUM_ACTIONS:
+            return targets
+        padded_targets = np.zeros(
+            (targets.shape[0], self._backend_actuator_count), dtype=self._np_dtype
+        )
+        padded_targets[:, :NUM_ACTIONS] = targets
+        return padded_targets
 
     def _pre_step_motor_control(self, backend: Any, policy_ctrl: np.ndarray) -> np.ndarray:
         active_pos = self.get_dof_pos()
@@ -1812,8 +1833,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             (self._num_envs, len(CALF_INDICES)), self._cfg.control_config.calf_kd, dtype=np.float64
         )
         calf_kd *= self._control_kd_scale
-        return compute_real68_motor_ctrl(
-            policy_ctrl,
+        native_policy_ctrl = compute_ten_four_motor_ctrl(
+            policy_ctrl[:, :NUM_ACTIONS],
             active_pos,
             active_vel,
             hip_kd=hip_kd,
@@ -1825,6 +1846,14 @@ class Real68BalanceEnv(Real68BaseEnv):
             ctrl_upper=self._ctrl_upper,
             out=self._last_motor_ctrl,
         )
+        if self._backend_actuator_count == NUM_ACTIONS:
+            return native_policy_ctrl
+        native_ctrl = np.zeros(
+            (native_policy_ctrl.shape[0], self._backend_actuator_count), dtype=self._np_dtype
+        )
+        native_ctrl[:, :NUM_ACTIONS] = native_policy_ctrl
+        # Gas-spring actuators use affine biasprm and intentionally receive 0.
+        return native_ctrl
 
     def _init_reward_functions(self) -> None:
         self._reward_fns: dict[str, Any] = {
@@ -2189,7 +2218,10 @@ class Real68BalanceEnv(Real68BaseEnv):
         # Curriculum safety is per robot state, not per sensor. With the full
         # collision set, averaging would let one calf contact look harmless
         # merely because more links are instrumented.
-        nonwheel_contact = np.any(nonwheel_contacts > 0.0, axis=1)
+        nonwheel_contact = np.any(
+            nonwheel_contacts[:, _TEN_FOUR_PENALIZED_NONWHEEL_CONTACT_INDICES] > 0.0,
+            axis=1,
+        )
         tilt = np.asarray(
             info.get("termination_tilt", np.zeros((self._num_envs,), dtype=bool)),
             dtype=self._np_dtype,
@@ -2305,23 +2337,25 @@ class Real68BalanceEnv(Real68BaseEnv):
 
     def _curriculum_bin_index(self, magnitude: float, max_abs: float) -> int | None:
         if (
-            magnitude <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
-            or max_abs <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+            magnitude <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
+            or max_abs <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         ):
             return None
-        span = max(max_abs - _REAL68_CURRICULUM_MIN_ABS_COMMAND, 1.0e-6)
+        span = max(max_abs - _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND, 1.0e-6)
         normalized = np.clip(
-            (magnitude - _REAL68_CURRICULUM_MIN_ABS_COMMAND) / span,
+            (magnitude - _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND) / span,
             0.0,
             np.nextafter(1.0, 0.0),
         )
-        return min(int(normalized * _REAL68_CURRICULUM_NUM_BINS), _REAL68_CURRICULUM_NUM_BINS - 1)
+        return min(
+            int(normalized * _TEN_FOUR_CURRICULUM_NUM_BINS), _TEN_FOUR_CURRICULUM_NUM_BINS - 1
+        )
 
     def _curriculum_bucket_upper(self, index: int, max_abs: float) -> float:
-        span = max(max_abs - _REAL68_CURRICULUM_MIN_ABS_COMMAND, 0.0)
+        span = max(max_abs - _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND, 0.0)
         return float(
-            _REAL68_CURRICULUM_MIN_ABS_COMMAND
-            + span * float(index + 1) / float(_REAL68_CURRICULUM_NUM_BINS)
+            _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
+            + span * float(index + 1) / float(_TEN_FOUR_CURRICULUM_NUM_BINS)
         )
 
     def _record_command_segment_stats(
@@ -2345,8 +2379,8 @@ class Real68BalanceEnv(Real68BaseEnv):
         abs_cmd_x = abs(cmd_x)
         abs_cmd_yaw = abs(cmd_yaw)
         if (
-            abs_cmd_x <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
-            and abs_cmd_yaw <= _REAL68_CURRICULUM_MIN_ABS_COMMAND
+            abs_cmd_x <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
+            and abs_cmd_yaw <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         ):
             self._standing_segment_count += 1
             self._standing_segment_steps_sum += float(segment_steps)
@@ -2440,7 +2474,7 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _curriculum_vx_eval(self) -> dict[str, float] | None:
         min_count = max(int(self._cfg.command_curriculum.min_segment_count), 1)
         max_abs = self._curriculum_abs_limit_x()
-        for index in range(_REAL68_CURRICULUM_NUM_BINS - 1, -1, -1):
+        for index in range(_TEN_FOUR_CURRICULUM_NUM_BINS - 1, -1, -1):
             count = int(self._curriculum_vx_count[index])
             if count < min_count:
                 continue
@@ -2463,7 +2497,7 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _curriculum_yaw_eval(self) -> dict[str, float] | None:
         min_count = max(int(self._cfg.command_curriculum.min_segment_count), 1)
         max_abs = self._curriculum_abs_limit_yaw()
-        for index in range(_REAL68_CURRICULUM_NUM_BINS - 1, -1, -1):
+        for index in range(_TEN_FOUR_CURRICULUM_NUM_BINS - 1, -1, -1):
             count = int(self._curriculum_yaw_count[index])
             if count < min_count:
                 continue
@@ -2500,7 +2534,7 @@ class Real68BalanceEnv(Real68BaseEnv):
         linvel_raw_x = np.asarray(linvel[:, 0], dtype=self._np_dtype)
         linvel_raw_y = np.asarray(linvel[:, 1], dtype=self._np_dtype)
         gyro_z = gyro[:, 2]
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         signed_speed = linvel_forward * np.sign(cmd_x)
         mean_signed_vx = np.where(active, signed_speed, 0.0)
         signed_speed_ratio = np.where(
@@ -2579,8 +2613,8 @@ class Real68BalanceEnv(Real68BaseEnv):
         dof_vel = self.get_dof_vel()
         wheel_vel = dof_vel[:, WHEEL_INDICES]
         wheel_target_vel = wheel_exec_actions * float(self._cfg.control_config.wheel_velocity_scale)
-        wheel_surface_speed = -np.mean(wheel_vel, axis=1) * _REAL68_WHEEL_RADIUS
-        wheel_target_surface_speed = -np.mean(wheel_target_vel, axis=1) * _REAL68_WHEEL_RADIUS
+        wheel_surface_speed = -np.mean(wheel_vel, axis=1) * _TEN_FOUR_WHEEL_RADIUS
+        wheel_target_surface_speed = -np.mean(wheel_target_vel, axis=1) * _TEN_FOUR_WHEEL_RADIUS
         wheel_target_error = wheel_target_vel - wheel_vel
         torques = np.asarray(
             info.get("torques", np.zeros((self._num_envs, self._num_action))),
@@ -2609,26 +2643,30 @@ class Real68BalanceEnv(Real68BaseEnv):
         log["metrics/wheel_target_surface_speed"] = float(np.mean(wheel_target_surface_speed))
         log["metrics/mean_abs_wheel_torque"] = float(np.mean(np.abs(wheel_torques)))
         log["metrics/wheel_torque_clip_frac"] = float(np.mean(wheel_torque_clipped))
-        log["metrics/mean_left_hip_action"] = float(np.mean(actions[:, _REAL68_LEFT_HIP_INDEX]))
-        log["metrics/mean_right_hip_action"] = float(np.mean(actions[:, _REAL68_RIGHT_HIP_INDEX]))
-        log["metrics/mean_left_calf_action"] = float(np.mean(actions[:, _REAL68_LEFT_CALF_INDEX]))
-        log["metrics/mean_right_calf_action"] = float(np.mean(actions[:, _REAL68_RIGHT_CALF_INDEX]))
+        log["metrics/mean_left_hip_action"] = float(np.mean(actions[:, _TEN_FOUR_LEFT_HIP_INDEX]))
+        log["metrics/mean_right_hip_action"] = float(np.mean(actions[:, _TEN_FOUR_RIGHT_HIP_INDEX]))
+        log["metrics/mean_left_calf_action"] = float(np.mean(actions[:, _TEN_FOUR_LEFT_CALF_INDEX]))
+        log["metrics/mean_right_calf_action"] = float(
+            np.mean(actions[:, _TEN_FOUR_RIGHT_CALF_INDEX])
+        )
         log["metrics/hip_action_mirror_error"] = float(
             np.mean(
-                np.square(actions[:, _REAL68_LEFT_HIP_INDEX] + actions[:, _REAL68_RIGHT_HIP_INDEX])
+                np.square(
+                    actions[:, _TEN_FOUR_LEFT_HIP_INDEX] + actions[:, _TEN_FOUR_RIGHT_HIP_INDEX]
+                )
             )
         )
         log["metrics/calf_action_mirror_error"] = float(
             np.mean(
                 np.square(
-                    actions[:, _REAL68_LEFT_CALF_INDEX] + actions[:, _REAL68_RIGHT_CALF_INDEX]
+                    actions[:, _TEN_FOUR_LEFT_CALF_INDEX] + actions[:, _TEN_FOUR_RIGHT_CALF_INDEX]
                 )
             )
         )
         log["metrics/wheel_action_sync_error"] = float(
             np.mean(
                 np.square(
-                    actions[:, _REAL68_LEFT_WHEEL_INDEX] - actions[:, _REAL68_RIGHT_WHEEL_INDEX]
+                    actions[:, _TEN_FOUR_LEFT_WHEEL_INDEX] - actions[:, _TEN_FOUR_RIGHT_WHEEL_INDEX]
                 )
             )
         )
@@ -2640,16 +2678,16 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         log["metrics/left_liangan5_contact"] = float(
-            np.mean(nonwheel_contacts[:, _REAL68_LEFT_LIANGAN5_CONTACT_INDEX])
+            np.mean(nonwheel_contacts[:, _TEN_FOUR_LEFT_LIANGAN5_CONTACT_INDEX])
         )
-        log["metrics/right_liangan5_contact"] = float(
-            np.mean(nonwheel_contacts[:, _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX])
+        log["metrics/right_bottom4_guide_contact"] = float(
+            np.mean(nonwheel_contacts[:, _TEN_FOUR_RIGHT_LIANGAN5_CONTACT_INDEX])
         )
         log["metrics/liangan5_contact_gap"] = float(
             np.mean(
                 np.abs(
-                    nonwheel_contacts[:, _REAL68_LEFT_LIANGAN5_CONTACT_INDEX]
-                    - nonwheel_contacts[:, _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX]
+                    nonwheel_contacts[:, _TEN_FOUR_LEFT_LIANGAN5_CONTACT_INDEX]
+                    - nonwheel_contacts[:, _TEN_FOUR_RIGHT_LIANGAN5_CONTACT_INDEX]
                 )
             )
         )
@@ -2814,7 +2852,13 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=bool,
         )
         contact_threshold = float(cfg.nonwheel_contact_threshold)
-        contact_active = np.max(self._nonwheel_contacts, axis=1) > contact_threshold
+        contact_active = (
+            np.max(
+                self._nonwheel_contacts[:, _TEN_FOUR_PENALIZED_NONWHEEL_CONTACT_INDICES],
+                axis=1,
+            )
+            > contact_threshold
+        )
         if cfg.nonwheel_contact_termination:
             self._nonwheel_contact_steps[contact_active] += 1
             self._nonwheel_contact_steps[~contact_active] = 0
@@ -2952,7 +2996,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             clean_actor=clean_actor,
             qacc=qacc,
             wheel_contacts=wheel_contacts,
-            nonwheel_contacts=nonwheel_contacts[:, _REAL68_NONWHEEL_CONTACT_OBSERVATION_INDICES],
+            nonwheel_contacts=nonwheel_contacts[:, _TEN_FOUR_NONWHEEL_CONTACT_OBSERVATION_INDICES],
             dynamics=dynamics,
             dtype=self._np_dtype,
         )
@@ -3295,7 +3339,7 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _reward_recovery_forbidden_contact(self, ctx: RewardContext) -> np.ndarray:
         """Penalize chassis/hip impacts while allowing linkage support in recovery."""
         forbidden = np.max(
-            self._nonwheel_contacts[:, _REAL68_RECOVERY_FORBIDDEN_CONTACT_INDICES], axis=1
+            self._nonwheel_contacts[:, _TEN_FOUR_RECOVERY_FORBIDDEN_CONTACT_INDICES], axis=1
         )
         return np.asarray(forbidden * self._recovery_mask(ctx), dtype=self._np_dtype)
 
@@ -3351,8 +3395,8 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         standing = np.asarray(
-            (np.abs(commands[:, 0]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND)
-            & (np.abs(commands[:, 2]) <= _REAL68_CURRICULUM_MIN_ABS_COMMAND),
+            (np.abs(commands[:, 0]) <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND)
+            & (np.abs(commands[:, 2]) <= _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND),
             dtype=bool,
         )
         return standing & ~self._recovery_mask(ctx)
@@ -3471,7 +3515,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         signed_speed = self._forward_linvel(ctx.linvel) * np.sign(cmd_x)
         signed_ratio = signed_speed / np.maximum(np.abs(cmd_x), 1.0e-6)
         ratio_error = np.square(signed_ratio - 1.0)
@@ -3510,7 +3554,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         cmd_abs = np.maximum(np.abs(cmd_x), 1.0e-6)
         signed_speed = self._forward_linvel(ctx.linvel) * np.sign(cmd_x)
         progress = np.clip(signed_speed / cmd_abs, 0.0, 1.0)
@@ -3522,7 +3566,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         cmd_abs = np.maximum(np.abs(cmd_x), 1.0e-6)
         signed_speed = self._forward_linvel(ctx.linvel) * np.sign(cmd_x)
         gap = np.maximum(cmd_abs - signed_speed, 0.0)
@@ -3543,7 +3587,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         drive = -np.mean(actions[:, WHEEL_INDICES], axis=1) * np.sign(cmd_x)
         drive = np.clip(drive, 0.0, 1.0)
         return np.asarray(np.where(active, drive, 0.0) * self._upright_gate(), dtype=self._np_dtype)
@@ -3551,9 +3595,9 @@ class Real68BalanceEnv(Real68BaseEnv):
     def _reward_leg_symmetry(self, ctx: RewardContext) -> np.ndarray:
         posture_anchor = self._posture_anchor(self._standing_mask(ctx))
         posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES]
-        left = posture_diff[:, _REAL68_LEFT_POSTURE]
-        right = posture_diff[:, _REAL68_RIGHT_POSTURE]
-        mirrored_right = right * _REAL68_MIRROR_SIGNS
+        left = posture_diff[:, _TEN_FOUR_LEFT_POSTURE]
+        right = posture_diff[:, _TEN_FOUR_RIGHT_POSTURE]
+        mirrored_right = right * _TEN_FOUR_MIRROR_SIGNS
         symmetry = np.sum(np.square(left - mirrored_right), axis=1)
         upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
         return np.asarray(symmetry * upright, dtype=self._np_dtype)
@@ -3567,9 +3611,9 @@ class Real68BalanceEnv(Real68BaseEnv):
             ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
             dtype=self._np_dtype,
         )
-        active_drive = np.abs(commands[:, 0]) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active_drive = np.abs(commands[:, 0]) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         hip_mirror = np.square(
-            actions[:, _REAL68_LEFT_HIP_INDEX] + actions[:, _REAL68_RIGHT_HIP_INDEX]
+            actions[:, _TEN_FOUR_LEFT_HIP_INDEX] + actions[:, _TEN_FOUR_RIGHT_HIP_INDEX]
         )
         upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
         return np.asarray(
@@ -3586,9 +3630,9 @@ class Real68BalanceEnv(Real68BaseEnv):
             ctx.info.get("commands", np.zeros((ctx.num_envs, 3), dtype=self._np_dtype)),
             dtype=self._np_dtype,
         )
-        active_drive = np.abs(commands[:, 0]) > (0.5 * _REAL68_CURRICULUM_MIN_ABS_COMMAND)
+        active_drive = np.abs(commands[:, 0]) > (0.5 * _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND)
         calf_mirror = np.square(
-            actions[:, _REAL68_LEFT_CALF_INDEX] + actions[:, _REAL68_RIGHT_CALF_INDEX]
+            actions[:, _TEN_FOUR_LEFT_CALF_INDEX] + actions[:, _TEN_FOUR_RIGHT_CALF_INDEX]
         )
         upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
         return np.asarray(
@@ -3623,22 +3667,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         return np.asarray(np.where(standing, under_height / margin, 0.0), dtype=self._np_dtype)
 
     def _reward_standing_liangan5_contact(self, ctx: RewardContext) -> np.ndarray:
-        standing = self._standing_mask(ctx)
-        liangan5_contact = np.asarray(
-            np.mean(
-                self._nonwheel_contacts[
-                    :,
-                    [
-                        _REAL68_LEFT_LIANGAN5_CONTACT_INDEX,
-                        _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX,
-                    ],
-                ],
-                axis=1,
-            ),
-            dtype=self._np_dtype,
-        )
-        upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
-        return np.asarray(np.where(standing, liangan5_contact * upright, 0.0), dtype=self._np_dtype)
+        # The bottom guide wheels are deliberate support elements.  Their
+        # contact must not alter the standing objective.
+        return np.zeros((ctx.num_envs,), dtype=self._np_dtype)
 
     def _reward_standing_orientation(self, ctx: RewardContext) -> np.ndarray:
         assert ctx.gravity is not None
@@ -3661,9 +3692,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         standing = self._standing_mask(ctx)
         posture_anchor = self._posture_anchor(standing)
         posture_diff = ctx.dof_pos[:, POSTURE_INDICES] - posture_anchor[:, POSTURE_INDICES]
-        left = posture_diff[:, _REAL68_LEFT_POSTURE]
-        right = posture_diff[:, _REAL68_RIGHT_POSTURE]
-        mirrored_right = right * _REAL68_MIRROR_SIGNS
+        left = posture_diff[:, _TEN_FOUR_LEFT_POSTURE]
+        right = posture_diff[:, _TEN_FOUR_RIGHT_POSTURE]
+        mirrored_right = right * _TEN_FOUR_MIRROR_SIGNS
         symmetry = np.sum(np.square(left - mirrored_right), axis=1)
         return np.asarray(np.where(standing, symmetry, 0.0), dtype=self._np_dtype)
 
@@ -3700,7 +3731,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         signed_speed = np.asarray(
             self._forward_linvel(ctx.linvel) * np.sign(cmd_x),
             dtype=self._np_dtype,
@@ -3718,7 +3749,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         signed_speed = np.asarray(
             self._forward_linvel(ctx.linvel) * np.sign(cmd_x),
             dtype=self._np_dtype,
@@ -3736,7 +3767,7 @@ class Real68BalanceEnv(Real68BaseEnv):
             dtype=self._np_dtype,
         )
         cmd_x = np.asarray(commands[:, 0], dtype=self._np_dtype)
-        active = np.abs(cmd_x) > _REAL68_CURRICULUM_MIN_ABS_COMMAND
+        active = np.abs(cmd_x) > _TEN_FOUR_CURRICULUM_MIN_ABS_COMMAND
         linvel_forward = self._forward_linvel(ctx.linvel)
         signed_speed = np.asarray(linvel_forward * np.sign(cmd_x), dtype=self._np_dtype)
         positive_signed = np.maximum(signed_speed, 0.0)
@@ -3779,7 +3810,13 @@ class Real68BalanceEnv(Real68BaseEnv):
         return np.asarray(np.maximum(targets - base_height, 0.0) / margin, dtype=self._np_dtype)
 
     def _reward_nonwheel_contact(self, ctx: RewardContext) -> np.ndarray:
-        contact = np.asarray(np.max(self._nonwheel_contacts, axis=1), dtype=self._np_dtype)
+        contact = np.asarray(
+            np.max(
+                self._nonwheel_contacts[:, _TEN_FOUR_PENALIZED_NONWHEEL_CONTACT_INDICES],
+                axis=1,
+            ),
+            dtype=self._np_dtype,
+        )
         return np.asarray(
             contact * self._recovery_penalty_factor(ctx, recovery_factor=0.0),
             dtype=self._np_dtype,
@@ -3795,33 +3832,9 @@ class Real68BalanceEnv(Real68BaseEnv):
         )
 
     def _reward_liangan5_contact(self, ctx: RewardContext) -> np.ndarray:
-        liangan5_contact = np.asarray(
-            np.mean(
-                self._nonwheel_contacts[
-                    :,
-                    [
-                        _REAL68_LEFT_LIANGAN5_CONTACT_INDEX,
-                        _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX,
-                    ],
-                ],
-                axis=1,
-            ),
-            dtype=self._np_dtype,
-        )
-        upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
-        return np.asarray(
-            liangan5_contact * upright * ~self._recovery_mask(ctx), dtype=self._np_dtype
-        )
+        # Guide-wheel ground contact is expected during normal locomotion.
+        return np.zeros((ctx.num_envs,), dtype=self._np_dtype)
 
     def _reward_liangan5_contact_asymmetry(self, ctx: RewardContext) -> np.ndarray:
-        left_contact = np.asarray(
-            self._nonwheel_contacts[:, _REAL68_LEFT_LIANGAN5_CONTACT_INDEX], dtype=self._np_dtype
-        )
-        right_contact = np.asarray(
-            self._nonwheel_contacts[:, _REAL68_RIGHT_LIANGAN5_CONTACT_INDEX], dtype=self._np_dtype
-        )
-        upright = rewards.upright_scale(ctx.gravity, ctx.num_envs)
-        return np.asarray(
-            np.abs(left_contact - right_contact) * upright * ~self._recovery_mask(ctx),
-            dtype=self._np_dtype,
-        )
+        # Do not punish asymmetric guide-wheel support either.
+        return np.zeros((ctx.num_envs,), dtype=self._np_dtype)

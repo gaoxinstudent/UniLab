@@ -264,6 +264,15 @@ env:
     post_recovery_stability_seconds: 2.0
     timeout_seconds: 12.0
     final_timeout_seconds: 15.0
+  # Power-on / near-zero-joint startup reset channel. The physical robot boots
+  # with all joints near zero (wheels on the ground, base ~0.19 m), but the
+  # default reset only covers the tall keyframe stance, so sim2real fails at
+  # startup. This makes a fraction of resets start from the cold-start pose so
+  # the standing bootstrap becomes a real "get-up" curriculum.
+  cold_start:
+    enabled: true
+    fraction: 0.25
+    joint_noise: 0.05
   termination_config:
     terrain_out_of_bounds: true
     terrain_distance_buffer: 3.0

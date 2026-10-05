@@ -465,6 +465,16 @@ def main(cfg: DictConfig) -> None:
 
             if resume_path is not None:
                 runner.load(str(resume_path))
+                # Restore the env-owned command/curriculum state on training
+                # resume. Without this the fresh env silently re-locks the
+                # standing bootstrap and resets vx/yaw progress, so a resumed
+                # run never continues the schedule it checkpointed.
+                if hasattr(wrapped_env, "load_playback_state_dict"):
+                    _resume_ckpt = torch.load(resume_path, map_location="cpu", weights_only=True)
+                    _resume_env_state = _resume_ckpt.get("env_state")
+                    if _resume_env_state is not None:
+                        wrapped_env.load_playback_state_dict(_resume_env_state)
+                        print("[resume] restored env command/curriculum state")
 
             train_start_wall = time.time()
             runner.learn(num_learning_iterations=max_iterations, init_at_random_ep_len=True)

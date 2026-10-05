@@ -1,0 +1,41 @@
+<mujoco model="wheelbipe_924 locomotion task">
+  <sensor>
+    <!-- 车轮接触传感器 -->
+    <framepos name="left_wheel_pos" objtype="body" objname="left_wheel_link"/>
+    <framepos name="right_wheel_pos" objtype="body" objname="right_wheel_link"/>
+
+    <!-- 基座IMU -->
+    <gyro name="base_gyro" site="imu_site"/>
+    <accelerometer name="base_accel" site="imu_site"/>
+    <framequat name="base_quat" objtype="site" objname="imu_site"/>
+
+    <!-- 关节位置和速度 -->
+    <jointpos name="left_rear1_pos" joint="left_rear1_joint"/>
+    <jointpos name="left_rear2_pos" joint="left_rear2_joint"/>
+    <jointpos name="left_wheel_pos_joint" joint="left_wheel_joint"/>
+    <jointpos name="right_rear1_pos" joint="right_rear1_joint"/>
+    <jointpos name="right_rear2_pos" joint="right_rear2_joint"/>
+    <jointpos name="right_wheel_pos_joint" joint="right_wheel_joint"/>
+
+    <jointvel name="left_rear1_vel" joint="left_rear1_joint"/>
+    <jointvel name="left_rear2_vel" joint="left_rear2_joint"/>
+    <jointvel name="left_wheel_vel" joint="left_wheel_joint"/>
+    <jointvel name="right_rear1_vel" joint="right_rear1_joint"/>
+    <jointvel name="right_rear2_vel" joint="right_rear2_joint"/>
+    <jointvel name="right_wheel_vel" joint="right_wheel_joint"/>
+  </sensor>
+
+  <keyframe>
+    <key name="home" qpos="
+      0 0 0.25
+      1 0 0 0
+      0 0.3 0 0 0
+      0 0.3 0 0 0
+      0 0
+      0 0 0 0
+      0 0 0 0
+      0 0 0 0 0 0
+      0 0 0 0 0 0"
+      ctrl="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
